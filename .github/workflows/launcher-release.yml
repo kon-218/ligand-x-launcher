@@ -1,0 +1,293 @@
+name: Build & Release Launcher
+
+on:
+  push:
+    tags:
+      - 'launcher-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., 1.0.0)'
+        required: true
+        default: '1.0.0'
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.21'
+  WAILS_VERSION: 'latest'
+
+jobs:
+  # ============================================================
+  # Linux Build - Creates AppImage
+  # ============================================================
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config libfuse2t64 file imagemagick
+
+      - name: Build Linux binary
+        run: |
+          WAILS_BIN="$(go env GOPATH)/bin/wails"
+          "$WAILS_BIN" build -platform linux/amd64 -tags webkit2_41 -o ligandx-launcher
+
+      - name: Download linuxdeploy
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+
+      - name: Create AppImage
+        run: |
+          # Create AppDir structure
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/share/icons/hicolor/1024x1024/apps
+
+          # Copy binary
+          cp build/bin/ligandx-launcher AppDir/usr/bin/
+
+          # Copy icons
+          cp build/appicon.png AppDir/usr/share/icons/hicolor/1024x1024/apps/ligandx-launcher.png
+          convert build/appicon.png -resize 256x256 AppDir/usr/share/icons/hicolor/256x256/apps/ligandx-launcher.png
+          cp AppDir/usr/share/icons/hicolor/256x256/apps/ligandx-launcher.png AppDir/ligandx-launcher.png
+
+          # Copy desktop file
+          cp build/linux/ligandx-launcher.desktop AppDir/usr/share/applications/
+          cp build/linux/ligandx-launcher.desktop AppDir/
+
+          # Build AppImage
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --desktop-file AppDir/usr/share/applications/ligandx-launcher.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/ligandx-launcher.png \
+            --output appimage
+
+          # Rename output
+          mv Ligand-X_Launcher*.AppImage ligandx-launcher-linux-amd64.AppImage || \
+          mv Ligandx-launcher*.AppImage ligandx-launcher-linux-amd64.AppImage || \
+          mv *.AppImage ligandx-launcher-linux-amd64.AppImage
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ligandx-launcher-linux-amd64.AppImage
+          path: ligandx-launcher-linux-amd64.AppImage
+          retention-days: 5
+
+  # ============================================================
+  # Windows Build - Creates NSIS Installer
+  # ============================================================
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:PATH;$env:USERPROFILE\go\bin"
+          wails build -platform windows/amd64 -nsis
+
+          # Find and rename the installer
+          $installer = Get-ChildItem -Path "build/bin" -Filter "*installer*.exe" | Select-Object -First 1
+          if ($installer) {
+            Move-Item $installer.FullName "build/bin/ligandx-launcher-windows-amd64-installer.exe"
+          } else {
+            # Fallback: just rename the exe if no installer was created
+            Move-Item "build/bin/ligandx-launcher.exe" "build/bin/ligandx-launcher-windows-amd64-installer.exe" -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ligandx-launcher-windows-amd64-installer.exe
+          path: build/bin/ligandx-launcher-windows-amd64-installer.exe
+          retention-days: 5
+
+  # ============================================================
+  # macOS Universal Build - Creates DMG (Intel + Apple Silicon)
+  # ============================================================
+  build-macos-universal:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build macOS universal app
+        run: |
+          WAILS_BIN="$(go env GOPATH)/bin/wails"
+          "$WAILS_BIN" build -platform darwin/universal
+
+      - name: Create DMG
+        run: |
+          # Find the .app bundle
+          APP_PATH="build/bin/ligandx-launcher.app"
+          if [ ! -d "$APP_PATH" ]; then
+            APP_PATH=$(find build/bin -name "*.app" -type d | head -1)
+          fi
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "Error: .app bundle not found"
+            ls -la build/bin/
+            exit 1
+          fi
+
+          echo "Found app at: $APP_PATH"
+
+          create-dmg \
+            --volname "Ligand-X Launcher" \
+            --volicon "build/darwin/appicon.png" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --app-drop-link 400 190 \
+            --icon "$(basename "$APP_PATH")" 200 190 \
+            --hide-extension "$(basename "$APP_PATH")" \
+            --no-internet-enable \
+            "ligandx-launcher-darwin-universal.dmg" \
+            "$APP_PATH" || {
+              if [ -f "ligandx-launcher-darwin-universal.dmg" ]; then
+                echo "DMG created successfully"
+              else
+                echo "DMG creation failed"
+                exit 1
+              fi
+            }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ligandx-launcher-darwin-universal.dmg
+          path: ligandx-launcher-darwin-universal.dmg
+          retention-days: 5
+
+  # ============================================================
+  # Create GitHub Release
+  # ============================================================
+  release:
+    needs: [build-linux, build-windows, build-macos-universal]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create tag for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "launcher-v${VERSION}"
+          git push -f origin "launcher-v${VERSION}"
+
+      - name: Build runtime bundle
+        run: ./scripts/build-runtime-bundle.sh artifacts/runtime
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('launcher-v{0}', inputs.version) || github.ref_name }}
+          name: Ligand-X Launcher ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/ligandx-launcher-linux-amd64.AppImage/ligandx-launcher-linux-amd64.AppImage
+            artifacts/ligandx-launcher-windows-amd64-installer.exe/ligandx-launcher-windows-amd64-installer.exe
+            artifacts/ligandx-launcher-darwin-universal.dmg/ligandx-launcher-darwin-universal.dmg
+            artifacts/runtime/ligand-x-runtime.zip
+          body: |
+            ## Ligand-X Launcher ${{ github.ref_name }}
+
+            Cross-platform GUI launcher for the Ligand-X molecular analysis platform.
+
+            ### Downloads
+
+            | Platform | File | Installation |
+            |----------|------|--------------|
+            | **Windows** (64-bit) | `ligandx-launcher-windows-amd64-installer.exe` | Run installer, follow prompts |
+            | **Runtime Bundle** | `ligand-x-runtime.zip` | Downloaded automatically by the launcher on first run |
+            | **macOS** (Intel + Apple Silicon) | `ligandx-launcher-darwin-universal.dmg` | Open DMG, drag to Applications |
+            | **Linux** (64-bit) | `ligandx-launcher-linux-amd64.AppImage` | `chmod +x`, double-click to run |
+
+            ### Requirements
+
+            - **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux)
+            - The Ligand-X source code (clone this repository)
+
+            ### Quick Start
+
+            1. Download the appropriate file for your operating system
+            2. Install/run the launcher:
+               - **Windows**: Run the installer, launch from Start Menu
+               - **macOS**: Open DMG, drag app to Applications, launch from Applications
+               - **Linux**: Make executable (`chmod +x *.AppImage`), double-click to run
+            3. Select your Ligand-X project folder (where `docker-compose.yml` is located)
+            4. Click "Start" to launch the services
+            5. Click "Open App" to access Ligand-X in your browser
+
+            ### macOS Gatekeeper Note
+
+            On first launch, macOS may show "unidentified developer" warning. To open:
+            - Right-click the app → Open → Click "Open" in the dialog
+            - Or: System Preferences → Security & Privacy → "Open Anyway"
+
+            ### Linux AppImage Note
+
+            If double-click doesn't work, make it executable first:
+            ```bash
+            chmod +x ligandx-launcher-linux-amd64.AppImage
+            ./ligandx-launcher-linux-amd64.AppImage
+            ```

@@ -1,0 +1,33 @@
+# Build outputs (but keep icons and desktop files)
+build/bin/
+dist/
+
+# Keep these build assets
+!build/appicon.svg
+!build/appicon.png
+!build/darwin/
+!build/darwin/appicon.png
+!build/windows/
+!build/windows/icon.ico
+!build/linux/
+!build/linux/ligandx-launcher.desktop
+
+# Binaries - NEVER commit these
+*.exe
+*.app
+*.dmg
+*.AppImage
+ligandx-launcher
+ligandx-launcher-*
+
+# Go
+go.sum
+
+# Wails generated
+frontend/wailsjs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

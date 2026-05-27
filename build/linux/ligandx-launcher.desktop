@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Ligand-X Launcher
+Comment=Cross-platform GUI launcher for the Ligand-X molecular analysis platform
+Exec=ligandx-launcher
+Icon=ligandx-launcher
+Type=Application
+Categories=Science;Development;Education;
+Keywords=molecular;chemistry;docker;launcher;ligand;
+Terminal=false
+StartupWMClass=ligandx-launcher

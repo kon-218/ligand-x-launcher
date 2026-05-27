@@ -1,0 +1,20 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "ligandx-launcher",
+  "outputfilename": "ligandx-launcher",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "Ligand-X Team",
+    "email": "contact@ligand-x.io"
+  },
+  "info": {
+    "companyName": "Ligand-X",
+    "productName": "Ligand-X Launcher",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2026 Ligand-X Team",
+    "comments": "Cross-platform launcher for Ligand-X molecular analysis platform"
+  }
+}
