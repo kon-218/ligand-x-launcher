@@ -21,7 +21,7 @@ ligandx-launcher
 ligandx-launcher-*
 
 # Go
-go.sum
+# go.sum is intentionally committed — pins dependency checksums for reproducible builds
 
 # Wails generated
 frontend/wailsjs/
