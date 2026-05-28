@@ -1,0 +1,1202 @@
+# ============================================================
+# Ligand-X Docker Compose Configuration (Production-Ready)
+# ============================================================
+# This is the base configuration suitable for production deployment.
+#
+# Development: docker-compose up (auto-loads docker-compose.override.yml)
+# Production:  docker-compose -f docker-compose.yml up -d
+# Testing:     docker-compose -f docker-compose.yml -f docker-compose.test.yml up
+#
+# Production Standards:
+# - Security: No hardcoded passwords, environment-based secrets
+# - Reliability: Health checks, restart policies, graceful shutdown
+# - Resource Management: CPU/memory limits tunable via .env.production
+#
+# Resource Limits:
+# All CPU/memory limits and reservations are configured via environment
+# variables so you can tune them in .env.production without touching this file.
+# See .env.production.template for the full list with defaults and guidance.
+# ============================================================
+
+# ============================================================
+# Networks
+# ============================================================
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    # Note: Backend services need external access for PDB files, MSA APIs, etc.
+    # For production security, use firewall rules at infrastructure level instead
+
+services:
+  # ============================================================
+  # Gateway Service
+  # ============================================================
+  gateway:
+    image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: service-gateway
+    command: [ "gateway" ]
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    networks:
+      - frontend
+      - backend
+    environment:
+      - REDIS_URL=${REDIS_URL:?REDIS_URL must be set (e.g. redis://redis:6379/0)}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - STRUCTURE_URL=http://structure:8001
+      - DOCKING_URL=http://docking:8002
+      - MD_URL=http://md:8003
+      - ADMET_URL=http://admet:8004
+      - BOLTZ2_URL=http://boltz2:8005
+      - QC_URL=http://qc:8006
+      - ALIGNMENT_URL=http://alignment:8007
+      - KETCHER_URL=http://ketcher:8008
+      - MSA_URL=http://msa:8009
+      - ABFE_URL=http://abfe:8010
+      - RBFE_URL=http://rbfe:8011
+      - POCKET_FINDER_URL=http://pocket-finder:8012
+      - REINVENT_URL=http://reinvent:8013
+      - KINETICS_URL=http://kinetics:8014
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - LIGANDX_API_KEY=${LIGANDX_API_KEY:-}
+      - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
+      - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
+      - LIGANDX_LICENSE_FILE=/app/data/license/ligandx-license.json
+    volumes:
+      - ./data/license:/app/data/license:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${GATEWAY_CPU_LIMIT:-2}'
+          memory: ${GATEWAY_MEM_LIMIT:-2G}
+        reservations:
+          cpus: '${GATEWAY_CPU_RES:-0.5}'
+          memory: ${GATEWAY_MEM_RES:-512M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # Lightweight Microservices (base environment ~1.5GB)
+  # ============================================================
+  structure:
+    image: ghcr.io/kon-218/ligand-x/structure:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: service-structure
+    command: [ "structure", "8001" ]
+    networks:
+      - backend
+    expose:
+      - "8001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${STRUCTURE_CPU_LIMIT:-3}'
+          memory: ${STRUCTURE_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '${STRUCTURE_CPU_RES:-0.5}'
+          memory: ${STRUCTURE_MEM_RES:-1G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  pocket-finder:
+    image: ghcr.io/kon-218/ligand-x/pocket-finder:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: service-pocket-finder
+    command: [ "pocket_finder", "8012" ]
+    networks:
+      - backend
+    volumes:
+      - ${DEEPPOCKET_MODELS_PATH:-/opt/deeppocket_models}:/models:ro
+    expose:
+      - "8012"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEEPPOCKET_MODELS_PATH=/models
+      - P2RANK_COMMAND=${P2RANK_COMMAND:-/opt/p2rank/prank}
+      - P2RANK_CONFIG=${P2RANK_CONFIG:-default}
+      - P2RANK_TIMEOUT_SECONDS=${P2RANK_TIMEOUT_SECONDS:-180}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${POCKET_FINDER_CPU_LIMIT:-3}'
+          memory: ${POCKET_FINDER_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '${POCKET_FINDER_CPU_RES:-0.5}'
+          memory: ${POCKET_FINDER_MEM_RES:-1G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  reinvent:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/reinvent:${VERSION:-latest}
+    command: [ "reinvent", "8013" ]
+    networks:
+      - backend
+    volumes:
+      - ${REINVENT_MODELS_PATH:-/opt/reinvent_models}:/models:ro
+      - reinvent_campaigns:/app/data/reinvent_campaigns
+    expose:
+      - "8013"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REINVENT_MODELS_PATH=/models
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8013/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${REINVENT_CPU_LIMIT:-2}'
+          memory: ${REINVENT_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '${REINVENT_CPU_RES:-0.5}'
+          memory: ${REINVENT_MEM_RES:-1G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  kinetics:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/kinetics:${VERSION:-latest}
+    command: [ "kinetics", "8014" ]
+    networks:
+      - backend
+    volumes:
+      - kinetics_jobs:/app/data/kinetics_jobs
+    expose:
+      - "8014"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - KINETICS_SCRATCH=/app/data/kinetics_jobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8014/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${KINETICS_CPU_LIMIT:-2}'
+          memory: ${KINETICS_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '${KINETICS_CPU_RES:-0.5}'
+          memory: ${KINETICS_MEM_RES:-1G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  alignment:
+    image: ghcr.io/kon-218/ligand-x/alignment:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: service-alignment
+    command: [ "alignment", "8007" ]
+    networks:
+      - backend
+    expose:
+      - "8007"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8007/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${ALIGNMENT_CPU_LIMIT:-1}'
+          memory: ${ALIGNMENT_MEM_LIMIT:-2G}
+        reservations:
+          cpus: '${ALIGNMENT_CPU_RES:-0.25}'
+          memory: ${ALIGNMENT_MEM_RES:-512M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  ketcher:
+    image: ghcr.io/kon-218/ligand-x/ketcher:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: service-ketcher
+    command: [ "ketcher", "8008" ]
+    networks:
+      - backend
+    expose:
+      - "8008"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${KETCHER_CPU_LIMIT:-1}'
+          memory: ${KETCHER_MEM_LIMIT:-2G}
+        reservations:
+          cpus: '${KETCHER_CPU_RES:-0.25}'
+          memory: ${KETCHER_MEM_RES:-512M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  msa:
+    image: ghcr.io/kon-218/ligand-x/msa:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: service-msa
+    command: [ "msa", "8009" ]
+    networks:
+      - backend
+    volumes:
+      - msa_cache:/app/data/msa_cache
+    expose:
+      - "8009"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8009/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${MSA_CPU_LIMIT:-2}'
+          memory: ${MSA_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '${MSA_CPU_RES:-0.5}'
+          memory: ${MSA_MEM_RES:-1G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # Docking Service (~2.5GB)
+  # ============================================================
+  docking:
+    image: ghcr.io/kon-218/ligand-x/docking:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: service-docking
+    command: [ "docking", "8002" ]
+    networks:
+      - backend
+    volumes:
+      - docking_outputs:/app/data/docking_outputs
+    expose:
+      - "8002"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${DOCKING_CPU_LIMIT:-4}'
+          memory: ${DOCKING_MEM_LIMIT:-8G}
+        reservations:
+          cpus: '${DOCKING_CPU_RES:-1}'
+          memory: ${DOCKING_MEM_RES:-2G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # GPU Services (MD environment ~4GB)
+  # ============================================================
+  md:
+    image: ghcr.io/kon-218/ligand-x/md:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: service-md
+    command: [ "md", "8003" ]
+    networks:
+      - backend
+    volumes:
+      - md_outputs:/app/data/md_outputs
+    expose:
+      - "8003"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${MD_CPU_LIMIT:-4}'
+          memory: ${MD_MEM_LIMIT:-16G}
+        reservations:
+          cpus: '${MD_CPU_RES:-2}'
+          memory: ${MD_MEM_RES:-4G}
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  abfe:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/abfe:${VERSION:-latest}
+    command: [ "abfe", "8010" ]
+    networks:
+      - backend
+    volumes:
+      - abfe_outputs:/app/data/abfe_outputs
+    expose:
+      - "8010"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${ABFE_CPU_LIMIT:-4}'
+          memory: ${ABFE_MEM_LIMIT:-16G}
+        reservations:
+          cpus: '${ABFE_CPU_RES:-2}'
+          memory: ${ABFE_MEM_RES:-4G}
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  rbfe:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/rbfe:${VERSION:-latest}
+    command: [ "rbfe", "8011" ]
+    networks:
+      - backend
+    volumes:
+      - rbfe_outputs:/app/data/rbfe_outputs
+    expose:
+      - "8011"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - RBFE_OUTPUT_DIR=/app/data/rbfe_outputs
+      - DOCKING_URL=http://docking:8002
+    depends_on:
+      - docking
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${RBFE_CPU_LIMIT:-4}'
+          memory: ${RBFE_MEM_LIMIT:-16G}
+        reservations:
+          cpus: '${RBFE_CPU_RES:-2}'
+          memory: ${RBFE_MEM_RES:-4G}
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # ADMET Service (~3GB with PyTorch)
+  # ============================================================
+  admet:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/admet:${VERSION:-latest}
+    command: [ "admet", "8004" ]
+    networks:
+      - backend
+    expose:
+      - "8004"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${ADMET_CPU_LIMIT:-2}'
+          memory: ${ADMET_MEM_LIMIT:-8G}
+        reservations:
+          cpus: '${ADMET_CPU_RES:-0.5}'
+          memory: ${ADMET_MEM_RES:-2G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # Boltz2 Service (~6GB with PyTorch + CUDA)
+  # ============================================================
+  boltz2:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/boltz2:${VERSION:-latest}
+    command: [ "boltz2", "8005" ]
+    networks:
+      - backend
+    volumes:
+      - msa_cache:/app/data/msa_cache
+      - boltz_outputs:/app/data/boltz_results_input
+    expose:
+      - "8005"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - BOLTZ_MSA_USERNAME=${BOLTZ_MSA_USERNAME:-}
+      - BOLTZ_MSA_PASSWORD=${BOLTZ_MSA_PASSWORD:-}
+      - MSA_API_KEY_VALUE=${MSA_API_KEY_VALUE:-}
+      - API_KEY_HEADER=${API_KEY_HEADER:-X-API-Key}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${BOLTZ2_CPU_LIMIT:-4}'
+          memory: ${BOLTZ2_MEM_LIMIT:-16G}
+        reservations:
+          cpus: '${BOLTZ2_CPU_RES:-2}'
+          memory: ${BOLTZ2_MEM_RES:-6G}
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: '8gb'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # QC Service (~2.5GB)
+  # ============================================================
+  qc:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/qc:${VERSION:-latest}
+    command: [ "qc", "8006" ]
+    networks:
+      - backend
+    expose:
+      - "8006"
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - ORCA_PATH=/opt/orca/orca
+      - SECRET_KEY=${QC_SECRET_KEY:?Set QC_SECRET_KEY in .env or .env.production}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - qc_jobs:/app/data/qc_jobs
+      - qc_results:/app/data/qc_results_db
+      - ${ORCA_HOST_PATH:-/opt/orca}:/opt/orca:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${QC_CPU_LIMIT:-4}'
+          memory: ${QC_MEM_LIMIT:-8G}
+        reservations:
+          cpus: '${QC_CPU_RES:-1}'
+          memory: ${QC_MEM_RES:-2G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # Celery Workers
+  # ============================================================
+
+  # QC Worker for quantum chemistry calculations
+  worker-qc:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${VERSION:-latest}
+    command: [ "worker-qc" ]
+    networks:
+      - backend
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - ORCA_PATH=/opt/orca/orca
+      - SECRET_KEY=${QC_SECRET_KEY:?Set QC_SECRET_KEY in .env or .env.production}
+      - CELERY_CONCURRENCY=${QC_WORKER_CONCURRENCY:-2}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qc:
+        condition: service_healthy
+    volumes:
+      - qc_jobs:/app/data/qc_jobs
+      - qc_results:/app/data/qc_results_db
+      - ${ORCA_HOST_PATH:-/opt/orca}:/opt/orca:ro
+    healthcheck:
+      test: ["CMD", "celery", "-A", "services.qc.tasks", "inspect", "ping"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${WORKER_QC_CPU_LIMIT:-8}'
+          memory: ${WORKER_QC_MEM_LIMIT:-16G}
+        reservations:
+          cpus: '${WORKER_QC_CPU_RES:-2}'
+          memory: ${WORKER_QC_MEM_RES:-4G}
+    shm_size: '2gb'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # GPU Worker for short/fast tasks (MD, Boltz2, ADMET)
+  worker-gpu-short:
+    image: ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: worker-gpu
+    command: [ "worker-gpu-short" ]
+    networks:
+      - backend
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - CELERY_CONCURRENCY=${GPU_SHORT_CONCURRENCY:-2}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - md_outputs:/app/data/md_outputs
+    healthcheck:
+      test: ["CMD", "celery", "-A", "lib.tasks.gpu_short_tasks", "inspect", "ping"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${WORKER_GPU_SHORT_CPU_LIMIT:-8}'
+          memory: ${WORKER_GPU_SHORT_MEM_LIMIT:-32G}
+        reservations:
+          cpus: '${WORKER_GPU_SHORT_CPU_RES:-4}'
+          memory: ${WORKER_GPU_SHORT_MEM_RES:-8G}
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # GPU Worker for long-running tasks (ABFE, RBFE)
+  worker-gpu-long:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${VERSION:-latest}
+    command: [ "worker-gpu-long" ]
+    networks:
+      - backend
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - CELERY_CONCURRENCY=${GPU_LONG_CONCURRENCY:-1}
+      - RBFE_OUTPUT_DIR=/app/data/rbfe_outputs
+      - ABFE_OUTPUT_DIR=/app/data/abfe_outputs
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - abfe_outputs:/app/data/abfe_outputs
+      - rbfe_outputs:/app/data/rbfe_outputs
+    healthcheck:
+      test: ["CMD", "celery", "-A", "lib.tasks.gpu_long_tasks", "inspect", "ping"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${WORKER_GPU_LONG_CPU_LIMIT:-12}'
+          memory: ${WORKER_GPU_LONG_MEM_LIMIT:-48G}
+        reservations:
+          cpus: '${WORKER_GPU_LONG_CPU_RES:-4}'
+          memory: ${WORKER_GPU_LONG_MEM_RES:-16G}
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # CPU Worker for batch docking
+  worker-cpu:
+    image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: worker-docking
+    command: [ "worker-cpu" ]
+    networks:
+      - backend
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - CELERY_CONCURRENCY=${CPU_WORKER_CONCURRENCY:-4}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - docking_outputs:/app/data/docking_outputs
+    healthcheck:
+      test: ["CMD", "celery", "-A", "lib.tasks.cpu_docking_tasks", "inspect", "ping"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${WORKER_CPU_CPU_LIMIT:-16}'
+          memory: ${WORKER_CPU_MEM_LIMIT:-32G}
+        reservations:
+          cpus: '${WORKER_CPU_CPU_RES:-4}'
+          memory: ${WORKER_CPU_MEM_RES:-8G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # REINVENT Worker for generative campaigns
+  worker-reinvent:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${VERSION:-latest}
+    command: [ "worker-reinvent" ]
+    networks:
+      - backend
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - REINVENT_MODELS_PATH=${REINVENT_MODELS_PATH:-/models}
+      - CELERY_CONCURRENCY=${REINVENT_WORKER_CONCURRENCY:-1}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ${REINVENT_MODELS_PATH:-/opt/reinvent_models}:/models:ro
+      - reinvent_campaigns:/app/data/reinvent_campaigns
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A lib.tasks.reinvent_tasks inspect ping -d worker-reinvent@$${HOSTNAME}"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${WORKER_REINVENT_CPU_LIMIT:-8}'
+          memory: ${WORKER_REINVENT_MEM_LIMIT:-16G}
+        reservations:
+          cpus: '${WORKER_REINVENT_CPU_RES:-2}'
+          memory: ${WORKER_REINVENT_MEM_RES:-4G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker-kinetics:
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-kinetics:${VERSION:-latest}
+    command: [ "worker-kinetics" ]
+    networks:
+      - backend
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - CELERY_CONCURRENCY=${KINETICS_WORKER_CONCURRENCY:-1}
+      - KINETICS_SCRATCH=/app/data/kinetics_jobs
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - kinetics_jobs:/app/data/kinetics_jobs
+    healthcheck:
+      test: ["CMD", "celery", "-A", "lib.tasks.kinetics_tasks", "inspect", "ping"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${WORKER_KINETICS_CPU_LIMIT:-12}'
+          memory: ${WORKER_KINETICS_MEM_LIMIT:-48G}
+        reservations:
+          cpus: '${WORKER_KINETICS_CPU_RES:-4}'
+          memory: ${WORKER_KINETICS_MEM_RES:-16G}
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+  # ============================================================
+  # Celery Beat Scheduler
+  # ============================================================
+  # Schedules periodic maintenance tasks (expired job cleanup, output cleanup)
+  # Only one beat instance should run; use this for production deployments.
+  celery-beat:
+    image: ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      target: worker-gpu-short
+    command: [ "celery", "-A", "lib.tasks.gpu_tasks", "beat", "-l", "info", "--scheduler", "celery.beat:PersistentScheduler", "--schedule", "/app/celery-beat/celerybeat-schedule" ]
+    networks:
+      - backend
+    volumes:
+      - celery_beat_data:/app/celery-beat
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "celery", "-A", "lib.tasks.gpu_tasks", "inspect", "active_queues" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${CELERY_BEAT_CPU_LIMIT:-1}'
+          memory: ${CELERY_BEAT_MEM_LIMIT:-1G}
+        reservations:
+          cpus: '${CELERY_BEAT_CPU_RES:-0.5}'
+          memory: ${CELERY_BEAT_MEM_RES:-256M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # Infrastructure
+  # ============================================================
+
+  # RabbitMQ Message Broker for Celery
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: ligandx-rabbitmq
+    hostname: rabbitmq
+    networks:
+      - backend
+    ports:
+      - "127.0.0.1:${RABBITMQ_MGMT_PORT:-15672}:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:?RABBITMQ_USER must be set}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set}
+      - RABBITMQ_DEFAULT_VHOST=/
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./config/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${RABBITMQ_CPU_LIMIT:-2}'
+          memory: ${RABBITMQ_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '${RABBITMQ_CPU_RES:-0.5}'
+          memory: ${RABBITMQ_MEM_RES:-1G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    container_name: ligandx-redis
+    hostname: redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set} --appendonly yes --appendfsync everysec
+    networks:
+      - backend
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${REDIS_CPU_LIMIT:-1}'
+          memory: ${REDIS_MEM_LIMIT:-2G}
+        reservations:
+          cpus: '${REDIS_CPU_RES:-0.25}'
+          memory: ${REDIS_MEM_RES:-512M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ligandx-postgres
+    networks:
+      - backend
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:?POSTGRES_USER must be set}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=${POSTGRES_DB:?POSTGRES_DB must be set}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ligandx}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${POSTGRES_CPU_LIMIT:-2}'
+          memory: ${POSTGRES_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '${POSTGRES_CPU_RES:-0.5}'
+          memory: ${POSTGRES_MEM_RES:-1G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Celery Flower - Task monitoring dashboard
+  flower:
+    image: mher/flower:2.0
+    container_name: ligandx-flower
+    command: celery flower --port=5555 --url_prefix=flower
+    networks:
+      - backend
+      - frontend
+    ports:
+      - "127.0.0.1:${FLOWER_PORT:-5555}:5555"
+    environment:
+      - CELERY_BROKER_URL=amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/
+      - FLOWER_BROKER_API=http://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:15672/api/
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+      - FLOWER_BASIC_AUTH=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:?Set FLOWER_PASSWORD in .env or .env.production}
+      - FLOWER_PERSISTENT=true
+      - FLOWER_MAX_TASKS=10000
+      - FLOWER_SHOW_POOL=true
+      - FLOWER_TASK_TRACK_STARTED=true
+      - FLOWER_REFRESH_INTERVAL=5000
+    volumes:
+      - ./config/flower_config.py:/app/flower_config.py:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${FLOWER_CPU_LIMIT:-1}'
+          memory: ${FLOWER_MEM_LIMIT:-1G}
+        reservations:
+          cpus: '${FLOWER_CPU_RES:-0.25}'
+          memory: ${FLOWER_MEM_RES:-256M}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================
+  # Frontend
+  # ============================================================
+  frontend:
+    image: ghcr.io/kon-218/ligand-x/frontend:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    command: ["bun", "run", "start"]
+    networks:
+      - frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_API_KEY=${LIGANDX_API_KEY:-}
+      - NODE_ENV=${NODE_ENV:-production}
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${FRONTEND_CPU_LIMIT:-2}'
+          memory: ${FRONTEND_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '${FRONTEND_CPU_RES:-0.5}'
+          memory: ${FRONTEND_MEM_RES:-1G}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ============================================================
+# Named Volumes
+# ============================================================
+volumes:
+  # Data volumes
+  docking_outputs:
+  md_outputs:
+  abfe_outputs:
+  rbfe_outputs:
+  boltz_outputs:
+  qc_jobs:
+  qc_results:
+  msa_cache:
+  reinvent_campaigns:
+  kinetics_jobs:
+
+  # Infrastructure volumes
+  redis_data:
+  postgres_data:
+  rabbitmq_data:
+  celery_beat_data:
