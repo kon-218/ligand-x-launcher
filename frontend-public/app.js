@@ -626,14 +626,14 @@ async function importLicenseFromModal() {
   btn.disabled = true;
   try {
     const lic = await App().SelectLicenseFile();
-    if (lic) {
-      if (lic.valid === false && lic.reason) {
-        el("licenseModalError").textContent = lic.reason;
-      } else {
-        state.license = lic;
-        setEdition(lic.edition);
-        renderLicenseModal(lic);
-      }
+    // Zero-value struct (empty edition) means the file picker was cancelled — keep previous license.
+    if (!lic || !lic.edition) return;
+    if (lic.valid === false && lic.reason) {
+      el("licenseModalError").textContent = lic.reason;
+    } else {
+      state.license = lic;
+      setEdition(lic.edition);
+      renderLicenseModal(lic);
     }
   } catch (e) {
     const msg = String(e).replace(/^Error:\s*/, "");
