@@ -13,7 +13,15 @@
         <div class="brand-mark">LX</div>
         <div class="brand-name">Ligand-X</div>
       </div>
-      <span id="editionBadge" class="edition-badge" data-edition="free">Free</span>
+      <div class="header-actions">
+        <button id="userBtn" class="header-icon-btn" aria-label="Account">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="8" cy="5.5" r="2.75" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M2 14.5c0-3.314 2.686-5.5 6-5.5s6 2.186 6 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <span id="editionBadge" class="edition-badge" data-edition="free">Free</span>
+      </div>
     </header>
 
     <!-- Onboarding progress dots (hidden on gate / running screens) -->
@@ -129,6 +137,7 @@
 
       <!-- SETTINGS -->
       <section class="screen" data-screen="settings">
+        <button id="settingsBackTop" class="back-btn">&#8592; Back</button>
         <h1 class="screen-title">Settings</h1>
         <p class="screen-sub">Tune performance and configure optional integrations. Changes take effect after restarting services.</p>
 
@@ -192,14 +201,22 @@
 
         <div id="settingsError" class="inline-error"></div>
         <div class="actions">
-          <button id="settingsBack" class="btn btn-ghost">Back</button>
-          <button id="settingsSave" class="btn btn-primary" style="flex:2">Save changes</button>
+          <button id="settingsSave" class="btn btn-primary btn-block">Save changes</button>
         </div>
         <div id="settingsSaved" class="settings-saved" hidden>Saved.</div>
       </section>
 
     </main>
   </div>
+
+  <!-- USER MODAL -->
+  <dialog id="userModal" class="license-modal" tabindex="-1">
+    <div class="license-modal-header">
+      <span class="license-modal-title">Account</span>
+      <button id="userModalClose" class="modal-close" aria-label="Close">✕</button>
+    </div>
+    <div id="userModalBody" class="license-modal-body"></div>
+  </dialog>
 
   <!-- LICENSE MODAL -->
   <dialog id="licenseModal" class="license-modal" tabindex="-1">

@@ -585,6 +585,28 @@ async function stopServices() {
   enterRunning("idle");
 }
 
+// ---------- user modal ----------
+function openUserModal() {
+  const profile = (state.config && state.config.userProfile) || {};
+  const body = el("userModalBody");
+  body.textContent = "";
+  const rows = [];
+  if (profile.username) rows.push(["Username", profile.username]);
+  if (profile.email) rows.push(["Email", profile.email]);
+  if (!rows.length) rows.push(["Account", "Not set up yet"]);
+  rows.forEach(([k, v]) => {
+    const row = document.createElement("div");
+    row.className = "license-row";
+    const dt = document.createElement("dt"); dt.textContent = k;
+    const dd = document.createElement("dd"); dd.textContent = v;
+    row.appendChild(dt); row.appendChild(dd);
+    body.appendChild(row);
+  });
+  const modal = el("userModal");
+  modal.showModal();
+  modal.focus();
+}
+
 // ---------- license modal ----------
 function openLicenseModal() {
   el("licenseModalError").textContent = "";
@@ -752,8 +774,11 @@ function wireEvents() {
   el("startBtn").onclick = startFromRunning;
   el("stopBtn").onclick = stopServices;
   el("changeServices").onclick = () => enterServices(true);
+  el("userBtn").onclick = openUserModal;
+  el("userModalClose").onclick = () => el("userModal").close();
+  el("userModal").addEventListener("click", (e) => { if (e.target === el("userModal")) el("userModal").close(); });
   el("openSettings").onclick = enterSettings;
-  el("settingsBack").onclick = () => enterRunning("idle");
+  el("settingsBackTop").onclick = () => enterRunning("idle");
   el("settingsSave").onclick = saveSettings;
   el("browseOrca").onclick = async () => {
     try {

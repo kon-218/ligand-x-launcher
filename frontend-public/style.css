@@ -297,6 +297,23 @@ select.input option {
 .license-modal-footer { padding: 0 16px 14px; }
 .edition-badge { cursor: pointer; transition: opacity 0.15s; }
 .edition-badge:hover { opacity: 0.8; }
+.header-actions { display: flex; align-items: center; gap: 8px; }
+.header-icon-btn {
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; padding: 5px; border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center;
+  transition: color 0.15s, background 0.15s;
+}
+.header-icon-btn:hover { color: var(--text); background: var(--surface-2); }
+
+/* ---------- Back button (top of sub-screens) ---------- */
+.back-btn {
+  background: none; border: none; color: var(--text-muted);
+  font: inherit; font-size: 13px; cursor: pointer; padding: 0;
+  display: flex; align-items: center; gap: 4px;
+  margin-bottom: 14px; transition: color 0.15s;
+}
+.back-btn:hover { color: var(--text); }
 
 /* ---------- Run screen links row ---------- */
 .run-links {
