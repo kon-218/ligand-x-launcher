@@ -2595,6 +2595,25 @@ func (a *App) SaveLocalAccount(username string, email string, password string) (
 	return config, nil
 }
 
+// UpdatePassword updates LIGANDX_PASSWORD in both env files without
+// touching any other credentials or regenerating the API key.
+func (a *App) UpdatePassword(newPassword string) error {
+	if err := validateEnvCredential("password", newPassword, 8); err != nil {
+		return err
+	}
+	if _, err := a.GetEnvContent("dev"); err == nil {
+		if err := a.setEnvValue("LIGANDX_PASSWORD", newPassword); err != nil {
+			return err
+		}
+	}
+	if _, err := a.GetEnvContent("prod"); err == nil {
+		if err := a.setProductionEnvValue("LIGANDX_PASSWORD", newPassword); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (a *App) licensePath() string {
 	return filepath.Join(a.projectPath, "data", "license", "ligandx-license.json")
 }
