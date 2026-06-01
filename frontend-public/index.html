@@ -216,6 +216,18 @@
       <button id="userModalClose" class="modal-close" aria-label="Close">✕</button>
     </div>
     <div id="userModalBody" class="license-modal-body"></div>
+    <div class="license-modal-footer">
+      <button id="changePasswordToggle" class="btn btn-ghost btn-block">Change password</button>
+      <div id="changePasswordForm" class="change-password-form" hidden>
+        <div class="field" style="margin-bottom:10px">
+          <label for="newPassword">New password</label>
+          <input id="newPassword" class="input" type="password" placeholder="At least 8 characters" autocomplete="new-password">
+        </div>
+        <div id="changePasswordError" class="inline-error" style="margin-top:0;margin-bottom:8px"></div>
+        <button id="changePasswordSave" class="btn btn-primary btn-block">Save new password</button>
+        <div id="changePasswordSaved" class="settings-saved" hidden>Password updated.</div>
+      </div>
+    </div>
   </dialog>
 
   <!-- LICENSE MODAL -->
