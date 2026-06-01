@@ -201,6 +201,19 @@
     </main>
   </div>
 
+  <!-- LICENSE MODAL -->
+  <dialog id="licenseModal" class="license-modal">
+    <div class="license-modal-header">
+      <span class="license-modal-title">License</span>
+      <button id="licenseModalClose" class="modal-close" aria-label="Close">✕</button>
+    </div>
+    <div id="licenseModalBody" class="license-modal-body"></div>
+    <div id="licenseModalError" class="inline-error" style="margin-top:0;margin-bottom:8px"></div>
+    <div class="license-modal-footer">
+      <button id="licenseModalImport" class="btn btn-ghost btn-block">Import license file…</button>
+    </div>
+  </dialog>
+
   <script src="wailsjs/runtime/runtime.js"></script>
   <script src="app.js"></script>
 </body>

@@ -585,6 +585,62 @@ async function stopServices() {
   enterRunning("idle");
 }
 
+// ---------- license modal ----------
+function openLicenseModal() {
+  el("licenseModalError").textContent = "";
+  renderLicenseModal(state.license);
+  el("licenseModal").showModal();
+}
+
+function renderLicenseModal(lic) {
+  const l = lic || { edition: "free", valid: true };
+  const edition = (l.edition || "free").replace(/^\w/, (c) => c.toUpperCase());
+  const rows = [["Edition", edition]];
+  if (l.customerName) rows.push(["Licensed to", l.customerName]);
+  if (l.licenseId) rows.push(["License ID", l.licenseId]);
+  if (l.expiresAt) rows.push(["Expires", l.expiresAt.slice(0, 10)]);
+  if (l.graceUntil) rows.push(["Grace until", l.graceUntil.slice(0, 10)]);
+  if (l.entitlements && l.entitlements.length) rows.push(["Modules", l.entitlements.join(", ")]);
+  if (l.valid === false && l.reason) rows.push(["Status", l.reason]);
+
+  const body = el("licenseModalBody");
+  body.textContent = "";
+  rows.forEach(([k, v]) => {
+    const row = document.createElement("div");
+    row.className = "license-row";
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    row.appendChild(dt);
+    row.appendChild(dd);
+    body.appendChild(row);
+  });
+}
+
+async function importLicenseFromModal() {
+  el("licenseModalError").textContent = "";
+  const btn = el("licenseModalImport");
+  btn.disabled = true;
+  try {
+    const lic = await App().SelectLicenseFile();
+    if (lic) {
+      if (lic.valid === false && lic.reason) {
+        el("licenseModalError").textContent = lic.reason;
+      } else {
+        state.license = lic;
+        setEdition(lic.edition);
+        renderLicenseModal(lic);
+      }
+    }
+  } catch (e) {
+    const msg = String(e).replace(/^Error:\s*/, "");
+    if (!/cancel|no file|no such file/i.test(msg)) el("licenseModalError").textContent = msg;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- settings ----------
 async function enterSettings() {
   showScreen("settings");
@@ -674,6 +730,10 @@ function appendLog(box, line) {
 
 // ---------- wiring ----------
 function wireEvents() {
+  el("editionBadge").onclick = openLicenseModal;
+  el("licenseModalClose").onclick = () => el("licenseModal").close();
+  el("licenseModal").addEventListener("click", (e) => { if (e.target === el("licenseModal")) el("licenseModal").close(); });
+  el("licenseModalImport").onclick = importLicenseFromModal;
   el("loginNext").onclick = handleLogin;
   el("password").addEventListener("keydown", (e) => { if (e.key === "Enter") handleLogin(); });
 
