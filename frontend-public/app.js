@@ -589,7 +589,9 @@ async function stopServices() {
 function openLicenseModal() {
   el("licenseModalError").textContent = "";
   renderLicenseModal(state.license);
-  el("licenseModal").showModal();
+  const modal = el("licenseModal");
+  modal.showModal();
+  modal.focus();
 }
 
 function renderLicenseModal(lic) {
