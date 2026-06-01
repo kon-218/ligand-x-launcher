@@ -626,8 +626,8 @@ async function importLicenseFromModal() {
   btn.disabled = true;
   try {
     const lic = await App().SelectLicenseFile();
-    // Zero-value struct (empty edition) means the file picker was cancelled — keep previous license.
-    if (!lic || !lic.edition) return;
+    // "no_license" reason means the file picker was dismissed — keep previous license.
+    if (!lic || lic.reason === "no_license") return;
     if (lic.valid === false && lic.reason) {
       el("licenseModalError").textContent = lic.reason;
     } else {
