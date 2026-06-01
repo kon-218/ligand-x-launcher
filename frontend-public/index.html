@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ligand-X</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark">LX</div>
+        <div class="brand-name">Ligand-X</div>
+      </div>
+      <span id="editionBadge" class="edition-badge" data-edition="free">Free</span>
+    </header>
+
+    <!-- Onboarding progress dots (hidden on gate / running screens) -->
+    <div id="steps" class="steps" hidden>
+      <div class="step-dot" data-step="login"></div>
+      <div class="step-dot" data-step="license"></div>
+      <div class="step-dot" data-step="services"></div>
+      <div class="step-dot" data-step="pull"></div>
+    </div>
+
+    <main class="screen-host">
+
+      <!-- GATE: loading / docker / runtime install -->
+      <section class="screen" data-screen="gate">
+        <div class="gate">
+          <div id="gateSpinner" class="spinner" hidden></div>
+          <div id="gateIcon" class="gate-icon" hidden></div>
+          <h2 id="gateTitle" class="gate-title">Starting up…</h2>
+          <p id="gateMsg" class="gate-msg">Checking your environment.</p>
+          <button id="gateAction" class="btn btn-primary" hidden></button>
+          <div id="gateLog" class="log-box" hidden></div>
+        </div>
+      </section>
+
+      <!-- LOGIN -->
+      <section class="screen" data-screen="login">
+        <h1 class="screen-title">Create your account</h1>
+        <p class="screen-sub">Sets the credentials for your local Ligand-X instance.</p>
+        <div class="field">
+          <label for="username">Username</label>
+          <input id="username" class="input" autocomplete="username" placeholder="admin">
+        </div>
+        <div class="field">
+          <label for="email">Email <span style="color:var(--text-faint)">(optional)</span></label>
+          <input id="email" class="input" type="email" autocomplete="email" placeholder="name@example.com">
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" class="input" type="password" autocomplete="new-password" placeholder="At least 8 characters">
+        </div>
+        <div id="loginError" class="inline-error"></div>
+        <div class="actions">
+          <button id="loginNext" class="btn btn-primary btn-block">Continue</button>
+        </div>
+      </section>
+
+      <!-- LICENSE (optional) -->
+      <section class="screen" data-screen="license">
+        <h1 class="screen-title">License</h1>
+        <p class="screen-sub">You're on the Free edition — core services are ready to go. Add a license to unlock academic and pro modules.</p>
+        <div id="licenseCard" class="license-card">
+          <div class="license-row"><dt>Edition</dt><dd id="licEdition">Free</dd></div>
+          <div id="licExtraRows"></div>
+        </div>
+        <div id="licenseError" class="inline-error"></div>
+        <div class="actions actions-stack">
+          <button id="addLicense" class="btn btn-ghost btn-block">Add a license file…</button>
+          <button id="licenseNext" class="btn btn-primary btn-block">Continue with Free</button>
+        </div>
+      </section>
+
+      <!-- SERVICES -->
+      <section class="screen" data-screen="services">
+        <h1 class="screen-title">Choose services</h1>
+        <p class="screen-sub">Pick the modules to install. Core services are required and always included.</p>
+        <div id="svcList" class="svc-list"></div>
+        <div class="actions">
+          <button id="svcBack" class="btn btn-ghost">Back</button>
+          <button id="svcNext" class="btn btn-primary" style="flex:2">Continue</button>
+        </div>
+      </section>
+
+      <!-- PULL -->
+      <section class="screen" data-screen="pull">
+        <h1 class="screen-title">Downloading images</h1>
+        <p class="screen-sub">Fetching the container images for your selected services.</p>
+        <div class="progress-head">
+          <span id="pullGroup" class="muted">Preparing…</span>
+          <span id="pullCounter"></span>
+        </div>
+        <div class="progress-track"><div id="pullFill" class="progress-fill"></div></div>
+        <div id="pullCaption" class="progress-caption"></div>
+        <div id="pullError" class="inline-error"></div>
+        <div id="pullActions" class="actions" hidden>
+          <button id="pullBack" class="btn btn-ghost">Back</button>
+          <button id="pullRetry" class="btn btn-primary" style="flex:2">Retry</button>
+        </div>
+        <div id="pullLog" class="log-box"></div>
+      </section>
+
+      <!-- RUNNING -->
+      <section class="screen" data-screen="running">
+        <div class="run-summary">
+          <div id="runPulse" class="run-pulse">○</div>
+          <div>
+            <div id="runHeadline" class="run-headline">Ready to start</div>
+            <div id="runSubline" class="run-subline">Your services are installed.</div>
+          </div>
+        </div>
+        <div id="svcStatusList" class="svc-status-list"></div>
+        <div id="runError" class="inline-error"></div>
+        <div class="actions actions-stack" style="margin-top:18px">
+          <button id="openApp" class="btn btn-primary btn-lg btn-block" disabled>Open Ligand-X</button>
+          <button id="startBtn" class="btn btn-primary btn-lg btn-block" hidden>Start services</button>
+          <button id="stopBtn" class="btn btn-danger btn-block" hidden>Stop</button>
+        </div>
+        <div class="run-links">
+          <button id="changeServices" class="link-btn">Change services</button>
+          <span class="run-links-sep">·</span>
+          <button id="openSettings" class="link-btn">Settings</button>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="screen" data-screen="settings">
+        <h1 class="screen-title">Settings</h1>
+        <p class="screen-sub">Tune performance and configure optional integrations. Changes take effect after restarting services.</p>
+
+        <div class="settings-section">
+          <h3 class="settings-section-title">Performance</h3>
+          <div class="field">
+            <label for="cpuConcurrency">Parallel docking jobs</label>
+            <p class="field-hint">How many CPU-based jobs (docking, batch) run at the same time. Raise this on machines with many CPU cores; lower it if the machine feels sluggish.</p>
+            <select id="cpuConcurrency" class="input">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="4">4</option>
+              <option value="8">8</option>
+              <option value="16">16</option>
+            </select>
+          </div>
+          <div id="gpuShortField" class="field">
+            <label for="gpuShortConcurrency">Parallel GPU tasks</label>
+            <p class="field-hint">Simultaneous MD, ADMET, and Boltz-2 jobs. Each job uses significant GPU memory — keep at 1 or 2 unless you have a high-VRAM GPU.</p>
+            <select id="gpuShortConcurrency" class="input">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+            </select>
+          </div>
+          <div id="gpuLongField" class="field">
+            <label for="gpuLongConcurrency">Parallel free-energy calculations</label>
+            <p class="field-hint">ABFE / RBFE jobs are long-running. Keep at 1 unless you have multiple GPUs.</p>
+            <select id="gpuLongConcurrency" class="input">
+              <option value="1">1</option>
+              <option value="2">2</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="qcSettings" class="settings-section">
+          <h3 class="settings-section-title">Quantum Chemistry</h3>
+          <div class="field">
+            <label for="orcaPath">ORCA installation folder</label>
+            <p class="field-hint">The folder containing the ORCA executable. Quantum chemistry jobs won't run without it. Find your ORCA folder and select it here.</p>
+            <div class="path-field">
+              <input id="orcaPath" class="input" placeholder="/opt/orca" readonly>
+              <button id="browseOrca" class="btn btn-ghost">Browse…</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="boltzSettings" class="settings-section">
+          <h3 class="settings-section-title">Boltz-2 MSA <span class="settings-optional">(optional)</span></h3>
+          <p class="field-hint" style="margin-bottom:14px">Credentials for an external multiple-sequence-alignment service. Leave blank to use the default built-in configuration.</p>
+          <div class="field">
+            <label for="boltzMsaUser">MSA username</label>
+            <input id="boltzMsaUser" class="input" placeholder="(optional)">
+          </div>
+          <div class="field">
+            <label for="boltzMsaPass">MSA password</label>
+            <input id="boltzMsaPass" class="input" type="password" placeholder="(optional)">
+          </div>
+        </div>
+
+        <div id="settingsError" class="inline-error"></div>
+        <div class="actions">
+          <button id="settingsBack" class="btn btn-ghost">Back</button>
+          <button id="settingsSave" class="btn btn-primary" style="flex:2">Save changes</button>
+        </div>
+        <div id="settingsSaved" class="settings-saved" hidden>Saved.</div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="wailsjs/runtime/runtime.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
