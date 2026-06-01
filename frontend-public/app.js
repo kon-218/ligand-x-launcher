@@ -590,10 +590,19 @@ function openUserModal() {
   const profile = (state.config && state.config.userProfile) || {};
   const body = el("userModalBody");
   body.textContent = "";
+
   const rows = [];
   if (profile.username) rows.push(["Username", profile.username]);
   if (profile.email) rows.push(["Email", profile.email]);
   if (!rows.length) rows.push(["Account", "Not set up yet"]);
+
+  const lic = state.license || {};
+  const edition = (lic.edition || "free").replace(/^\w/, (c) => c.toUpperCase());
+  rows.push(["License", edition + (lic.customerName ? ` — ${lic.customerName}` : "")]);
+  if (lic.expiresAt && lic.edition && lic.edition !== "free") {
+    rows.push(["Expires", lic.expiresAt.slice(0, 10)]);
+  }
+
   rows.forEach(([k, v]) => {
     const row = document.createElement("div");
     row.className = "license-row";
@@ -602,9 +611,37 @@ function openUserModal() {
     row.appendChild(dt); row.appendChild(dd);
     body.appendChild(row);
   });
+
+  el("changePasswordForm").hidden = true;
+  el("changePasswordToggle").textContent = "Change password";
+  el("newPassword").value = "";
+  el("changePasswordError").textContent = "";
+  el("changePasswordSaved").hidden = true;
+
   const modal = el("userModal");
   modal.showModal();
   modal.focus();
+}
+
+async function changePassword() {
+  const pwd = el("newPassword").value;
+  el("changePasswordError").textContent = "";
+  el("changePasswordSaved").hidden = true;
+  if (pwd.length < 8) {
+    el("changePasswordError").textContent = "Password must be at least 8 characters.";
+    return;
+  }
+  const btn = el("changePasswordSave");
+  btn.disabled = true; btn.textContent = "Saving…";
+  try {
+    await App().UpdatePassword(pwd);
+    el("newPassword").value = "";
+    el("changePasswordSaved").hidden = false;
+  } catch (e) {
+    el("changePasswordError").textContent = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    btn.disabled = false; btn.textContent = "Save new password";
+  }
 }
 
 // ---------- license modal ----------
@@ -777,6 +814,13 @@ function wireEvents() {
   el("userBtn").onclick = openUserModal;
   el("userModalClose").onclick = () => el("userModal").close();
   el("userModal").addEventListener("click", (e) => { if (e.target === el("userModal")) el("userModal").close(); });
+  el("changePasswordToggle").onclick = () => {
+    const form = el("changePasswordForm");
+    form.hidden = !form.hidden;
+    el("changePasswordToggle").textContent = form.hidden ? "Change password" : "Cancel";
+  };
+  el("changePasswordSave").onclick = changePassword;
+  el("newPassword").addEventListener("keydown", (e) => { if (e.key === "Enter") changePassword(); });
   el("openSettings").onclick = enterSettings;
   el("settingsBackTop").onclick = () => enterRunning("idle");
   el("settingsSave").onclick = saveSettings;
