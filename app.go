@@ -142,6 +142,16 @@ type LicenseSummary struct {
 	Reason       string   `json:"reason"`
 }
 
+type UserSettings struct {
+	CPUWorkerConcurrency int    `json:"cpuWorkerConcurrency"`
+	GPUShortConcurrency  int    `json:"gpuShortConcurrency"`
+	GPULongConcurrency   int    `json:"gpuLongConcurrency"`
+	OrcaHostPath         string `json:"orcaHostPath"`
+	BoltzMSAUsername     string `json:"boltzMsaUsername"`
+	BoltzMSAPassword     string `json:"boltzMsaPassword"`
+	BoltzMSAApiKey       string `json:"boltzMsaApiKey"`
+}
+
 type licenseBundle struct {
 	Schema    string                 `json:"schema"`
 	Algorithm string                 `json:"algorithm"`
@@ -193,6 +203,25 @@ var gpuRequiresNvidia = map[string]bool{
 	"worker-gpu-short": true,
 	"worker-gpu-long":  true,
 	"worker-kinetics":  true,
+}
+
+// ligandxServiceSet is every docker-compose service name that belongs to the
+// Ligand-X stack. Used to recognize our containers when listing status and when
+// stopping the stack.
+var ligandxServiceSet = map[string]bool{
+	"gateway": true, "frontend": true, "structure": true,
+	"docking": true, "md": true, "admet": true, "boltz2": true,
+	"qc": true, "alignment": true, "ketcher": true, "msa": true,
+	"abfe": true, "rbfe": true, "reinvent": true, "kinetics": true,
+	"pocket-finder": true, "postgres": true, "redis": true, "rabbitmq": true,
+	"worker-qc": true, "worker-gpu-short": true, "worker-gpu-long": true,
+	"worker-cpu": true, "worker-reinvent": true, "worker-kinetics": true, "flower": true,
+}
+
+// isLigandxProject reports whether a compose project name looks like a Ligand-X
+// stack (matches the filter used across status detection).
+func isLigandxProject(projectName string) bool {
+	return strings.Contains(projectName, "ligand") || projectName == "ligandx"
 }
 
 const defaultRuntimeBundleURL = "https://github.com/kon-218/ligand-x/releases/latest/download/ligand-x-runtime.zip"
@@ -278,12 +307,23 @@ func (a *App) detectProjectPath() {
 }
 
 func (a *App) findProjectPath() (string, bool) {
-	var searchPaths []string
-
 	if configured := os.Getenv("LIGANDX_PROJECT_PATH"); configured != "" {
-		searchPaths = append(searchPaths, configured)
+		if path, ok := firstComposeProject([]string{configured}, false); ok {
+			return path, true
+		}
 	}
 
+	// Developer/operator builds should prefer a source checkout over the bundled
+	// launcher compose. The source checkout carries docker-compose.override.yml
+	// and docker-compose.pro-dev.yml, which are required for dev hot reload and
+	// for mounting shared lib source over ABI-specific compiled image artifacts.
+	if !isPublicBuild {
+		if path, ok := firstComposeProject(developerSourceCandidates(), true); ok {
+			return path, true
+		}
+	}
+
+	var searchPaths []string
 	if runtimeDir, err := a.defaultRuntimeDir(); err == nil {
 		searchPaths = append(searchPaths, runtimeDir)
 	}
@@ -304,8 +344,34 @@ func (a *App) findProjectPath() (string, bool) {
 		searchPaths = append(searchPaths, cwd, filepath.Join(cwd, "runtime"), filepath.Join(cwd, ".."), filepath.Join(cwd, "..", ".."))
 	}
 
+	return firstComposeProject(searchPaths, false)
+}
+
+func developerSourceCandidates() []string {
+	var candidates []string
+	addAround := func(base string) {
+		if base == "" {
+			return
+		}
+		candidates = append(candidates,
+			base,
+			filepath.Join(base, "ligand-x"),
+			filepath.Join(base, "..", "ligand-x"),
+			filepath.Join(base, ".."),
+		)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		addAround(cwd)
+	}
+	if execPath, err := os.Executable(); err == nil {
+		addAround(filepath.Dir(execPath))
+	}
+	return candidates
+}
+
+func firstComposeProject(paths []string, requireDevOverride bool) (string, bool) {
 	seen := make(map[string]bool)
-	for _, path := range searchPaths {
+	for _, path := range paths {
 		if path == "" {
 			continue
 		}
@@ -314,9 +380,15 @@ func (a *App) findProjectPath() (string, bool) {
 			continue
 		}
 		seen[abs] = true
-		if _, err := os.Stat(filepath.Join(abs, "docker-compose.yml")); err == nil {
-			return abs, true
+		if _, err := os.Stat(filepath.Join(abs, "docker-compose.yml")); err != nil {
+			continue
 		}
+		if requireDevOverride {
+			if _, err := os.Stat(filepath.Join(abs, "docker-compose.override.yml")); err != nil {
+				continue
+			}
+		}
+		return abs, true
 	}
 	return "", false
 }
@@ -581,19 +653,41 @@ func (a *App) CheckDocker() (bool, string) {
 		a.initDockerClient()
 	}
 
-	if a.dockerClient == nil {
-		return false, "Docker client not initialized. Is Docker installed?"
+	var sdkErr error
+	if a.dockerClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, sdkErr = a.dockerClient.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true})
+		cancel()
+		if sdkErr == nil {
+			return true, "Docker is running"
+		}
 	}
 
+	if err := checkDockerCLI(); err == nil {
+		if sdkErr != nil {
+			return true, fmt.Sprintf("Docker is running via CLI; SDK ping failed: %v", sdkErr)
+		}
+		return true, "Docker is running via CLI"
+	} else if sdkErr != nil {
+		return false, fmt.Sprintf("Docker is not running: %v; docker CLI check failed: %v", sdkErr, err)
+	} else {
+		return false, fmt.Sprintf("Docker client not initialized and docker CLI check failed: %v", err)
+	}
+}
+
+func checkDockerCLI() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := a.dockerClient.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true})
-	if err != nil {
-		return false, fmt.Sprintf("Docker is not running: %v", err)
+	cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(output))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("%s", msg)
 	}
-
-	return true, "Docker is running"
+	return nil
 }
 
 func (a *App) ligandXContainers(ctx context.Context, all bool) ([]container.Summary, error) {
@@ -605,15 +699,7 @@ func (a *App) ligandXContainers(ctx context.Context, all bool) ([]container.Summ
 		return nil, err
 	}
 	containers := listResult.Items
-	ligandxServices := map[string]bool{
-		"gateway": true, "frontend": true, "structure": true,
-		"docking": true, "md": true, "admet": true, "boltz2": true,
-		"qc": true, "alignment": true, "ketcher": true, "msa": true,
-		"abfe": true, "rbfe": true, "reinvent": true, "kinetics": true,
-		"pocket-finder": true, "postgres": true, "redis": true, "rabbitmq": true,
-		"worker-qc": true, "worker-gpu-short": true, "worker-gpu-long": true,
-		"worker-cpu": true, "worker-reinvent": true, "worker-kinetics": true, "flower": true,
-	}
+	ligandxServices := ligandxServiceSet
 	filtered := make([]container.Summary, 0, len(containers))
 	for _, c := range containers {
 		serviceName := c.Labels["com.docker.compose.service"]
@@ -876,10 +962,10 @@ func (a *App) GetSystemStatus() SystemStatus {
 	}
 
 	dockerOk, _ := a.CheckDocker()
-	status.DockerInstalled = a.dockerClient != nil
+	status.DockerInstalled = dockerOk || a.dockerClient != nil
 	status.DockerRunning = dockerOk
 
-	if !dockerOk {
+	if !dockerOk || a.dockerClient == nil {
 		return status
 	}
 
@@ -892,15 +978,7 @@ func (a *App) GetSystemStatus() SystemStatus {
 	}
 	containers := listResult.Items
 
-	ligandxServices := map[string]bool{
-		"gateway": true, "frontend": true, "structure": true,
-		"docking": true, "md": true, "admet": true, "boltz2": true,
-		"qc": true, "alignment": true, "ketcher": true, "msa": true,
-		"abfe": true, "rbfe": true, "reinvent": true, "kinetics": true, "pocket-finder": true,
-		"postgres": true, "redis": true, "rabbitmq": true,
-		"worker-qc": true, "worker-gpu-short": true, "worker-gpu-long": true, "worker-cpu": true,
-		"worker-reinvent": true, "worker-kinetics": true, "flower": true,
-	}
+	ligandxServices := ligandxServiceSet
 
 	for _, c := range containers {
 		serviceName := c.Labels["com.docker.compose.service"]
@@ -964,25 +1042,69 @@ func (a *App) proSourcePath() (string, bool) {
 	return abs, true
 }
 
+func (a *App) projectFileExists(name string) bool {
+	_, err := os.Stat(filepath.Join(a.projectPath, name))
+	return err == nil
+}
+
+func (a *App) devEnvArgs() []string {
+	if a.projectFileExists(".env") {
+		return []string{"--env-file", ".env"}
+	}
+	if a.projectFileExists(".env.example") {
+		if _, err := a.GetEnvContent("dev"); err == nil && a.projectFileExists(".env") {
+			return []string{"--env-file", ".env"}
+		}
+	}
+	if args := a.prodEnvArgs(); len(args) > 0 {
+		return args
+	}
+	return nil
+}
+
 // devComposeArgs returns the base docker compose arg list for dev mode.
 // When the Pro repo is checked out locally, it layers docker-compose.pro-dev.yml
 // so Pro service source hot-reloads from the host. Callers append `up`, `-d`,
 // flags, and any service names.
 func (a *App) devComposeArgs() []string {
-	args := []string{"compose"}
-	if path, ok := a.proSourcePath(); ok {
+	args := append([]string{"compose"}, a.devEnvArgs()...)
+	hasDevOverride := a.projectFileExists("docker-compose.override.yml")
+	hasProDevOverride := a.projectFileExists("docker-compose.pro-dev.yml")
+
+	if hasDevOverride || hasProDevOverride {
+		args = append(args, "-f", "docker-compose.yml")
+	}
+	if hasDevOverride {
+		args = append(args, "-f", "docker-compose.override.yml")
+	}
+	if path, ok := a.proSourcePath(); ok && hasProDevOverride {
 		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
 			Service:   "launcher",
 			Message:   fmt.Sprintf("Pro source detected at %s — mounting for hot reload", path),
 			Timestamp: time.Now().Format("15:04:05"),
 		})
-		args = append(args,
-			"-f", "docker-compose.yml",
-			"-f", "docker-compose.override.yml",
-			"-f", "docker-compose.pro-dev.yml",
-		)
+		args = append(args, "-f", "docker-compose.pro-dev.yml")
+	} else if path, ok := a.proSourcePath(); ok && !hasProDevOverride {
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			Service:   "launcher",
+			Message:   fmt.Sprintf("Pro source detected at %s, but docker-compose.pro-dev.yml is not present in %s; starting without Pro hot reload", path, a.projectPath),
+			Timestamp: time.Now().Format("15:04:05"),
+		})
 	}
 	return args
+}
+
+// prodEnvArgs returns the top-level `--env-file` args for the prod stack. The
+// compose file uses mandatory ${VAR:?} secret substitutions, and `docker
+// compose` interpolates the whole model for every subcommand (up AND down), so
+// both paths must point at .env.production — compose only auto-loads `.env`.
+// For the public build we also guarantee the file exists first (idempotent).
+func (a *App) prodEnvArgs() []string {
+	_ = a.ensureProductionEnv()
+	if _, err := os.Stat(filepath.Join(a.projectPath, ".env.production")); err == nil {
+		return []string{"--env-file", ".env.production"}
+	}
+	return nil
 }
 
 func (a *App) StartServices(mode string) error {
@@ -1010,9 +1132,14 @@ func (a *App) StartServices(mode string) error {
 		case "dev":
 			args = append(a.devComposeArgs(), "up", "-d", "--pull=never")
 		case "prod":
-			args = []string{"compose", "-f", "docker-compose.yml", "up", "-d", "--pull=never"}
+			args = append([]string{"compose"}, a.prodEnvArgs()...)
+			args = append(args, "-f", "docker-compose.yml", "up", "-d", "--pull=never")
 		case "core":
-			args = append(a.devComposeArgs(), "up", "-d", "--pull=never", "postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "pocket-finder", "flower")
+			coreServices := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "flower"}
+			if !isPublicBuild {
+				coreServices = append(coreServices, "pocket-finder")
+			}
+			args = append(a.devComposeArgs(), append([]string{"up", "-d", "--pull=never"}, coreServices...)...)
 		case "docking":
 			args = append(a.devComposeArgs(), "up", "-d", "--pull=never", "postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "ketcher", "docking", "worker-cpu")
 		case "md":
@@ -1107,7 +1234,8 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 
 	var args []string
 	if env == "prod" {
-		args = []string{"compose", "-f", "docker-compose.yml", "up", "-d", "--pull=never"}
+		args = append([]string{"compose"}, a.prodEnvArgs()...)
+		args = append(args, "-f", "docker-compose.yml", "up", "-d", "--pull=never")
 	} else {
 		args = append(a.devComposeArgs(), "up", "-d", "--pull=never")
 	}
@@ -1136,7 +1264,8 @@ func (a *App) StartServicesCustom(env string, services []string) error {
 
 	var args []string
 	if env == "prod" {
-		args = []string{"compose", "-f", "docker-compose.yml", "up", "-d"}
+		args = append([]string{"compose"}, a.prodEnvArgs()...)
+		args = append(args, "-f", "docker-compose.yml", "up", "-d")
 	} else {
 		args = append(a.devComposeArgs(), "up", "-d")
 	}
@@ -1152,7 +1281,81 @@ func (a *App) StartServicesCustom(env string, services []string) error {
 }
 
 func (a *App) StopServices() error {
-	return a.runDockerCompose([]string{"compose", "down"}, "Stopping services...")
+	if a.dockerClient == nil {
+		a.initDockerClient()
+	}
+
+	// Stop via the Docker API, tearing down every compose project the launcher
+	// recognizes as a Ligand-X stack — exactly the set GetSystemStatus shows.
+	// This avoids the brittleness of `compose down` (which only targets one
+	// hardcoded project name and must interpolate the whole compose model just
+	// to stop). Falls back to `compose down` only if the Docker API is missing.
+	if a.dockerClient == nil {
+		args := append([]string{"compose"}, a.prodEnvArgs()...)
+		args = append(args, "-f", "docker-compose.yml", "down", "--remove-orphans")
+		return a.runDockerCompose(args, "Stopping services...")
+	}
+
+	emit := func(msg string) {
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			Service: "launcher", Message: msg, Timestamp: time.Now().Format("15:04:05"),
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	listResult, err := a.dockerClient.ContainerList(ctx, client.ContainerListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("could not list containers: %w", err)
+	}
+	containers := listResult.Items
+
+	// Identify which compose projects are ours (a project that owns at least one
+	// known Ligand-X service), then tear down *all* containers in those projects
+	// — including extras like celery-beat that aren't in the service set.
+	ligandProjects := make(map[string]bool)
+	for _, c := range containers {
+		proj := c.Labels["com.docker.compose.project"]
+		if proj == "" || !isLigandxProject(proj) {
+			continue
+		}
+		if ligandxServiceSet[c.Labels["com.docker.compose.service"]] {
+			ligandProjects[proj] = true
+		}
+	}
+
+	if len(ligandProjects) == 0 {
+		emit("No running services found")
+		return nil
+	}
+
+	emit("Stopping services...")
+	stopTimeout := 30
+	var failed []string
+	for _, c := range containers {
+		if !ligandProjects[c.Labels["com.docker.compose.project"]] {
+			continue
+		}
+		name := strings.TrimPrefix(firstContainerName(c.Names), "/")
+		if c.State == container.StateRunning || c.State == container.StateRestarting {
+			if _, err := a.dockerClient.ContainerStop(ctx, c.ID, client.ContainerStopOptions{Timeout: &stopTimeout}); err != nil {
+				emit(fmt.Sprintf("Warning: could not stop %s: %v", name, err))
+				failed = append(failed, name)
+				continue
+			}
+		}
+		if _, err := a.dockerClient.ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
+			emit(fmt.Sprintf("Warning: could not remove %s: %v", name, err))
+			failed = append(failed, name)
+		}
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("could not stop %d service(s): %s", len(failed), strings.Join(failed, ", "))
+	}
+	emit("Services stopped")
+	return nil
 }
 
 func (a *App) RestartServices() error {
@@ -1266,6 +1469,10 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("UID=%d", uid),
 		fmt.Sprintf("GID=%d", gid),
+		// Pin the compose project name so up/down/status agree regardless of the
+		// install directory's basename. Keep the historical "ligand-x" name so
+		// existing named volumes (especially ligand-x_postgres_data) remain visible.
+		"COMPOSE_PROJECT_NAME=ligand-x",
 	)
 	if path, ok := a.proSourcePath(); ok {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("LIGANDX_PRO_SRC_PATH=%s", path))
@@ -1380,6 +1587,18 @@ func (a *App) SelectProjectFolder() (string, error) {
 	}
 
 	return a.projectPath, nil
+}
+
+// BrowseForFolder opens a directory picker with a custom title and returns
+// the selected path without changing any app state.
+func (a *App) BrowseForFolder(title string) (string, error) {
+	path, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: title,
+	})
+	if err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func (a *App) GetEnvContent(mode string) (string, error) {
@@ -1514,48 +1733,147 @@ func (a *App) setEnvFileValue(fileName, key, value string) error {
 	return os.WriteFile(envPath, []byte(strings.Join(lines, "\n")), 0644)
 }
 
+// parseEnvFile parses KEY=VALUE lines (ignoring comments/blanks) into a map.
+func parseEnvFile(content string) map[string]string {
+	out := make(map[string]string)
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if i := strings.Index(line, "="); i > 0 {
+			out[strings.TrimSpace(line[:i])] = strings.TrimSpace(line[i+1:])
+		}
+	}
+	return out
+}
+
+// isEnvPlaceholder reports whether a value still needs generating: empty, a
+// template CHANGE_ME marker, or an unresolved compose/env substitution.
+func isEnvPlaceholder(v string) bool {
+	return v == "" || strings.Contains(v, "CHANGE_ME") || strings.Contains(v, "${")
+}
+
+// ensureProductionEnv makes sure .env.production exists with real secrets. It is
+// idempotent: it only fills a key when its current value is missing or a
+// CHANGE_ME placeholder, so repeated calls (e.g. on every start) never rotate
+// already-generated passwords and break the Postgres/RabbitMQ data volumes.
 func (a *App) ensureProductionEnv() error {
-	if _, err := a.GetEnvContent("prod"); err != nil {
+	content, err := a.GetEnvContent("prod") // seeds from template if missing
+	if err != nil {
 		return err
 	}
-	secretKeys := []string{"POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD", "QC_SECRET_KEY", "LIGANDX_API_KEY", "FLOWER_PASSWORD"}
-	values := make(map[string]string)
+	cur := parseEnvFile(content)
+
+	// setIfPlaceholder writes only when the existing value is empty/CHANGE_ME,
+	// and keeps cur in sync so derived URLs can reference fresh secrets.
+	setIfPlaceholder := func(key, value string) error {
+		if isEnvPlaceholder(cur[key]) {
+			cur[key] = value
+			return a.setProductionEnvValue(key, value)
+		}
+		return nil
+	}
+
+	// Generate any missing secrets.
+	secretKeys := []string{"POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD", "QC_SECRET_KEY", "LIGANDX_API_KEY", "LIGANDX_PASSWORD", "FLOWER_PASSWORD"}
 	for _, key := range secretKeys {
-		v, err := generateAPIKey()
-		if err != nil {
-			return err
+		if isEnvPlaceholder(cur[key]) {
+			v, err := generateAPIKey()
+			if err != nil {
+				return err
+			}
+			if err := setIfPlaceholder(key, v); err != nil {
+				return err
+			}
 		}
-		values[key] = v
-		if err := a.setProductionEnvValue(key, v); err != nil {
-			return err
-		}
 	}
-	if err := a.setProductionEnvValue("POSTGRES_USER", "ligandx"); err != nil {
+
+	// Fixed identities.
+	if err := setIfPlaceholder("POSTGRES_USER", "ligandx"); err != nil {
 		return err
 	}
-	if err := a.setProductionEnvValue("POSTGRES_DB", "ligandx"); err != nil {
+	if err := setIfPlaceholder("POSTGRES_DB", "ligandx"); err != nil {
 		return err
 	}
-	if err := a.setProductionEnvValue("RABBITMQ_USER", "ligandx"); err != nil {
+	if err := setIfPlaceholder("RABBITMQ_USER", "ligandx"); err != nil {
 		return err
 	}
-	if err := a.setProductionEnvValue("DATABASE_URL", fmt.Sprintf("postgresql://ligandx:%s@postgres:5432/ligandx", values["POSTGRES_PASSWORD"])); err != nil {
+
+	// Derived connection URLs — only (re)written while still placeholders, using
+	// whatever secrets are now in cur.
+	if err := setIfPlaceholder("DATABASE_URL", fmt.Sprintf("postgresql://ligandx:%s@postgres:5432/ligandx", cur["POSTGRES_PASSWORD"])); err != nil {
 		return err
 	}
-	if err := a.setProductionEnvValue("CELERY_BROKER_URL", fmt.Sprintf("amqp://ligandx:%s@rabbitmq:5672/", values["RABBITMQ_PASSWORD"])); err != nil {
+	if err := setIfPlaceholder("CELERY_BROKER_URL", fmt.Sprintf("amqp://ligandx:%s@rabbitmq:5672/", cur["RABBITMQ_PASSWORD"])); err != nil {
 		return err
 	}
-	if err := a.setProductionEnvValue("CELERY_RESULT_BACKEND", fmt.Sprintf("redis://:%s@redis:6379/0", values["REDIS_PASSWORD"])); err != nil {
+	if err := setIfPlaceholder("CELERY_RESULT_BACKEND", fmt.Sprintf("redis://:%s@redis:6379/0", cur["REDIS_PASSWORD"])); err != nil {
 		return err
 	}
-	if err := a.setProductionEnvValue("REDIS_URL", fmt.Sprintf("redis://:%s@redis:6379/0", values["REDIS_PASSWORD"])); err != nil {
+	if err := setIfPlaceholder("REDIS_URL", fmt.Sprintf("redis://:%s@redis:6379/0", cur["REDIS_PASSWORD"])); err != nil {
 		return err
 	}
+
+	// Frontend/CORS constants are pinned to localhost unconditionally — they are
+	// not secrets (no rotation risk), and any template default like
+	// "https://your-domain.com" is an unsafe placeholder for a local launcher.
 	if err := a.setProductionEnvValue("NEXT_PUBLIC_API_URL", "http://localhost:8000"); err != nil {
 		return err
 	}
 	if err := a.setProductionEnvValue("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"); err != nil {
 		return err
+	}
+	return nil
+}
+
+// GetUserSettings returns the user-facing subset of .env.production.
+func (a *App) GetUserSettings() (UserSettings, error) {
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return UserSettings{}, err
+	}
+	cur := parseEnvFile(content)
+
+	cpuConc, _ := strconv.Atoi(cur["CPU_WORKER_CONCURRENCY"])
+	gpuShort, _ := strconv.Atoi(cur["GPU_SHORT_CONCURRENCY"])
+	gpuLong, _ := strconv.Atoi(cur["GPU_LONG_CONCURRENCY"])
+	if cpuConc == 0 {
+		cpuConc = 4
+	}
+	if gpuShort == 0 {
+		gpuShort = 2
+	}
+	if gpuLong == 0 {
+		gpuLong = 1
+	}
+
+	return UserSettings{
+		CPUWorkerConcurrency: cpuConc,
+		GPUShortConcurrency:  gpuShort,
+		GPULongConcurrency:   gpuLong,
+		OrcaHostPath:         cur["ORCA_HOST_PATH"],
+		BoltzMSAUsername:     cur["BOLTZ_MSA_USERNAME"],
+		BoltzMSAPassword:     cur["BOLTZ_MSA_PASSWORD"],
+		BoltzMSAApiKey:       cur["MSA_API_KEY_VALUE"],
+	}, nil
+}
+
+// SaveUserSettings writes user-facing settings back to .env.production.
+func (a *App) SaveUserSettings(s UserSettings) error {
+	settings := map[string]string{
+		"CPU_WORKER_CONCURRENCY": strconv.Itoa(s.CPUWorkerConcurrency),
+		"GPU_SHORT_CONCURRENCY":  strconv.Itoa(s.GPUShortConcurrency),
+		"GPU_LONG_CONCURRENCY":   strconv.Itoa(s.GPULongConcurrency),
+		"ORCA_HOST_PATH":         s.OrcaHostPath,
+		"BOLTZ_MSA_USERNAME":     s.BoltzMSAUsername,
+		"BOLTZ_MSA_PASSWORD":     s.BoltzMSAPassword,
+		"MSA_API_KEY_VALUE":      s.BoltzMSAApiKey,
+	}
+	for key, val := range settings {
+		if err := a.setProductionEnvValue(key, val); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1738,7 +2056,8 @@ func (a *App) ViewLogs(service string) error {
 	a.logStreamsMux.Unlock()
 
 	go func() {
-		args := []string{"compose", "logs", "-f", "--tail", "100"}
+		args := append([]string{"compose"}, a.devEnvArgs()...)
+		args = append(args, "logs", "-f", "--tail", "100")
 		if service != "all" {
 			args = append(args, service)
 		}
@@ -1930,7 +2249,10 @@ func (a *App) PullImages() error {
 	}
 
 	// Pull selected services using docker compose (logs only, no progress bars)
-	return a.runDockerCompose(append([]string{"compose", "pull"}, services...), "Pulling selected services...")
+	args := append([]string{"compose"}, a.devEnvArgs()...)
+	args = append(args, "pull")
+	args = append(args, services...)
+	return a.runDockerCompose(args, "Pulling selected services...")
 }
 
 func (a *App) CleanDocker() error {
@@ -1977,32 +2299,54 @@ func (a *App) getConfigPath() (string, error) {
 	return filepath.Join(configDir, "ligandx-launcher", "config.json"), nil
 }
 
+func coreServicesDescription() string {
+	if isPublicBuild {
+		return "Essential services: Gateway, Frontend, Structure, and supporting infrastructure"
+	}
+	return "Essential services: Gateway, Frontend, Structure, Pocket Finder (fpocket / DeepPocket / etc.), and supporting infrastructure"
+}
+
+func coreServiceNames() []string {
+	services := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "alignment", "ketcher", "msa", "worker-cpu", "flower"}
+	if !isPublicBuild {
+		services = append(services, "pocket-finder")
+	}
+	return services
+}
+
+func coreServiceImages() []string {
+	images := []string{
+		"ghcr.io/kon-218/ligand-x/gateway:latest",
+		"ghcr.io/kon-218/ligand-x/frontend:latest",
+		"ghcr.io/kon-218/ligand-x/structure:latest",
+		"ghcr.io/kon-218/ligand-x/alignment:latest",
+		"ghcr.io/kon-218/ligand-x/ketcher:latest",
+		"ghcr.io/kon-218/ligand-x/msa:latest",
+		"ghcr.io/kon-218/ligand-x/worker-cpu:latest",
+		"redis:7-alpine",
+		"postgres:16-alpine",
+		"rabbitmq:3.13-management-alpine",
+	}
+	if !isPublicBuild {
+		images = append(images[:3], append([]string{"ghcr.io/kon-218/ligand-x/pocket-finder:latest"}, images[3:]...)...)
+	}
+	return images
+}
+
 func (a *App) GetServiceGroups() []ServiceGroup {
 	license := a.GetLicenseStatus()
 	groups := []ServiceGroup{
 		{
 			ID:          "core",
 			Name:        "Core Services",
-			Description: "Essential services: Gateway, Frontend, Structure, Pocket Finder (fpocket / DeepPocket / etc.), and supporting infrastructure",
-			Services:    []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "pocket-finder", "alignment", "ketcher", "msa", "worker-cpu", "flower"},
-			Images: []string{
-				"ghcr.io/kon-218/ligand-x/gateway:latest",
-				"ghcr.io/kon-218/ligand-x/frontend:latest",
-				"ghcr.io/kon-218/ligand-x/structure:latest",
-				"ghcr.io/kon-218/ligand-x/pocket-finder:latest",
-				"ghcr.io/kon-218/ligand-x/alignment:latest",
-				"ghcr.io/kon-218/ligand-x/ketcher:latest",
-				"ghcr.io/kon-218/ligand-x/msa:latest",
-				"ghcr.io/kon-218/ligand-x/worker-cpu:latest",
-				"redis:7-alpine",
-				"postgres:16-alpine",
-				"rabbitmq:3.13-management-alpine",
-			},
-			SizeMB:    5500,
-			Required:  true,
-			DefaultOn: true,
-			Edition:   "free",
-			Licensed:  true,
+			Description: coreServicesDescription(),
+			Services:    coreServiceNames(),
+			Images:      coreServiceImages(),
+			SizeMB:      5500,
+			Required:    true,
+			DefaultOn:   true,
+			Edition:     "free",
+			Licensed:    true,
 		},
 		{
 			ID:          "docking",
@@ -2333,6 +2677,16 @@ func (a *App) verifyLicenseData(data []byte) (LicenseSummary, error) {
 	return verifyLicenseDataWithPublicKey(data, []byte(licensePublicKeyPEM))
 }
 
+func canonicalLicensePayload(payload map[string]interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(payload); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(buf.Bytes()), nil
+}
+
 func verifyLicenseDataWithPublicKey(data []byte, publicKeyPEM []byte) (LicenseSummary, error) {
 	var bundle licenseBundle
 	if err := json.Unmarshal(data, &bundle); err != nil {
@@ -2355,7 +2709,7 @@ func verifyLicenseDataWithPublicKey(data []byte, publicKeyPEM []byte) (LicenseSu
 		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_public_key_type"}, nil
 	}
 
-	canonical, err := json.Marshal(bundle.Payload)
+	canonical, err := canonicalLicensePayload(bundle.Payload)
 	if err != nil {
 		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_payload"}, err
 	}
@@ -2739,6 +3093,16 @@ func (a *App) CheckGPU() bool {
 	return err == nil
 }
 
+// repoOf strips the :tag from an image reference, leaving the
+// registry/namespace/name. A ':' denotes a tag only when no '/' follows it, so
+// a registry host:port (e.g. localhost:5000/foo) is preserved.
+func repoOf(ref string) string {
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		return ref[:i]
+	}
+	return ref
+}
+
 func (a *App) CheckImagePresence() map[string]bool {
 	result := make(map[string]bool)
 
@@ -2782,18 +3146,13 @@ func (a *App) CheckImagePresence() map[string]bool {
 		for _, requiredImage := range group.Images {
 			found := false
 
-			// Extract the service name from required image (e.g., "gateway" from "ghcr.io/kon-218/ligand-x/gateway:latest")
-			parts := strings.Split(requiredImage, "/")
-			serviceName := ""
-			if len(parts) > 0 {
-				// Get last part and remove tag if present
-				lastPart := parts[len(parts)-1]
-				serviceName = strings.Split(lastPart, ":")[0]
-			}
-
-			// Check if required image or service name is contained in any available tag
+			// Match on the repository path (tag-agnostic): the launcher pulls
+			// ":latest" while compose resolves ":${VERSION:-latest}". Exact repo
+			// equality avoids false positives like "md" being a substring of
+			// "admet" that the old strings.Contains match produced.
+			reqRepo := repoOf(requiredImage)
 			for _, availableTag := range availableImages {
-				if strings.Contains(availableTag, requiredImage) || (serviceName != "" && strings.Contains(availableTag, serviceName)) {
+				if repoOf(availableTag) == reqRepo {
 					found = true
 					break
 				}
