@@ -109,6 +109,19 @@ html, body {
 }
 .input:focus { border-color: var(--accent-strong); box-shadow: 0 0 0 3px rgba(45,212,191,0.12); }
 .input::placeholder { color: var(--text-faint); }
+select.input {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7689' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+  cursor: pointer;
+}
+select.input option {
+  background: var(--surface-2);
+  color: var(--text);
+}
 
 /* ---------- Buttons ---------- */
 .btn {
