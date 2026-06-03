@@ -1,8 +1,6 @@
 package main
 
 import (
-	"embed"
-
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -10,18 +8,19 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
-//go:embed all:frontend
-var assets embed.FS
+// assets and the app* window constants are provided by a build-tag-gated file:
+// assets_dev.go (default build, embeds frontend/) or assets_public.go
+// (`-tags public`, embeds frontend-public/).
 
 func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:     "Ligand-X Launcher",
-		Width:     600,
-		Height:    700,
-		MinWidth:  500,
-		MinHeight: 600,
+		Title:     appTitle,
+		Width:     appWidth,
+		Height:    appHeight,
+		MinWidth:  appMinWidth,
+		MinHeight: appMinHeight,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},

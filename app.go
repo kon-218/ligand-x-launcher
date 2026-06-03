@@ -209,7 +209,7 @@ var gpuRequiresNvidia = map[string]bool{
 // Ligand-X stack. Used to recognize our containers when listing status and when
 // stopping the stack.
 var ligandxServiceSet = map[string]bool{
-	"gateway": true, "frontend": true, "structure": true,
+	"gateway": true, "frontend": true, "proxy": true, "structure": true,
 	"docking": true, "md": true, "admet": true, "boltz2": true,
 	"qc": true, "alignment": true, "ketcher": true, "msa": true,
 	"abfe": true, "rbfe": true, "reinvent": true, "kinetics": true,
@@ -415,10 +415,10 @@ func (a *App) runtimeBundleURL() string {
 // download URL of the runtime bundle asset attached to the latest release.
 // GitHub's /releases/latest/download/<asset> redirect is unreliable on some
 // Windows HTTP clients, so we resolve the concrete asset URL explicitly.
-func resolveLatestRuntimeBundleURL() (string, error) {
+func resolveLatestRuntimeBundleURL() (string, string, error) {
 	req, err := http.NewRequest(http.MethodGet, latestReleaseAPIURL, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "ligand-x-launcher")
@@ -426,11 +426,11 @@ func resolveLatestRuntimeBundleURL() (string, error) {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub releases API returned HTTP %d", resp.StatusCode)
+		return "", "", fmt.Errorf("GitHub releases API returned HTTP %d", resp.StatusCode)
 	}
 
 	var release struct {
@@ -441,15 +441,15 @@ func resolveLatestRuntimeBundleURL() (string, error) {
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", fmt.Errorf("failed to parse GitHub releases response: %w", err)
+		return "", "", fmt.Errorf("failed to parse GitHub releases response: %w", err)
 	}
 
 	for _, asset := range release.Assets {
 		if asset.Name == runtimeBundleAssetName && strings.TrimSpace(asset.BrowserDownloadURL) != "" {
-			return asset.BrowserDownloadURL, nil
+			return asset.BrowserDownloadURL, strings.TrimSpace(release.TagName), nil
 		}
 	}
-	return "", fmt.Errorf("asset %q not found in latest release %q", runtimeBundleAssetName, release.TagName)
+	return "", "", fmt.Errorf("asset %q not found in latest release %q", runtimeBundleAssetName, release.TagName)
 }
 
 func (a *App) GetDistributionStatus() DistributionStatus {
@@ -493,10 +493,12 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: "Installing Ligand-X runtime files...", Timestamp: time.Now().Format("15:04:05")})
 
 	var bundleURL string
+	var releaseTag string
 	if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
 		bundleURL = override
-	} else if resolved, resolveErr := resolveLatestRuntimeBundleURL(); resolveErr == nil {
+	} else if resolved, tag, resolveErr := resolveLatestRuntimeBundleURL(); resolveErr == nil {
 		bundleURL = resolved
+		releaseTag = tag
 		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Resolved latest runtime bundle: %s", bundleURL), Timestamp: time.Now().Format("15:04:05")})
 	} else {
 		bundleURL = defaultRuntimeBundleURL
@@ -518,6 +520,17 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 	a.projectPath = runtimeDir
 	if err := a.ensureProductionEnv(); err != nil {
 		return a.GetDistributionStatus(), err
+	}
+	if releaseTag != "" {
+		content, readErr := a.GetEnvContent("prod")
+		if readErr == nil {
+			parsed := parseEnvFile(content)
+			if isEnvPlaceholder(parsed["VERSION"]) || strings.EqualFold(strings.TrimSpace(parsed["VERSION"]), "latest") {
+				if setErr := a.setProductionEnvValue("VERSION", releaseTag); setErr == nil {
+					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Pinned VERSION=%s in .env.production", releaseTag), Timestamp: time.Now().Format("15:04:05")})
+				}
+			}
+		}
 	}
 	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Runtime installed at %s", runtimeDir), Timestamp: time.Now().Format("15:04:05")})
 	return a.GetDistributionStatus(), nil
@@ -1132,10 +1145,13 @@ func (a *App) StartServices(mode string) error {
 		case "dev":
 			args = append(a.devComposeArgs(), "up", "-d", "--pull=never")
 		case "prod":
+			if _, err := a.requirePinnedProductionVersion(); err != nil {
+				return err
+			}
 			args = append([]string{"compose"}, a.prodEnvArgs()...)
 			args = append(args, "-f", "docker-compose.yml", "up", "-d", "--pull=never")
 		case "core":
-			coreServices := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "flower"}
+			coreServices := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "flower"}
 			if !isPublicBuild {
 				coreServices = append(coreServices, "pocket-finder")
 			}
@@ -1234,6 +1250,9 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 
 	var args []string
 	if env == "prod" {
+		if _, err := a.requirePinnedProductionVersion(); err != nil {
+			return err
+		}
 		args = append([]string{"compose"}, a.prodEnvArgs()...)
 		args = append(args, "-f", "docker-compose.yml", "up", "-d", "--pull=never")
 	} else {
@@ -1264,6 +1283,9 @@ func (a *App) StartServicesCustom(env string, services []string) error {
 
 	var args []string
 	if env == "prod" {
+		if _, err := a.requirePinnedProductionVersion(); err != nil {
+			return err
+		}
 		args = append([]string{"compose"}, a.prodEnvArgs()...)
 		args = append(args, "-f", "docker-compose.yml", "up", "-d")
 	} else {
@@ -1545,7 +1567,7 @@ func (a *App) OpenBrowser(url string) {
 }
 
 func (a *App) OpenFrontend() {
-	a.OpenBrowser("http://localhost:3000")
+	a.OpenBrowser("http://localhost:8080") // reverse proxy (APP_PORT); single same-origin entry
 }
 
 func (a *App) OpenAPI() {
@@ -1815,13 +1837,11 @@ func (a *App) ensureProductionEnv() error {
 		return err
 	}
 
-	// Frontend/CORS constants are pinned to localhost unconditionally — they are
-	// not secrets (no rotation risk), and any template default like
-	// "https://your-domain.com" is an unsafe placeholder for a local launcher.
-	if err := a.setProductionEnvValue("NEXT_PUBLIC_API_URL", "http://localhost:8000"); err != nil {
+	// Same-origin via the bundled reverse proxy: browser uses its own origin.
+	if err := a.setProductionEnvValue("NEXT_PUBLIC_API_URL", ""); err != nil {
 		return err
 	}
-	if err := a.setProductionEnvValue("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"); err != nil {
+	if err := a.setProductionEnvValue("CORS_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080"); err != nil {
 		return err
 	}
 	return nil
@@ -2301,47 +2321,90 @@ func (a *App) getConfigPath() (string, error) {
 
 func coreServicesDescription() string {
 	if isPublicBuild {
-		return "Essential services: Gateway, Frontend, Structure, and supporting infrastructure"
+		return "Essential services: Proxy, Gateway, Frontend, Structure, and supporting infrastructure"
 	}
-	return "Essential services: Gateway, Frontend, Structure, Pocket Finder (fpocket / DeepPocket / etc.), and supporting infrastructure"
+	return "Essential services: Proxy, Gateway, Frontend, Structure, Pocket Finder (fpocket / DeepPocket / etc.), and supporting infrastructure"
 }
 
 func coreServiceNames() []string {
-	services := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "alignment", "ketcher", "msa", "worker-cpu", "flower"}
+	services := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "alignment", "ketcher", "msa", "worker-cpu", "flower"}
 	if !isPublicBuild {
 		services = append(services, "pocket-finder")
 	}
 	return services
 }
 
-func coreServiceImages() []string {
+func imageRef(repository, tag string) string {
+	return fmt.Sprintf("%s:%s", repository, tag)
+}
+
+func (a *App) productionImageSettings() (string, string) {
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return "latest", "ghcr.io/kon-218/ligand-x-pro"
+	}
+
+	parsed := parseEnvFile(content)
+	version := strings.TrimSpace(parsed["VERSION"])
+	if version == "" {
+		version = "latest"
+	}
+
+	proPrefix := strings.TrimSpace(parsed["LIGANDX_PRO_IMAGE_PREFIX"])
+	if proPrefix == "" {
+		proPrefix = "ghcr.io/kon-218/ligand-x-pro"
+	}
+
+	return version, proPrefix
+}
+
+func isPinnedImageVersion(version string) bool {
+	v := strings.TrimSpace(version)
+	return v != "" && !isEnvPlaceholder(v) && !strings.EqualFold(v, "latest")
+}
+
+func (a *App) requirePinnedProductionVersion() (string, error) {
+	if err := a.ensureProductionEnv(); err != nil {
+		return "", err
+	}
+
+	version, _ := a.productionImageSettings()
+	if !isPinnedImageVersion(version) {
+		return "", fmt.Errorf("VERSION must be pinned in .env.production (set to a release tag or digest, not 'latest')")
+	}
+	return version, nil
+}
+
+func coreServiceImages(version string) []string {
 	images := []string{
-		"ghcr.io/kon-218/ligand-x/gateway:latest",
-		"ghcr.io/kon-218/ligand-x/frontend:latest",
-		"ghcr.io/kon-218/ligand-x/structure:latest",
-		"ghcr.io/kon-218/ligand-x/alignment:latest",
-		"ghcr.io/kon-218/ligand-x/ketcher:latest",
-		"ghcr.io/kon-218/ligand-x/msa:latest",
-		"ghcr.io/kon-218/ligand-x/worker-cpu:latest",
+		imageRef("ghcr.io/kon-218/ligand-x/gateway", version),
+		imageRef("ghcr.io/kon-218/ligand-x/frontend", version),
+		"nginx:1.27-alpine",
+		imageRef("ghcr.io/kon-218/ligand-x/structure", version),
+		imageRef("ghcr.io/kon-218/ligand-x/alignment", version),
+		imageRef("ghcr.io/kon-218/ligand-x/ketcher", version),
+		imageRef("ghcr.io/kon-218/ligand-x/msa", version),
+		imageRef("ghcr.io/kon-218/ligand-x/worker-cpu", version),
 		"redis:7-alpine",
 		"postgres:16-alpine",
 		"rabbitmq:3.13-management-alpine",
 	}
 	if !isPublicBuild {
-		images = append(images[:3], append([]string{"ghcr.io/kon-218/ligand-x/pocket-finder:latest"}, images[3:]...)...)
+		images = append(images[:3], append([]string{imageRef("ghcr.io/kon-218/ligand-x/pocket-finder", version)}, images[3:]...)...)
 	}
 	return images
 }
 
 func (a *App) GetServiceGroups() []ServiceGroup {
 	license := a.GetLicenseStatus()
+	version, proPrefix := a.productionImageSettings()
 	groups := []ServiceGroup{
 		{
 			ID:          "core",
 			Name:        "Core Services",
 			Description: coreServicesDescription(),
 			Services:    coreServiceNames(),
-			Images:      coreServiceImages(),
+			Images:      coreServiceImages(version),
 			SizeMB:      5500,
 			Required:    true,
 			DefaultOn:   true,
@@ -2354,7 +2417,7 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Description: "AutoDock Vina-based protein-ligand docking calculations",
 			Services:    []string{"docking"},
 			Images: []string{
-				"ghcr.io/kon-218/ligand-x/docking:latest",
+				imageRef("ghcr.io/kon-218/ligand-x/docking", version),
 			},
 			SizeMB:    800,
 			Required:  false,
@@ -2368,8 +2431,8 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Description: "MD simulations with OpenMM/OpenFF",
 			Services:    []string{"md", "worker-gpu-short"},
 			Images: []string{
-				"ghcr.io/kon-218/ligand-x/md:latest",
-				"ghcr.io/kon-218/ligand-x/worker-gpu-short:latest",
+				imageRef("ghcr.io/kon-218/ligand-x/md", version),
+				imageRef("ghcr.io/kon-218/ligand-x/worker-gpu-short", version),
 			},
 			SizeMB:    4500,
 			Required:  false,
@@ -2383,7 +2446,7 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Description: "Pro package: predict molecular properties, pharmacokinetics, and toxicity",
 			Services:    []string{"admet"},
 			Images: []string{
-				"ghcr.io/kon-218/ligand-x-pro/admet:latest",
+				imageRef(proPrefix+"/admet", version),
 			},
 			SizeMB:      1500,
 			Required:    false,
@@ -2397,9 +2460,9 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Description: "Pro package: ABFE/RBFE binding free energy calculations",
 			Services:    []string{"abfe", "rbfe", "worker-gpu-long"},
 			Images: []string{
-				"ghcr.io/kon-218/ligand-x-pro/abfe:latest",
-				"ghcr.io/kon-218/ligand-x-pro/rbfe:latest",
-				"ghcr.io/kon-218/ligand-x-pro/worker-gpu-long:latest",
+				imageRef(proPrefix+"/abfe", version),
+				imageRef(proPrefix+"/rbfe", version),
+				imageRef(proPrefix+"/worker-gpu-long", version),
 			},
 			SizeMB:      5500,
 			Required:    false,
@@ -2413,8 +2476,8 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Description: "Pro package: ORCA-based quantum chemistry calculations",
 			Services:    []string{"qc", "worker-qc"},
 			Images: []string{
-				"ghcr.io/kon-218/ligand-x-pro/qc:latest",
-				"ghcr.io/kon-218/ligand-x-pro/worker-qc:latest",
+				imageRef(proPrefix+"/qc", version),
+				imageRef(proPrefix+"/worker-qc", version),
 			},
 			SizeMB:      3000,
 			Required:    false,
@@ -2428,7 +2491,7 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Description: "Pro package: Boltz-2 binding affinity predictions",
 			Services:    []string{"boltz2"},
 			Images: []string{
-				"ghcr.io/kon-218/ligand-x-pro/boltz2:latest",
+				imageRef(proPrefix+"/boltz2", version),
 			},
 			SizeMB:      6000,
 			Required:    false,
@@ -2442,8 +2505,8 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Description: "Pro package: generative molecular design with REINVENT4 and DockStream integration",
 			Services:    []string{"reinvent", "worker-reinvent"},
 			Images: []string{
-				"ghcr.io/kon-218/ligand-x-pro/reinvent:latest",
-				"ghcr.io/kon-218/ligand-x-pro/worker-reinvent:latest",
+				imageRef(proPrefix+"/reinvent", version),
+				imageRef(proPrefix+"/worker-reinvent", version),
 			},
 			SizeMB:      5000,
 			Required:    false,
@@ -2457,8 +2520,8 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Description: "Pro package: GPU weighted-ensemble unbinding kinetics",
 			Services:    []string{"kinetics", "worker-kinetics"},
 			Images: []string{
-				"ghcr.io/kon-218/ligand-x-pro/kinetics:latest",
-				"ghcr.io/kon-218/ligand-x-pro/worker-kinetics:latest",
+				imageRef(proPrefix+"/kinetics", version),
+				imageRef(proPrefix+"/worker-kinetics", version),
 			},
 			SizeMB:      4000,
 			Required:    false,
@@ -3112,11 +3175,9 @@ func (a *App) CheckGPU() bool {
 	return err == nil
 }
 
-// repoOf strips the :tag from an image reference, leaving the
-// registry/namespace/name. A ':' denotes a tag only when no '/' follows it, so
-// a registry host:port (e.g. localhost:5000/foo) is preserved.
-func repoOf(ref string) string {
-	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+// canonicalImageRef normalizes a tag reference for exact comparisons.
+func canonicalImageRef(ref string) string {
+	if i := strings.Index(ref, "@"); i >= 0 {
 		return ref[:i]
 	}
 	return ref
@@ -3165,13 +3226,9 @@ func (a *App) CheckImagePresence() map[string]bool {
 		for _, requiredImage := range group.Images {
 			found := false
 
-			// Match on the repository path (tag-agnostic): the launcher pulls
-			// ":latest" while compose resolves ":${VERSION:-latest}". Exact repo
-			// equality avoids false positives like "md" being a substring of
-			// "admet" that the old strings.Contains match produced.
-			reqRepo := repoOf(requiredImage)
+			reqRef := canonicalImageRef(requiredImage)
 			for _, availableTag := range availableImages {
-				if repoOf(availableTag) == reqRepo {
+				if canonicalImageRef(availableTag) == reqRef {
 					found = true
 					break
 				}
@@ -3273,6 +3330,20 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 		groupMap := make(map[string]ServiceGroup)
 		for _, g := range allGroups {
 			groupMap[g.ID] = g
+		}
+
+		if _, err := a.requirePinnedProductionVersion(); err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+				Service:   "launcher",
+				Message:   err.Error(),
+				Timestamp: time.Now().Format("15:04:05"),
+			})
+			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+				"success":      false,
+				"failedGroups": groupIDs,
+				"reason":       "version_not_pinned",
+			})
+			return
 		}
 
 		hasGPUService := false

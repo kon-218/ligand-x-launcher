@@ -266,6 +266,45 @@ func TestSaveLocalAccountRejectsWeakPassword(t *testing.T) {
 	}
 }
 
+func TestFindProjectPathPrefersSourceCheckoutForDevBuild(t *testing.T) {
+	tmpDir := t.TempDir()
+	launcherDir := filepath.Join(tmpDir, "ligand-x-launcher")
+	sourceDir := filepath.Join(tmpDir, "ligand-x")
+	if err := os.MkdirAll(launcherDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(launcherDir, "docker-compose.yml"), []byte("services: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "docker-compose.yml"), []byte("services: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "docker-compose.override.yml"), []byte("services: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+	if err := os.Chdir(launcherDir); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	got, ok := app.findProjectPath()
+	if !ok {
+		t.Fatal("expected project path to be found")
+	}
+	if got != sourceDir {
+		t.Fatalf("expected source checkout %q, got %q", sourceDir, got)
+	}
+}
+
 func TestRuntimeBundleExtractionAllowsOnlyRuntimeFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	zipPath := filepath.Join(tmpDir, "runtime.zip")
@@ -320,6 +359,7 @@ func TestEnsureProductionEnvReplacesUnsafeDefaults(t *testing.T) {
 		"REDIS_URL=redis://:CHANGE_ME@redis:6379/0",
 		"QC_SECRET_KEY=CHANGE_ME",
 		"LIGANDX_API_KEY=CHANGE_ME",
+		"LIGANDX_PASSWORD=CHANGE_ME",
 		"FLOWER_PASSWORD=CHANGE_ME",
 		"NEXT_PUBLIC_API_URL=https://your-domain.com",
 		"CORS_ORIGINS=https://your-domain.com",
@@ -340,6 +380,48 @@ func TestEnsureProductionEnvReplacesUnsafeDefaults(t *testing.T) {
 	}
 	if !strings.Contains(env, "NEXT_PUBLIC_API_URL=http://localhost:8000") {
 		t.Fatalf("production env missing local frontend API URL:\n%s", env)
+	}
+}
+
+func TestDevComposeArgsFallsBackToProductionEnvWithoutMissingOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	if err := os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte("services: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	template := strings.Join([]string{
+		"POSTGRES_USER=ligandx",
+		"POSTGRES_PASSWORD=CHANGE_ME",
+		"POSTGRES_DB=ligandx",
+		"DATABASE_URL=postgresql://ligandx:CHANGE_ME@postgres:5432/ligandx",
+		"RABBITMQ_USER=ligandx",
+		"RABBITMQ_PASSWORD=CHANGE_ME",
+		"CELERY_BROKER_URL=amqp://ligandx:CHANGE_ME@rabbitmq:5672/",
+		"CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0",
+		"REDIS_PASSWORD=CHANGE_ME",
+		"REDIS_URL=redis://:CHANGE_ME@redis:6379/0",
+		"QC_SECRET_KEY=CHANGE_ME",
+		"LIGANDX_API_KEY=CHANGE_ME",
+		"FLOWER_PASSWORD=CHANGE_ME",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(template), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := strings.Join(app.devComposeArgs(), " ")
+	if !strings.Contains(args, "--env-file .env.production") {
+		t.Fatalf("expected dev compose args to load production env fallback, got %q", args)
+	}
+	if strings.Contains(args, "docker-compose.override.yml") || strings.Contains(args, "docker-compose.pro-dev.yml") {
+		t.Fatalf("expected missing override files to be skipped, got %q", args)
+	}
+	data, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "${REDIS_PASSWORD}") {
+		t.Fatalf("production env kept unresolved Redis substitution:\n%s", string(data))
 	}
 }
 
@@ -418,7 +500,7 @@ func signTestLicense(t *testing.T, payload map[string]interface{}) (bundleBytes 
 	if err != nil {
 		t.Fatalf("keygen: %v", err)
 	}
-	canonical, err := json.Marshal(payload)
+	canonical, err := canonicalLicensePayload(payload)
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
@@ -579,6 +661,22 @@ func TestVerifyLicenseAcademicGrantsAll(t *testing.T) {
 		if !got.HasEntitlement(entitlement) {
 			t.Fatalf("academic should grant %q", entitlement)
 		}
+	}
+}
+
+func TestVerifyLicenseWithVersionRangeGreaterThan(t *testing.T) {
+	bundle, pub := signTestLicense(t, map[string]interface{}{
+		"edition":       "academic",
+		"license_id":    "LX-TEST-HTML-ESCAPE",
+		"expires_at":    time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		"version_range": ">=0.0.0",
+	})
+	got, err := verifyLicenseDataWithPublicKey(bundle, pub)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Valid || got.Reason != "ok" {
+		t.Fatalf("expected version_range license to verify, got %+v", got)
 	}
 }
 

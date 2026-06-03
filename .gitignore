@@ -25,6 +25,7 @@ ligandx-launcher-*
 
 # Wails generated
 frontend/wailsjs/
+frontend-public/wailsjs/
 
 # IDE
 .idea/

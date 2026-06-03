@@ -1,15 +1,17 @@
-name: Build & Release Launcher
+name: Build & Release Public Launcher
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'launcher-v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., 1.0.0)'
+        description: 'Version tag (e.g., 1.0.0). Leave as latest for the rolling public release.'
         required: true
-        default: '1.0.0'
+        default: 'latest'
 
 permissions:
   contents: write
@@ -17,6 +19,11 @@ permissions:
 env:
   GO_VERSION: '1.21'
   WAILS_VERSION: 'latest'
+  PUBLIC_RELEASE_TAG: latest
+
+concurrency:
+  group: public-launcher-release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # ============================================================
@@ -42,10 +49,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config libfuse2t64 file imagemagick
 
-      - name: Build Linux binary
+      - name: Build Linux public binary
         run: |
           WAILS_BIN="$(go env GOPATH)/bin/wails"
-          "$WAILS_BIN" build -platform linux/amd64 -tags webkit2_41 -o ligandx-launcher
+          "$WAILS_BIN" build -platform linux/amd64 -tags "public,webkit2_41" -o ligandx
 
       - name: Download linuxdeploy
         run: |
@@ -61,34 +68,39 @@ jobs:
           mkdir -p AppDir/usr/share/icons/hicolor/1024x1024/apps
 
           # Copy binary
-          cp build/bin/ligandx-launcher AppDir/usr/bin/
+          cp build/bin/ligandx AppDir/usr/bin/
 
           # Copy icons
-          cp build/appicon.png AppDir/usr/share/icons/hicolor/1024x1024/apps/ligandx-launcher.png
-          convert build/appicon.png -resize 256x256 AppDir/usr/share/icons/hicolor/256x256/apps/ligandx-launcher.png
-          cp AppDir/usr/share/icons/hicolor/256x256/apps/ligandx-launcher.png AppDir/ligandx-launcher.png
+          cp build/appicon.png AppDir/usr/share/icons/hicolor/1024x1024/apps/ligandx.png
+          convert build/appicon.png -resize 256x256 AppDir/usr/share/icons/hicolor/256x256/apps/ligandx.png
+          cp AppDir/usr/share/icons/hicolor/256x256/apps/ligandx.png AppDir/ligandx.png
 
           # Copy desktop file
-          cp build/linux/ligandx-launcher.desktop AppDir/usr/share/applications/
-          cp build/linux/ligandx-launcher.desktop AppDir/
+          sed \
+            -e 's/^Name=.*/Name=Ligand-X/' \
+            -e 's/^Exec=.*/Exec=ligandx/' \
+            -e 's/^Icon=.*/Icon=ligandx/' \
+            -e 's/^StartupWMClass=.*/StartupWMClass=ligandx/' \
+            build/linux/ligandx-launcher.desktop > AppDir/usr/share/applications/ligandx.desktop
+          cp AppDir/usr/share/applications/ligandx.desktop AppDir/
 
           # Build AppImage
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
-            --desktop-file AppDir/usr/share/applications/ligandx-launcher.desktop \
-            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/ligandx-launcher.png \
+            --desktop-file AppDir/usr/share/applications/ligandx.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/ligandx.png \
             --output appimage
 
           # Rename output
-          mv Ligand-X_Launcher*.AppImage ligandx-launcher-linux-amd64.AppImage || \
-          mv Ligandx-launcher*.AppImage ligandx-launcher-linux-amd64.AppImage || \
-          mv *.AppImage ligandx-launcher-linux-amd64.AppImage
+          mv Ligand-X*.AppImage ligandx-linux-amd64.AppImage || \
+          mv Ligandx*.AppImage ligandx-linux-amd64.AppImage || \
+          mv *.AppImage ligandx-linux-amd64.AppImage
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ligandx-launcher-linux-amd64.AppImage
-          path: ligandx-launcher-linux-amd64.AppImage
+          name: ligandx-linux-amd64.AppImage
+          path: ligandx-linux-amd64.AppImage
           retention-days: 5
 
   # ============================================================
@@ -112,26 +124,26 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y
 
-      - name: Build Windows installer
+      - name: Build Windows public installer
         shell: pwsh
         run: |
           $env:PATH = "$env:PATH;$env:USERPROFILE\go\bin"
-          wails build -platform windows/amd64 -nsis
+          wails build -platform windows/amd64 -tags public -o ligandx -nsis
 
           # Find and rename the installer
           $installer = Get-ChildItem -Path "build/bin" -Filter "*installer*.exe" | Select-Object -First 1
           if ($installer) {
-            Move-Item $installer.FullName "build/bin/ligandx-launcher-windows-amd64-installer.exe"
+            Move-Item $installer.FullName "build/bin/ligandx-windows-amd64-installer.exe"
           } else {
             # Fallback: just rename the exe if no installer was created
-            Move-Item "build/bin/ligandx-launcher.exe" "build/bin/ligandx-launcher-windows-amd64-installer.exe" -ErrorAction SilentlyContinue
+            Move-Item "build/bin/ligandx.exe" "build/bin/ligandx-windows-amd64-installer.exe" -ErrorAction SilentlyContinue
           }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ligandx-launcher-windows-amd64-installer.exe
-          path: build/bin/ligandx-launcher-windows-amd64-installer.exe
+          name: ligandx-windows-amd64-installer.exe
+          path: build/bin/ligandx-windows-amd64-installer.exe
           retention-days: 5
 
   # ============================================================
@@ -155,15 +167,15 @@ jobs:
       - name: Install create-dmg
         run: brew install create-dmg
 
-      - name: Build macOS universal app
+      - name: Build macOS public universal app
         run: |
           WAILS_BIN="$(go env GOPATH)/bin/wails"
-          "$WAILS_BIN" build -platform darwin/universal
+          "$WAILS_BIN" build -platform darwin/universal -tags public -o ligandx
 
       - name: Create DMG
         run: |
           # Find the .app bundle
-          APP_PATH="build/bin/ligandx-launcher.app"
+          APP_PATH="build/bin/ligandx.app"
           if [ ! -d "$APP_PATH" ]; then
             APP_PATH=$(find build/bin -name "*.app" -type d | head -1)
           fi
@@ -177,7 +189,7 @@ jobs:
           echo "Found app at: $APP_PATH"
 
           create-dmg \
-            --volname "Ligand-X Launcher" \
+            --volname "Ligand-X" \
             --volicon "build/darwin/appicon.png" \
             --window-pos 200 120 \
             --window-size 600 400 \
@@ -186,9 +198,9 @@ jobs:
             --icon "$(basename "$APP_PATH")" 200 190 \
             --hide-extension "$(basename "$APP_PATH")" \
             --no-internet-enable \
-            "ligandx-launcher-darwin-universal.dmg" \
+            "ligandx-darwin-universal.dmg" \
             "$APP_PATH" || {
-              if [ -f "ligandx-launcher-darwin-universal.dmg" ]; then
+              if [ -f "ligandx-darwin-universal.dmg" ]; then
                 echo "DMG created successfully"
               else
                 echo "DMG creation failed"
@@ -199,8 +211,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ligandx-launcher-darwin-universal.dmg
-          path: ligandx-launcher-darwin-universal.dmg
+          name: ligandx-darwin-universal.dmg
+          path: ligandx-darwin-universal.dmg
           retention-days: 5
 
   # ============================================================
@@ -209,21 +221,38 @@ jobs:
   release:
     needs: [build-linux, build-windows, build-macos-universal]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create tag for manual dispatch
-        if: github.event_name == 'workflow_dispatch'
+      - name: Resolve release tag
+        id: release-tag
+        shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            echo "tag=${PUBLIC_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            echo "title=Ligand-X Public Launcher latest" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && { [ -z "${VERSION}" ] || [ "${VERSION}" = "${PUBLIC_RELEASE_TAG}" ]; }; then
+            echo "tag=${PUBLIC_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            echo "title=Ligand-X Public Launcher latest" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "tag=launcher-v${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "title=Ligand-X Public Launcher ${VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "title=Ligand-X Public Launcher ${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update release tag
+        env:
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -f "launcher-v${VERSION}"
-          git push -f origin "launcher-v${VERSION}"
+          git tag -f "${RELEASE_TAG}"
+          git push -f origin "${RELEASE_TAG}"
 
       - name: Build runtime bundle
         run: ./scripts/build-runtime-bundle.sh artifacts/runtime
@@ -237,30 +266,33 @@ jobs:
         run: ls -R artifacts
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('launcher-v{0}', inputs.version) || github.ref_name }}
-          name: Ligand-X Launcher ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          tag_name: ${{ steps.release-tag.outputs.tag }}
+          name: ${{ steps.release-tag.outputs.title }}
+          target_commitish: ${{ github.sha }}
           draft: false
           prerelease: false
+          make_latest: ${{ steps.release-tag.outputs.tag == env.PUBLIC_RELEASE_TAG }}
+          overwrite_files: true
           files: |
-            artifacts/ligandx-launcher-linux-amd64.AppImage/ligandx-launcher-linux-amd64.AppImage
-            artifacts/ligandx-launcher-windows-amd64-installer.exe/ligandx-launcher-windows-amd64-installer.exe
-            artifacts/ligandx-launcher-darwin-universal.dmg/ligandx-launcher-darwin-universal.dmg
+            artifacts/ligandx-linux-amd64.AppImage/ligandx-linux-amd64.AppImage
+            artifacts/ligandx-windows-amd64-installer.exe/ligandx-windows-amd64-installer.exe
+            artifacts/ligandx-darwin-universal.dmg/ligandx-darwin-universal.dmg
             artifacts/runtime/ligand-x-runtime.zip
           body: |
-            ## Ligand-X Launcher ${{ github.ref_name }}
+            ## ${{ steps.release-tag.outputs.title }}
 
-            Cross-platform GUI launcher for the Ligand-X molecular analysis platform.
+            Cross-platform public GUI launcher for the Ligand-X molecular analysis platform.
 
             ### Downloads
 
             | Platform | File | Installation |
             |----------|------|--------------|
-            | **Windows** (64-bit) | `ligandx-launcher-windows-amd64-installer.exe` | Run installer, follow prompts |
+            | **Windows** (64-bit) | `ligandx-windows-amd64-installer.exe` | Run installer, follow prompts |
             | **Runtime Bundle** | `ligand-x-runtime.zip` | Downloaded automatically by the launcher on first run |
-            | **macOS** (Intel + Apple Silicon) | `ligandx-launcher-darwin-universal.dmg` | Open DMG, drag to Applications |
-            | **Linux** (64-bit) | `ligandx-launcher-linux-amd64.AppImage` | `chmod +x`, double-click to run |
+            | **macOS** (Intel + Apple Silicon) | `ligandx-darwin-universal.dmg` | Open DMG, drag to Applications |
+            | **Linux** (64-bit) | `ligandx-linux-amd64.AppImage` | `chmod +x`, double-click to run |
 
             ### Requirements
 
@@ -288,6 +320,6 @@ jobs:
 
             If double-click doesn't work, make it executable first:
             ```bash
-            chmod +x ligandx-launcher-linux-amd64.AppImage
-            ./ligandx-launcher-linux-amd64.AppImage
+            chmod +x ligandx-linux-amd64.AppImage
+            ./ligandx-linux-amd64.AppImage
             ```

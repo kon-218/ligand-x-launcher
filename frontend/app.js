@@ -9,7 +9,7 @@ let logs = [];
 // Services tab selection state (mirrors config.selectedGroups)
 let serviceTabSelection = [];
 
-const CORE_SERVICES = ['postgres', 'redis', 'rabbitmq', 'gateway', 'frontend', 'structure'];
+const CORE_SERVICES = ['postgres', 'redis', 'rabbitmq', 'gateway', 'frontend', 'proxy', 'structure'];
 
 // Initialize on load — wait for Wails runtime to be injected before calling backend
 document.addEventListener('DOMContentLoaded', () => {
@@ -104,13 +104,25 @@ async function checkDocker() {
         const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Docker check timed out')), 3000)
         );
-        const [ok, message] = await Promise.race([checkPromise, timeoutPromise]);
+        const res = await Promise.race([checkPromise, timeoutPromise]);
+        const { ok, message } = normalizeDockerCheck(res);
         updateDockerStatus(ok, message);
         return ok;
     } catch (err) {
         updateDockerStatus(false, err.message || err);
         return false;
     }
+}
+
+
+function normalizeDockerCheck(res) {
+    if (Array.isArray(res)) return { ok: !!res[0], message: res[1] || '' };
+    if (typeof res === 'boolean') return { ok: res, message: '' };
+    if (res && typeof res === 'object') {
+        return { ok: !!(res.ok ?? res.running ?? res.success), message: res.message || '' };
+    }
+    if (typeof res === 'string') return { ok: false, message: res };
+    return { ok: false, message: '' };
 }
 
 function updateDockerStatus(running, message) {
@@ -1472,6 +1484,7 @@ window.addEventListener('beforeunload', () => {
 const WORKBENCH_CONTAINERS = [
     { category: 'Core', service: 'Gateway', name: 'ligand-x-gateway', image: 'ligandx/gateway:local', port: '8000' },
     { category: 'Core', service: 'Frontend', name: 'ligand-x-frontend', image: 'ligandx/frontend:local', port: '3000' },
+    { category: 'Core', service: 'Proxy', name: 'ligandx-proxy', image: 'nginx:1.27-alpine', port: '8080' },
     { category: 'Core', service: 'PostgreSQL', name: 'ligand-x-postgres', image: 'postgres:16', port: '5432' },
     { category: 'Core', service: 'Redis', name: 'ligand-x-redis', image: 'redis:7', port: '6379' },
     { category: 'Compute', service: 'Worker CPU', name: 'ligand-x-worker-cpu', image: 'ligandx/worker:cpu', port: '-' },
@@ -2525,6 +2538,7 @@ function getKnownContainers() {
         { category: 'Core', service: 'rabbitmq', name: 'ligand-x-rabbitmq', image: 'rabbitmq:3.13-management-alpine', port: '5672, 15672' },
         { category: 'Core', service: 'gateway', name: 'ligand-x-gateway', image: 'ghcr.io/kon-218/ligand-x/gateway:latest', port: '8000' },
         { category: 'Core', service: 'frontend', name: 'ligand-x-frontend', image: 'ghcr.io/kon-218/ligand-x/frontend:latest', port: '3000' },
+        { category: 'Core', service: 'proxy', name: 'ligandx-proxy', image: 'nginx:1.27-alpine', port: '8080' },
         { category: 'Core', service: 'structure', name: 'ligand-x-structure', image: 'ghcr.io/kon-218/ligand-x/structure:latest', port: '8003' },
         { category: 'Core', service: 'pocket-finder', name: 'ligand-x-pocket-finder', image: 'ghcr.io/kon-218/ligand-x/pocket-finder:latest', port: '8004' },
         { category: 'Core', service: 'alignment', name: 'ligand-x-alignment', image: 'ghcr.io/kon-218/ligand-x/alignment:latest', port: '8005' },

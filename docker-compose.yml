@@ -29,12 +29,17 @@ networks:
     # Note: Backend services need external access for PDB files, MSA APIs, etc.
     # For production security, use firewall rules at infrastructure level instead
 
+x-runtime-app-env: &runtime-app-env APP_ENV=${APP_ENV:-production}
+x-runtime-api-key: &runtime-api-key LIGANDX_API_KEY=${LIGANDX_API_KEY:-}
+x-runtime-username: &runtime-username LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
+x-runtime-password: &runtime-password LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
+
 services:
   # ============================================================
   # Gateway Service
   # ============================================================
   gateway:
-    image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -46,6 +51,10 @@ services:
       - frontend
       - backend
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - REDIS_URL=${REDIS_URL:?REDIS_URL must be set (e.g. redis://redis:6379/0)}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -63,10 +72,7 @@ services:
       - POCKET_FINDER_URL=http://pocket-finder:8012
       - REINVENT_URL=http://reinvent:8013
       - KINETICS_URL=http://kinetics:8014
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
-      - LIGANDX_API_KEY=${LIGANDX_API_KEY:-}
-      - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-      - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8080,https://lab.k-nom.com}
       - LIGANDX_LICENSE_FILE=/app/data/license/ligandx-license.json
     volumes:
       - ./data/license:/app/data/license:ro
@@ -100,7 +106,7 @@ services:
   # Lightweight Microservices (base environment ~1.5GB)
   # ============================================================
   structure:
-    image: ghcr.io/kon-218/ligand-x/structure:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/structure:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -111,6 +117,10 @@ services:
     expose:
       - "8001"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
@@ -137,7 +147,7 @@ services:
         max-file: "3"
 
   pocket-finder:
-    image: ghcr.io/kon-218/ligand-x/pocket-finder:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/pocket-finder:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -150,6 +160,10 @@ services:
     expose:
       - "8012"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEEPPOCKET_MODELS_PATH=/models
@@ -178,7 +192,7 @@ services:
         max-file: "3"
 
   reinvent:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/reinvent:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/reinvent:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "reinvent", "8013" ]
     networks:
       - backend
@@ -188,6 +202,10 @@ services:
     expose:
       - "8013"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - REINVENT_MODELS_PATH=/models
@@ -219,7 +237,7 @@ services:
         max-file: "3"
 
   kinetics:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/kinetics:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/kinetics:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "kinetics", "8014" ]
     networks:
       - backend
@@ -228,6 +246,10 @@ services:
     expose:
       - "8014"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -262,7 +284,7 @@ services:
         max-file: "3"
 
   alignment:
-    image: ghcr.io/kon-218/ligand-x/alignment:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/alignment:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -273,6 +295,10 @@ services:
     expose:
       - "8007"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
@@ -297,7 +323,7 @@ services:
         max-file: "3"
 
   ketcher:
-    image: ghcr.io/kon-218/ligand-x/ketcher:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/ketcher:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -308,6 +334,10 @@ services:
     expose:
       - "8008"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
@@ -332,7 +362,7 @@ services:
         max-file: "3"
 
   msa:
-    image: ghcr.io/kon-218/ligand-x/msa:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/msa:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -345,6 +375,10 @@ services:
     expose:
       - "8009"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
@@ -372,7 +406,7 @@ services:
   # Docking Service (~2.5GB)
   # ============================================================
   docking:
-    image: ghcr.io/kon-218/ligand-x/docking:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/docking:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -385,6 +419,10 @@ services:
     expose:
       - "8002"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
@@ -412,7 +450,7 @@ services:
   # GPU Services (MD environment ~4GB)
   # ============================================================
   md:
-    image: ghcr.io/kon-218/ligand-x/md:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/md:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -425,6 +463,10 @@ services:
     expose:
       - "8003"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
@@ -453,7 +495,7 @@ services:
         max-file: "3"
 
   abfe:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/abfe:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/abfe:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "abfe", "8010" ]
     networks:
       - backend
@@ -462,6 +504,10 @@ services:
     expose:
       - "8010"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
@@ -490,7 +536,7 @@ services:
         max-file: "3"
 
   rbfe:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/rbfe:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/rbfe:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "rbfe", "8011" ]
     networks:
       - backend
@@ -499,6 +545,10 @@ services:
     expose:
       - "8011"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - RBFE_OUTPUT_DIR=/app/data/rbfe_outputs
@@ -534,13 +584,17 @@ services:
   # ADMET Service (~3GB with PyTorch)
   # ============================================================
   admet:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/admet:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/admet:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "admet", "8004" ]
     networks:
       - backend
     expose:
       - "8004"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
@@ -568,7 +622,7 @@ services:
   # Boltz2 Service (~6GB with PyTorch + CUDA)
   # ============================================================
   boltz2:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/boltz2:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/boltz2:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "boltz2", "8005" ]
     networks:
       - backend
@@ -578,6 +632,10 @@ services:
     expose:
       - "8005"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - BOLTZ_MSA_USERNAME=${BOLTZ_MSA_USERNAME:-}
@@ -614,13 +672,17 @@ services:
   # QC Service (~2.5GB)
   # ============================================================
   qc:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/qc:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/qc:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "qc", "8006" ]
     networks:
       - backend
     expose:
       - "8006"
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -664,11 +726,15 @@ services:
 
   # QC Worker for quantum chemistry calculations
   worker-qc:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "worker-qc" ]
     networks:
       - backend
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -712,7 +778,7 @@ services:
 
   # GPU Worker for short/fast tasks (MD, Boltz2, ADMET)
   worker-gpu-short:
-    image: ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -721,6 +787,10 @@ services:
     networks:
       - backend
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -761,11 +831,15 @@ services:
 
   # GPU Worker for long-running tasks (ABFE, RBFE)
   worker-gpu-long:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "worker-gpu-long" ]
     networks:
       - backend
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -809,7 +883,7 @@ services:
 
   # CPU Worker for batch docking
   worker-cpu:
-    image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -818,6 +892,10 @@ services:
     networks:
       - backend
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -854,11 +932,15 @@ services:
 
   # REINVENT Worker for generative campaigns
   worker-reinvent:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "worker-reinvent" ]
     networks:
       - backend
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
@@ -897,11 +979,15 @@ services:
         max-file: "3"
 
   worker-kinetics:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-kinetics:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-kinetics:${VERSION:?VERSION must be set to a pinned release tag}
     command: [ "worker-kinetics" ]
     networks:
       - backend
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
@@ -947,7 +1033,7 @@ services:
   # Schedules periodic maintenance tasks (expired job cleanup, output cleanup)
   # Only one beat instance should run; use this for production deployments.
   celery-beat:
-    image: ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -958,6 +1044,10 @@ services:
     volumes:
       - celery_beat_data:/app/celery-beat
     environment:
+      - *runtime-app-env
+      - *runtime-api-key
+      - *runtime-username
+      - *runtime-password
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -1119,7 +1209,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5555/healthcheck"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5555/flower/healthcheck', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -1139,10 +1229,35 @@ services:
         max-file: "3"
 
   # ============================================================
+  # Same-Origin Reverse Proxy
+  # ============================================================
+  proxy:
+    image: nginx:1.27-alpine
+    container_name: ligandx-proxy
+    ports:
+      - "${APP_PORT:-8080}:80"
+    networks:
+      - frontend
+    volumes:
+      - ./docker/nginx/ligandx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # ============================================================
   # Frontend
   # ============================================================
   frontend:
-    image: ghcr.io/kon-218/ligand-x/frontend:${VERSION:-latest}
+    image: ghcr.io/kon-218/ligand-x/frontend:${VERSION:?VERSION must be set to a pinned release tag}
     build:
       context: .
       dockerfile: docker/Dockerfile.frontend
@@ -1152,14 +1267,14 @@ services:
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
       - NEXT_PUBLIC_API_KEY=${LIGANDX_API_KEY:-}
       - NODE_ENV=${NODE_ENV:-production}
     depends_on:
       gateway:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3
