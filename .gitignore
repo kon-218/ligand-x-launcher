@@ -32,3 +32,5 @@ frontend-public/wailsjs/
 .vscode/
 *.swp
 *.swo
+.env.production
+/data/

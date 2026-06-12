@@ -192,17 +192,22 @@ var proEntitlements = map[string]bool{
 	"kinetics":    true,
 }
 
-// gpuRequiresNvidia lists every docker service name that carries an NVIDIA
-// device reservation in docker-compose.yml. Used for pre-flight GPU checks
-// before pull and start operations so both paths stay in sync.
-var gpuRequiresNvidia = map[string]bool{
-	"md":               true,
-	"abfe":             true,
-	"rbfe":             true,
-	"boltz2":           true,
-	"worker-gpu-short": true,
-	"worker-gpu-long":  true,
-	"worker-kinetics":  true,
+// gpuRequiredRuntime lists services that genuinely cannot run without a GPU and
+// must be hard-blocked on CPU-only hosts. The core services md and
+// worker-gpu-short are deliberately absent: OpenMM falls back to its CPU
+// platform (see services/md/main.py), so CPU-only users can still run them —
+// just slower. Used by the pre-flight checks before pull and start.
+//
+// The set of services that *reserve* a GPU when one is present is broader (md
+// and worker-gpu-short included); that coverage lives in docker-compose.gpu.yml,
+// which the launcher layers on top of the CPU-safe base only when an NVIDIA GPU
+// is detected (see gpuComposeArgs).
+var gpuRequiredRuntime = map[string]bool{
+	"abfe":            true,
+	"rbfe":            true,
+	"boltz2":          true,
+	"worker-gpu-long": true,
+	"worker-kinetics": true,
 }
 
 // ligandxServiceSet is every docker-compose service name that belongs to the
@@ -1079,12 +1084,27 @@ func (a *App) devEnvArgs() []string {
 // When the Pro repo is checked out locally, it layers docker-compose.pro-dev.yml
 // so Pro service source hot-reloads from the host. Callers append `up`, `-d`,
 // flags, and any service names.
+// gpuComposeArgs returns the GPU overlay `-f` args when an NVIDIA GPU is present
+// and the overlay file exists. The base docker-compose.yml is CPU-safe; this
+// overlay re-adds NVIDIA device reservations so GPU services use the hardware.
+// Callers must already pass `-f docker-compose.yml` explicitly — a lone `-f`
+// disables compose's auto-discovery of the base file.
+func (a *App) gpuComposeArgs() []string {
+	if a.projectFileExists("docker-compose.gpu.yml") && a.CheckGPU() {
+		return []string{"-f", "docker-compose.gpu.yml"}
+	}
+	return nil
+}
+
 func (a *App) devComposeArgs() []string {
 	args := append([]string{"compose"}, a.devEnvArgs()...)
 	hasDevOverride := a.projectFileExists("docker-compose.override.yml")
 	hasProDevOverride := a.projectFileExists("docker-compose.pro-dev.yml")
+	gpuArgs := a.gpuComposeArgs()
 
-	if hasDevOverride || hasProDevOverride {
+	// Any explicit -f (override or GPU overlay) means we must also name the base
+	// file explicitly, since a single -f disables auto-discovery of the base.
+	if hasDevOverride || hasProDevOverride || len(gpuArgs) > 0 {
 		args = append(args, "-f", "docker-compose.yml")
 	}
 	if hasDevOverride {
@@ -1104,6 +1124,8 @@ func (a *App) devComposeArgs() []string {
 			Timestamp: time.Now().Format("15:04:05"),
 		})
 	}
+	// GPU overlay last so its device reservations win the merge.
+	args = append(args, gpuArgs...)
 	return args
 }
 
@@ -1149,7 +1171,9 @@ func (a *App) StartServices(mode string) error {
 				return err
 			}
 			args = append([]string{"compose"}, a.prodEnvArgs()...)
-			args = append(args, "-f", "docker-compose.yml", "up", "-d", "--pull=never")
+			args = append(args, "-f", "docker-compose.yml")
+			args = append(args, a.gpuComposeArgs()...)
+			args = append(args, "up", "-d", "--pull=never")
 		case "core":
 			coreServices := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "flower"}
 			if !isPublicBuild {
@@ -1254,7 +1278,9 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 			return err
 		}
 		args = append([]string{"compose"}, a.prodEnvArgs()...)
-		args = append(args, "-f", "docker-compose.yml", "up", "-d", "--pull=never")
+		args = append(args, "-f", "docker-compose.yml")
+		args = append(args, a.gpuComposeArgs()...)
+		args = append(args, "up", "-d", "--pull=never")
 	} else {
 		args = append(a.devComposeArgs(), "up", "-d", "--pull=never")
 	}
@@ -1287,7 +1313,9 @@ func (a *App) StartServicesCustom(env string, services []string) error {
 			return err
 		}
 		args = append([]string{"compose"}, a.prodEnvArgs()...)
-		args = append(args, "-f", "docker-compose.yml", "up", "-d")
+		args = append(args, "-f", "docker-compose.yml")
+		args = append(args, a.gpuComposeArgs()...)
+		args = append(args, "up", "-d")
 	} else {
 		args = append(a.devComposeArgs(), "up", "-d")
 	}
@@ -3151,15 +3179,16 @@ func (a *App) verifyImageSignature(image string) error {
 func (a *App) checkGPUForServices(services []string) error {
 	var gpuSvcs []string
 	for _, svc := range services {
-		if gpuRequiresNvidia[svc] {
+		if gpuRequiredRuntime[svc] {
 			gpuSvcs = append(gpuSvcs, svc)
 		}
 	}
 	if len(gpuSvcs) > 0 && !a.CheckGPU() {
 		return fmt.Errorf(
-			"NVIDIA GPU not available (driver not loaded). Cannot start: %s. "+
-				"Deselect GPU-requiring service groups (Molecular Dynamics, "+
-				"Binding Free Energy, Boltz-2, Kinetics) in the Services tab.",
+			"NVIDIA GPU not available (driver not loaded). Cannot start GPU-only "+
+				"services: %s. Deselect the Binding Free Energy, Boltz-2, and "+
+				"Kinetics service groups in the Services tab. Molecular Dynamics "+
+				"runs on CPU without a GPU (slower).",
 			strings.Join(gpuSvcs, ", "),
 		)
 	}
@@ -3358,7 +3387,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 					return
 				}
 				for _, service := range group.Services {
-					if gpuRequiresNvidia[service] {
+					if gpuRequiredRuntime[service] {
 						hasGPUService = true
 						break
 					}

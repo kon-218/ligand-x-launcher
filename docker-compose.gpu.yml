@@ -1,0 +1,38 @@
+# GPU overlay — opt-in NVIDIA device reservations.
+#
+# The base docker-compose.yml is CPU-safe: it carries NO GPU device reservations,
+# so `docker compose up` works on hosts without the NVIDIA container runtime.
+# Core GPU services (md, worker-gpu-short) fall back to the OpenMM CPU platform.
+#
+# Layer this file ON TOP of the base to reserve GPUs where one is available:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# The launcher applies it automatically when it detects an NVIDIA GPU. Keep this
+# file in lockstep with the public ligand-x/ copy.
+x-gpu-reservation: &gpu-reservation
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  # Core GPU services (graceful CPU fallback when this overlay is absent)
+  md:
+    <<: *gpu-reservation
+  worker-gpu-short:
+    <<: *gpu-reservation
+
+  # Pro GPU services (require a GPU at runtime)
+  abfe:
+    <<: *gpu-reservation
+  rbfe:
+    <<: *gpu-reservation
+  boltz2:
+    <<: *gpu-reservation
+  worker-gpu-long:
+    <<: *gpu-reservation
+  worker-kinetics:
+    <<: *gpu-reservation

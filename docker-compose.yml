@@ -33,6 +33,11 @@ x-runtime-app-env: &runtime-app-env APP_ENV=${APP_ENV:-production}
 x-runtime-api-key: &runtime-api-key LIGANDX_API_KEY=${LIGANDX_API_KEY:-}
 x-runtime-username: &runtime-username LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
 x-runtime-password: &runtime-password LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
+# Shared HMAC secret used by Celery workers to authenticate internal job-status
+# callbacks to the gateway (/api/jobs/internal/status). The gateway verifier fails
+# closed, so this MUST be set or worker status updates are silently rejected and
+# jobs appear stuck. Required (no default) to fail fast on misconfiguration.
+x-runtime-internal-secret: &runtime-internal-secret INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET (see .env.example)}
 
 services:
   # ============================================================
@@ -74,6 +79,7 @@ services:
       - KINETICS_URL=http://kinetics:8014
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8080,https://lab.k-nom.com}
       - LIGANDX_LICENSE_FILE=/app/data/license/ligandx-license.json
+      - *runtime-internal-secret
     volumes:
       - ./data/license:/app/data/license:ro
     depends_on:
@@ -484,10 +490,6 @@ services:
         reservations:
           cpus: '${MD_CPU_RES:-2}'
           memory: ${MD_MEM_RES:-4G}
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     logging:
       driver: "json-file"
       options:
@@ -525,10 +527,6 @@ services:
         reservations:
           cpus: '${ABFE_CPU_RES:-2}'
           memory: ${ABFE_MEM_RES:-4G}
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     logging:
       driver: "json-file"
       options:
@@ -570,10 +568,6 @@ services:
         reservations:
           cpus: '${RBFE_CPU_RES:-2}'
           memory: ${RBFE_MEM_RES:-4G}
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     logging:
       driver: "json-file"
       options:
@@ -657,10 +651,6 @@ services:
         reservations:
           cpus: '${BOLTZ2_CPU_RES:-2}'
           memory: ${BOLTZ2_MEM_RES:-6G}
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     shm_size: '8gb'
     logging:
       driver: "json-file"
@@ -795,6 +785,7 @@ services:
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
       - CELERY_CONCURRENCY=${GPU_SHORT_CONCURRENCY:-2}
+      - *runtime-internal-secret
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -819,10 +810,6 @@ services:
         reservations:
           cpus: '${WORKER_GPU_SHORT_CPU_RES:-4}'
           memory: ${WORKER_GPU_SHORT_MEM_RES:-8G}
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     logging:
       driver: "json-file"
       options:
@@ -871,10 +858,6 @@ services:
         reservations:
           cpus: '${WORKER_GPU_LONG_CPU_RES:-4}'
           memory: ${WORKER_GPU_LONG_MEM_RES:-16G}
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     logging:
       driver: "json-file"
       options:
@@ -900,6 +883,7 @@ services:
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
       - CELERY_CONCURRENCY=${CPU_WORKER_CONCURRENCY:-4}
+      - *runtime-internal-secret
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1018,10 +1002,6 @@ services:
         reservations:
           cpus: '${WORKER_KINETICS_CPU_RES:-4}'
           memory: ${WORKER_KINETICS_MEM_RES:-16G}
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     logging:
       driver: "json-file"
       options:
