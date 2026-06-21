@@ -235,6 +235,13 @@ const runtimeBundleAssetName = "ligand-x-runtime.zip"
 
 const latestReleaseAPIURL = "https://api.github.com/repos/kon-218/ligand-x/releases/latest"
 
+// defaultPinnedImageVersion is the image tag this launcher build was published
+// against. It is the last-resort fallback for VERSION self-healing when the
+// on-disk .env.production.template is missing or stale (e.g. an older runtime
+// dir whose template still says CHANGE_ME). Keep in sync with the published
+// core image tag and .env.production.template's VERSION.
+const defaultPinnedImageVersion = "v2026.06.21"
+
 const licensePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAcKQKljOJr+vNjOKVewo7sDMaguZUqIJVhYZDgDhnUlE=
 -----END PUBLIC KEY-----`
@@ -1872,7 +1879,38 @@ func (a *App) ensureProductionEnv() error {
 	if err := a.setProductionEnvValue("CORS_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080"); err != nil {
 		return err
 	}
+
+	// Enforce a pinned image VERSION. This runs on every start/pull, so it
+	// self-heals a stale .env.production that an older launcher pinned to
+	// "latest" (or left empty) — values that docker compose's ${VERSION:?} and
+	// requirePinnedProductionVersion both reject. The canonical pin is the
+	// template's VERSION (single source of truth), only applied when the current
+	// value is not already a valid pin so user-chosen pins are preserved.
+	if !isPinnedImageVersion(cur["VERSION"]) {
+		pinned := a.templatePinnedVersion()
+		if pinned == "" {
+			pinned = defaultPinnedImageVersion
+		}
+		if err := a.setProductionEnvValue("VERSION", pinned); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// templatePinnedVersion returns the VERSION pinned in .env.production.template,
+// or "" if the template is missing or its VERSION is not a concrete pin. This is
+// the canonical image tag the bundle was published against.
+func (a *App) templatePinnedVersion() string {
+	data, err := os.ReadFile(filepath.Join(a.projectPath, ".env.production.template"))
+	if err != nil {
+		return ""
+	}
+	v := strings.TrimSpace(parseEnvFile(string(data))["VERSION"])
+	if !isPinnedImageVersion(v) {
+		return ""
+	}
+	return v
 }
 
 // GetUserSettings returns the user-facing subset of .env.production.

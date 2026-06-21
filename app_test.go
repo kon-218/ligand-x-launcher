@@ -378,8 +378,48 @@ func TestEnsureProductionEnvReplacesUnsafeDefaults(t *testing.T) {
 	if strings.Contains(env, "CHANGE_ME") || strings.Contains(env, "https://your-domain.com") {
 		t.Fatalf("production env still contains unsafe defaults:\n%s", env)
 	}
-	if !strings.Contains(env, "NEXT_PUBLIC_API_URL=http://localhost:8000") {
-		t.Fatalf("production env missing local frontend API URL:\n%s", env)
+	// Same-origin via the bundled reverse proxy: the browser uses its own origin,
+	// so NEXT_PUBLIC_API_URL is intentionally blank (not a hard-coded host).
+	if !strings.Contains(env, "NEXT_PUBLIC_API_URL=\n") && !strings.HasSuffix(env, "NEXT_PUBLIC_API_URL=") {
+		t.Fatalf("production env should blank NEXT_PUBLIC_API_URL for same-origin proxying:\n%s", env)
+	}
+	// VERSION must be self-healed to a concrete pin (template had none here, so the
+	// compiled-in defaultPinnedImageVersion fallback applies). 'latest'/empty would
+	// be rejected by compose's ${VERSION:?} and requirePinnedProductionVersion.
+	if !strings.Contains(env, "VERSION="+defaultPinnedImageVersion) {
+		t.Fatalf("production env missing pinned VERSION:\n%s", env)
+	}
+}
+
+// TestEnsureProductionEnvSelfHealsStaleLatestVersion reproduces the reported
+// Windows failure: an older launcher pinned VERSION=latest into .env.production,
+// which compose's ${VERSION:?} and requirePinnedProductionVersion reject. On the
+// next start/pull, ensureProductionEnv must rewrite it to the template's pin.
+func TestEnsureProductionEnvSelfHealsStaleLatestVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+
+	// Template carries the canonical pin.
+	template := "VERSION=v2026.06.21\nINTERNAL_WORKER_SECRET=CHANGE_ME\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(template), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-existing .env.production with the broken stale value.
+	stale := "VERSION=latest\nINTERNAL_WORKER_SECRET=already-set\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte(stale), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.ensureProductionEnv(); err != nil {
+		t.Fatalf("ensureProductionEnv failed: %v", err)
+	}
+	v, _ := app.productionImageSettings()
+	if v != "v2026.06.21" {
+		t.Fatalf("expected VERSION self-healed to v2026.06.21, got %q", v)
+	}
+	if _, err := app.requirePinnedProductionVersion(); err != nil {
+		t.Fatalf("requirePinnedProductionVersion still failing after self-heal: %v", err)
 	}
 }
 
