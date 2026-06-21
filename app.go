@@ -1826,7 +1826,7 @@ func (a *App) ensureProductionEnv() error {
 	}
 
 	// Generate any missing secrets.
-	secretKeys := []string{"POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD", "QC_SECRET_KEY", "LIGANDX_API_KEY", "LIGANDX_PASSWORD", "FLOWER_PASSWORD"}
+	secretKeys := []string{"POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD", "QC_SECRET_KEY", "LIGANDX_API_KEY", "LIGANDX_PASSWORD", "FLOWER_PASSWORD", "INTERNAL_WORKER_SECRET"}
 	for _, key := range secretKeys {
 		if isEnvPlaceholder(cur[key]) {
 			v, err := generateAPIKey()
