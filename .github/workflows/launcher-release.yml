@@ -17,8 +17,12 @@ permissions:
   contents: write
 
 env:
-  GO_VERSION: '1.21'
-  WAILS_VERSION: 'latest'
+  # Match go.mod (`go 1.25.0`) so CI uses the project toolchain directly
+  # instead of auto-downloading a newer one mid-build.
+  GO_VERSION: '1.25'
+  # Pin the Wails CLI to the version in go.mod to avoid CLI/library drift
+  # (the build log warned: "go.mod is using Wails '2.11.0' but the CLI is 'v2.12.0'").
+  WAILS_VERSION: 'v2.11.0'
   PUBLIC_RELEASE_TAG: latest
 
 concurrency:
@@ -51,8 +55,15 @@ jobs:
 
       - name: Build Linux public binary
         run: |
+          set -euo pipefail
           WAILS_BIN="$(go env GOPATH)/bin/wails"
           "$WAILS_BIN" build -platform linux/amd64 -tags "public,webkit2_41" -o ligandx
+          # Fail loudly if this is the non-production stub (it embeds
+          # internal/app/app_default_unix.go, which is //go:build !production).
+          if grep -aq "app_default_unix.go" build/bin/ligandx; then
+            echo "::error::Built binary is the Wails stub (missing 'production' tag)"
+            exit 1
+          fi
 
       - name: Download linuxdeploy
         run: |
@@ -101,10 +112,11 @@ jobs:
         with:
           name: ligandx-linux-amd64.AppImage
           path: ligandx-linux-amd64.AppImage
+          if-no-files-found: error
           retention-days: 5
 
   # ============================================================
-  # Windows Build - Creates NSIS Installer
+  # Windows Build - Portable production binary (double-click to run)
   # ============================================================
   build-windows:
     runs-on: windows-latest
@@ -121,29 +133,46 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
 
-      - name: Install NSIS
-        run: choco install nsis -y
-
-      - name: Build Windows public installer
+      - name: Build Windows public binary
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $env:PATH = "$env:PATH;$env:USERPROFILE\go\bin"
-          wails build -platform windows/amd64 -tags public -o ligandx -nsis
 
-          # Find and rename the installer
-          $installer = Get-ChildItem -Path "build/bin" -Filter "*installer*.exe" | Select-Object -First 1
-          if ($installer) {
-            Move-Item $installer.FullName "build/bin/ligandx-windows-amd64-installer.exe"
-          } else {
-            # Fallback: just rename the exe if no installer was created
-            Move-Item "build/bin/ligandx.exe" "build/bin/ligandx-windows-amd64-installer.exe" -ErrorAction SilentlyContinue
+          # Portable production build. `wails build` injects the `production`
+          # build tag; WITHOUT it the binary is a stub that, on launch, only
+          # shows "Wails applications will not build without the correct build
+          # tags. Please use 'wails build'...". We ship the bare exe (no NSIS):
+          # it matches the "double-click to run, no install" release notes and
+          # removes the makensis dependency that was silently failing.
+          wails build -platform windows/amd64 -tags public -o ligandx
+          if ($LASTEXITCODE -ne 0) { throw "wails build failed (exit $LASTEXITCODE)" }
+
+          # Discover the produced exe rather than assume its name: the old
+          # pipeline hardcoded build/bin/ligandx.exe, silently missed it, and
+          # shipped nothing (leaving a stale, broken release asset).
+          $exe = Get-ChildItem -Path "build/bin" -Filter "*.exe" | Select-Object -First 1
+          if (-not $exe) {
+            Get-ChildItem -Path "build/bin" -ErrorAction SilentlyContinue
+            throw "No .exe produced by wails build in build/bin"
           }
+
+          # Fail loudly if we somehow produced the non-production stub. A real
+          # `wails build` output excludes internal/app/app_default_windows.go
+          # (it is //go:build !production); its presence means the tag was lost.
+          $contents = [System.IO.File]::ReadAllText($exe.FullName, [System.Text.Encoding]::ASCII)
+          if ($contents.Contains("app_default_windows.go")) {
+            throw "Built binary is the Wails stub (missing 'production' tag) - refusing to ship"
+          }
+
+          Move-Item $exe.FullName "build/bin/ligandx-windows-amd64.exe" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ligandx-windows-amd64-installer.exe
-          path: build/bin/ligandx-windows-amd64-installer.exe
+          name: ligandx-windows-amd64.exe
+          path: build/bin/ligandx-windows-amd64.exe
+          if-no-files-found: error
           retention-days: 5
 
   # ============================================================
@@ -169,8 +198,15 @@ jobs:
 
       - name: Build macOS public universal app
         run: |
+          set -euo pipefail
           WAILS_BIN="$(go env GOPATH)/bin/wails"
           "$WAILS_BIN" build -platform darwin/universal -tags public -o ligandx
+          # Fail loudly if this is the non-production stub (it embeds
+          # internal/app/app_default_unix.go, which is //go:build !production).
+          if grep -aqr "app_default_unix.go" build/bin/ligandx.app/Contents/MacOS/; then
+            echo "::error::Built binary is the Wails stub (missing 'production' tag)"
+            exit 1
+          fi
 
       - name: Create DMG
         run: |
@@ -213,6 +249,7 @@ jobs:
         with:
           name: ligandx-darwin-universal.dmg
           path: ligandx-darwin-universal.dmg
+          if-no-files-found: error
           retention-days: 5
 
   # ============================================================
@@ -277,7 +314,7 @@ jobs:
           overwrite_files: true
           files: |
             artifacts/ligandx-linux-amd64.AppImage/ligandx-linux-amd64.AppImage
-            artifacts/ligandx-windows-amd64-installer.exe/ligandx-windows-amd64-installer.exe
+            artifacts/ligandx-windows-amd64.exe/ligandx-windows-amd64.exe
             artifacts/ligandx-darwin-universal.dmg/ligandx-darwin-universal.dmg
             artifacts/runtime/ligand-x-runtime.zip
           body: |
@@ -289,7 +326,7 @@ jobs:
 
             | Platform | File | Installation |
             |----------|------|--------------|
-            | **Windows** (64-bit) | `ligandx-windows-amd64-installer.exe` | Run installer, follow prompts |
+            | **Windows** (64-bit) | `ligandx-windows-amd64.exe` | Portable — double-click to run (no install). SmartScreen may warn (unsigned): **More info → Run anyway**. No admin required. |
             | **Runtime Bundle** | `ligand-x-runtime.zip` | Downloaded automatically by the launcher on first run |
             | **macOS** (Intel + Apple Silicon) | `ligandx-darwin-universal.dmg` | Open DMG, drag to Applications |
             | **Linux** (64-bit) | `ligandx-linux-amd64.AppImage` | `chmod +x`, double-click to run |
@@ -303,7 +340,7 @@ jobs:
 
             1. Download the appropriate file for your operating system
             2. Install/run the launcher:
-               - **Windows**: Run the installer, launch from Start Menu
+               - **Windows**: Double-click `ligandx-windows-amd64.exe` (portable, no install)
                - **macOS**: Open DMG, drag app to Applications, launch from Applications
                - **Linux**: Make executable (`chmod +x *.AppImage`), double-click to run
             3. Select your Ligand-X project folder (where `docker-compose.yml` is located)
