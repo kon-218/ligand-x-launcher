@@ -148,13 +148,17 @@ jobs:
           wails build -platform windows/amd64 -tags public -o ligandx
           if ($LASTEXITCODE -ne 0) { throw "wails build failed (exit $LASTEXITCODE)" }
 
-          # Discover the produced exe rather than assume its name: the old
-          # pipeline hardcoded build/bin/ligandx.exe, silently missed it, and
-          # shipped nothing (leaving a stale, broken release asset).
-          $exe = Get-ChildItem -Path "build/bin" -Filter "*.exe" | Select-Object -First 1
+          # Discover the produced binary by name, NOT by extension: this Wails
+          # CLI writes `build/bin/ligandx` with NO .exe suffix. The old pipeline
+          # assumed `ligandx.exe`, silently missed it, and shipped nothing
+          # (leaving a stale, broken release asset).
+          $exe = Get-ChildItem -Path "build/bin" -File |
+            Where-Object { $_.Name -eq "ligandx" -or $_.Name -eq "ligandx.exe" } |
+            Select-Object -First 1
           if (-not $exe) {
+            Write-Host "Contents of build/bin:"
             Get-ChildItem -Path "build/bin" -ErrorAction SilentlyContinue
-            throw "No .exe produced by wails build in build/bin"
+            throw "No launcher binary (ligandx) produced by wails build in build/bin"
           }
 
           # Fail loudly if we somehow produced the non-production stub. A real
@@ -165,6 +169,7 @@ jobs:
             throw "Built binary is the Wails stub (missing 'production' tag) - refusing to ship"
           }
 
+          # Always emit a .exe so Windows treats it as runnable on double-click.
           Move-Item $exe.FullName "build/bin/ligandx-windows-amd64.exe" -Force
 
       - name: Upload artifact
