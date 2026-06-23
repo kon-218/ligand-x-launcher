@@ -68,7 +68,7 @@ cd launcher
    - Attaches binaries to the GitHub Release
    - Creates a release page
 
-3. Users download from: `https://github.com/YOUR_ORG/ligand-x/releases`
+3. Users download from: `https://github.com/kon-218/ligand-x-launcher/releases`
 
 ### Manually Trigger a Build
 

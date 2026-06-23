@@ -19,19 +19,17 @@ A cross-platform desktop installer and launcher for the Ligand-X molecular analy
 
 ## Download & Install
 
-Download the latest release for your platform from the [Releases page](https://github.com/YOUR_ORG/ligand-x/releases):
+Download the latest release for your platform from the [Releases page](https://github.com/kon-218/ligand-x-launcher/releases):
 
 ### Windows
 
-1. Download `ligandx-launcher-windows-amd64-installer.exe`
-2. Run the installer
-3. Launch from Start Menu → "Ligand-X Launcher"
+1. Download `ligandx-windows-amd64.exe`
+2. Double-click the portable launcher
+3. No install or admin access is required
 
 ### macOS
 
-1. Download the appropriate DMG:
-   - **Apple Silicon (M1/M2/M3)**: `ligandx-launcher-darwin-arm64.dmg`
-   - **Intel**: `ligandx-launcher-darwin-amd64.dmg`
+1. Download `ligandx-darwin-universal.dmg`
 2. Open the DMG file
 3. Drag "Ligand-X Launcher" to your Applications folder
 4. Launch from Applications

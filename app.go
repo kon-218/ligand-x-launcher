@@ -229,11 +229,11 @@ func isLigandxProject(projectName string) bool {
 	return strings.Contains(projectName, "ligand") || projectName == "ligandx"
 }
 
-const defaultRuntimeBundleURL = "https://github.com/kon-218/ligand-x/releases/latest/download/ligand-x-runtime.zip"
+const defaultRuntimeBundleURL = "https://github.com/kon-218/ligand-x-launcher/releases/latest/download/ligand-x-runtime.zip"
 
 const runtimeBundleAssetName = "ligand-x-runtime.zip"
 
-const latestReleaseAPIURL = "https://api.github.com/repos/kon-218/ligand-x/releases/latest"
+const latestReleaseAPIURL = "https://api.github.com/repos/kon-218/ligand-x-launcher/releases/latest"
 
 // defaultPinnedImageVersion is the image tag this launcher build was published
 // against. It is the last-resort fallback for VERSION self-healing when the

@@ -339,7 +339,7 @@ jobs:
             ### Requirements
 
             - **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux)
-            - The Ligand-X source code (clone this repository)
+            - Internet access to download the runtime bundle and selected Docker images
 
             ### Quick Start
 
@@ -348,8 +348,8 @@ jobs:
                - **Windows**: Double-click `ligandx-windows-amd64.exe` (portable, no install)
                - **macOS**: Open DMG, drag app to Applications, launch from Applications
                - **Linux**: Make executable (`chmod +x *.AppImage`), double-click to run
-            3. Select your Ligand-X project folder (where `docker-compose.yml` is located)
-            4. Click "Start" to launch the services
+            3. Complete the first-run setup; the launcher downloads `ligand-x-runtime.zip` automatically
+            4. Select services and click "Install & Start"
             5. Click "Open App" to access Ligand-X in your browser
 
             ### macOS Gatekeeper Note
