@@ -15,6 +15,14 @@ cd "$ROOT_DIR"
 cp docker-compose.yml .env.production.template README.md LICENSE "$STAGE/"
 mkdir -p "$STAGE/data/license" "$STAGE/opt/deeppocket_models"
 
+# Config files bind-mounted by docker-compose.yml. These must exist on the host
+# or Docker auto-creates the missing source as a directory and fails to mount it
+# onto a file ("not a directory"). Keep this list in sync with runtimeEntryAllowed
+# in app.go and the relative bind mounts in docker-compose.yml.
+mkdir -p "$STAGE/docker/nginx" "$STAGE/config"
+cp docker/nginx/ligandx.conf "$STAGE/docker/nginx/"
+cp config/rabbitmq.conf config/flower_config.py "$STAGE/config/"
+
 (
   cd "$STAGE"
   zip -q -r "$BUNDLE" . -x "**/.DS_Store"

@@ -326,9 +326,12 @@ func TestRuntimeBundleExtractionAllowsOnlyRuntimeFiles(t *testing.T) {
 	buf := new(bytes.Buffer)
 	zw := zip.NewWriter(buf)
 	for name, content := range map[string]string{
-		"ligand-x-main/docker-compose.yml":       "services: {}\n",
-		"ligand-x-main/.env.production.template": "POSTGRES_PASSWORD=CHANGE_ME\n",
-		"ligand-x-main/services/private.py":      "do not extract",
+		"ligand-x-main/docker-compose.yml":        "services: {}\n",
+		"ligand-x-main/.env.production.template":  "POSTGRES_PASSWORD=CHANGE_ME\n",
+		"ligand-x-main/docker/nginx/ligandx.conf": "server { listen 80; }\n",
+		"ligand-x-main/config/rabbitmq.conf":      "loopback_users = none\n",
+		"ligand-x-main/config/flower_config.py":   "broker_api = ''\n",
+		"ligand-x-main/services/private.py":       "do not extract",
 	} {
 		w, err := zw.Create(name)
 		if err != nil {
@@ -352,8 +355,59 @@ func TestRuntimeBundleExtractionAllowsOnlyRuntimeFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dest, "docker-compose.yml")); err != nil {
 		t.Fatalf("expected compose file to be extracted: %v", err)
 	}
+	// Config files bind-mounted by docker-compose.yml must land on disk, or Docker
+	// auto-creates the missing source as a directory and the mount fails with
+	// "not a directory" (the proxy/rabbitmq/flower startup bug).
+	for _, rel := range []string{
+		filepath.Join("docker", "nginx", "ligandx.conf"),
+		filepath.Join("config", "rabbitmq.conf"),
+		filepath.Join("config", "flower_config.py"),
+	} {
+		if _, err := os.Stat(filepath.Join(dest, rel)); err != nil {
+			t.Fatalf("expected bind-mounted config %q to be extracted: %v", rel, err)
+		}
+	}
 	if _, err := os.Stat(filepath.Join(dest, "services", "private.py")); !os.IsNotExist(err) {
 		t.Fatalf("unexpected private source extraction error state: %v", err)
+	}
+}
+
+func TestRuntimeBundleExtractionSelfHealsStaleDirectorySource(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "runtime.zip")
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	w, err := zw.Create("ligand-x-main/docker/nginx/ligandx.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("server { listen 80; }\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(tmpDir, "runtime")
+	// Simulate a stale install: Docker auto-created the missing bind-mount source
+	// as a directory on a previous broken run.
+	staleConf := filepath.Join(dest, "docker", "nginx", "ligandx.conf")
+	if err := os.MkdirAll(staleConf, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := extractRuntimeBundle(zipPath, dest); err != nil {
+		t.Fatalf("extractRuntimeBundle failed on stale install: %v", err)
+	}
+	info, err := os.Stat(staleConf)
+	if err != nil {
+		t.Fatalf("expected config to be extracted over stale dir: %v", err)
+	}
+	if info.IsDir() {
+		t.Fatal("expected ligandx.conf to be a file after self-heal, still a directory")
 	}
 }
 

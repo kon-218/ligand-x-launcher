@@ -617,6 +617,16 @@ func extractRuntimeBundle(zipPath, destDir string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 			return err
 		}
+		// Self-heal stale installs: an earlier run with a missing bundle source
+		// could leave a directory where Docker auto-created the bind-mount source
+		// (e.g. docker/nginx/ligandx.conf as a dir). We're about to write a file
+		// here, so remove a colliding directory first or os.OpenFile will fail
+		// with "is a directory".
+		if info, statErr := os.Stat(target); statErr == nil && info.IsDir() {
+			if err := os.RemoveAll(target); err != nil {
+				return err
+			}
+		}
 		rc, err := f.Open()
 		if err != nil {
 			return err
@@ -657,10 +667,13 @@ func normalizedRuntimeEntryName(name string) string {
 
 func runtimeEntryAllowed(name string) bool {
 	allowedFiles := map[string]bool{
-		"docker-compose.yml":       true,
-		".env.production.template": true,
-		"LICENSE":                  true,
-		"README.md":                true,
+		"docker-compose.yml":        true,
+		".env.production.template":  true,
+		"LICENSE":                   true,
+		"README.md":                 true,
+		"docker/nginx/ligandx.conf": true,
+		"config/rabbitmq.conf":      true,
+		"config/flower_config.py":   true,
 	}
 	if allowedFiles[name] {
 		return true
