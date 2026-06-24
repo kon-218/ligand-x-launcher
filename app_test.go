@@ -951,6 +951,23 @@ func TestComposePsArgsReusesGlobalFlags(t *testing.T) {
 	}
 }
 
+func TestProductionInfraUpArgsPreservesGlobalFlags(t *testing.T) {
+	upArgs := []string{
+		"compose", "--env-file", ".env.production",
+		"-f", "docker-compose.yml", "-f", "docker-compose.gpu.yml",
+		"up", "-d", "--pull=never", "worker-cpu", "worker-gpu-short",
+	}
+	got := productionInfraUpArgs(upArgs)
+	want := []string{
+		"compose", "--env-file", ".env.production",
+		"-f", "docker-compose.yml", "-f", "docker-compose.gpu.yml",
+		"up", "-d", "--pull=never", "postgres", "redis", "rabbitmq",
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("productionInfraUpArgs() = %v, want %v", got, want)
+	}
+}
+
 func TestStderrTailKeepsLastNLines(t *testing.T) {
 	tail := &stderrTail{max: 3}
 	for _, line := range []string{"a", "b", "c", "d", "e"} {

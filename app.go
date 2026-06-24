@@ -1534,6 +1534,12 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	a.emitAndLog("launcher", fmt.Sprintf("Command: docker %s", strings.Join(args, " ")))
 	a.emitAndLog("launcher", a.composeContextLine())
 
+	if isProductionUpCommand(args) {
+		if err := a.prepareProductionInfra(args); err != nil {
+			return err
+		}
+	}
+
 	cmd := exec.Command("docker", args...)
 	cmd.Dir = a.projectPath
 	cmd.Env = a.composeEnv()
@@ -1605,6 +1611,55 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	})
 
 	return nil
+}
+
+// prepareProductionInfra starts stateful dependencies first and reconciles their
+// stored credentials before stateless app/worker containers are created. Docker
+// images pick up .env.production immediately, but Postgres/RabbitMQ keep the
+// password stored in their data volumes from first boot; starting workers in the
+// same compose call can race ahead and crash-loop with AMQP ACCESS_REFUSED.
+func (a *App) prepareProductionInfra(upArgs []string) error {
+	args := productionInfraUpArgs(upArgs)
+	if len(args) == 0 {
+		return nil
+	}
+
+	a.emitAndLog("launcher", "Preparing stateful dependencies before starting workers...")
+	cmd := exec.Command("docker", args...)
+	cmd.Dir = a.projectPath
+	cmd.Env = a.composeEnv()
+	out, err := cmd.CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		a.emitAndLog("docker", strings.TrimSpace(string(out)))
+	}
+	if err != nil {
+		return fmt.Errorf("failed to prepare production dependencies: %v\n%s", err, strings.TrimSpace(string(out)))
+	}
+
+	a.reconcileProductionCredentials()
+	return nil
+}
+
+func productionInfraUpArgs(upArgs []string) []string {
+	upIndex := -1
+	hasPullNever := false
+	for i, arg := range upArgs {
+		if arg == "up" && upIndex == -1 {
+			upIndex = i
+		}
+		if arg == "--pull=never" {
+			hasPullNever = true
+		}
+	}
+	if upIndex == -1 {
+		return nil
+	}
+	args := append([]string{}, upArgs[:upIndex]...)
+	args = append(args, "up", "-d")
+	if hasPullNever {
+		args = append(args, "--pull=never")
+	}
+	return append(args, "postgres", "redis", "rabbitmq")
 }
 
 // composeEnv builds the environment every docker compose invocation runs with.
@@ -1736,15 +1791,41 @@ func (a *App) reconcileProductionCredentials() {
 	}
 
 	if rmqUser, rmqPass := cur["RABBITMQ_USER"], cur["RABBITMQ_PASSWORD"]; rmqUser != "" && rmqPass != "" && isContainerRunning("ligandx-rabbitmq") {
-		cmd := exec.Command("docker", "exec", "ligandx-rabbitmq", "rabbitmqctl", "change_password", rmqUser, rmqPass)
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if err := reconcileRabbitMQUser("ligandx-rabbitmq", rmqUser, rmqPass); err != nil {
 			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
 				Service:   "launcher",
-				Message:   fmt.Sprintf("Credential reconciliation (rabbitmq) failed: %v: %s", err, strings.TrimSpace(string(out))),
+				Message:   fmt.Sprintf("Credential reconciliation (rabbitmq) failed: %v", err),
 				Timestamp: time.Now().Format("15:04:05"),
 			})
 		}
 	}
+}
+
+func reconcileRabbitMQUser(containerName, username, password string) error {
+	changeCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "change_password", username, password)
+	if out, err := changeCmd.CombinedOutput(); err == nil {
+		return ensureRabbitMQUserAccess(containerName, username)
+	} else if !strings.Contains(strings.ToLower(string(out)), "no_such_user") {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	addCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "add_user", username, password)
+	if out, err := addCmd.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(out)), "user_already_exists") {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return ensureRabbitMQUserAccess(containerName, username)
+}
+
+func ensureRabbitMQUserAccess(containerName, username string) error {
+	permCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "set_permissions", "-p", "/", username, ".*", ".*", ".*")
+	if out, err := permCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	tagsCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "set_user_tags", username, "administrator")
+	if out, err := tagsCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func isContainerRunning(name string) bool {
