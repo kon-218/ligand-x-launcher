@@ -2735,6 +2735,7 @@ func coreServiceImages(version string) []string {
 		"redis:7-alpine",
 		"postgres:16-alpine",
 		"rabbitmq:3.13-management-alpine",
+		"mher/flower:2.0",
 	}
 	if !isPublicBuild {
 		images = append(images[:3], append([]string{imageRef("ghcr.io/kon-218/ligand-x/pocket-finder", version)}, images[3:]...)...)

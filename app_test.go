@@ -106,6 +106,33 @@ func TestGetServiceGroups(t *testing.T) {
 			t.Errorf("Group '%s' should have at least 1 image", group.ID)
 		}
 	}
+
+	// Every core service that ships its own container image must appear in
+	// coreServiceImages(), otherwise "Pull"/"Re-pull" never fetches it and
+	// `docker compose up -d --pull=never` fails with "No such image" even
+	// after repulling (e.g. flower was declared as a core service name but
+	// missing from the pull list).
+	core := groupMap["core"]
+	imageSet := make(map[string]bool)
+	for _, img := range core.Images {
+		imageSet[img] = true
+	}
+	infraOnly := map[string]bool{"proxy": true} // shares the nginx image already listed
+	for _, svc := range coreServiceNames() {
+		if infraOnly[svc] {
+			continue
+		}
+		found := false
+		for img := range imageSet {
+			if strings.Contains(img, svc) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("core service %q has no matching image in coreServiceImages(): %v", svc, core.Images)
+		}
+	}
 }
 
 func TestGetLauncherConfigFileNotFound(t *testing.T) {
