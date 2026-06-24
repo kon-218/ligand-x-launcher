@@ -227,7 +227,7 @@ func TestLoadConfigCorruptedFile(t *testing.T) {
 func TestSaveLocalAccountWritesEnvAndConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", t.TempDir())
-	if err := os.WriteFile(filepath.Join(tmpDir, ".env.example"), []byte("REDIS_PASSWORD=test\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte("REDIS_PASSWORD=test\n"), 0644); err != nil {
 		t.Fatalf("Failed to write env template: %v", err)
 	}
 
@@ -242,9 +242,9 @@ func TestSaveLocalAccountWritesEnvAndConfig(t *testing.T) {
 		t.Fatalf("Expected username alice, got %q", config.UserProfile.Username)
 	}
 
-	envData, err := os.ReadFile(filepath.Join(tmpDir, ".env"))
+	envData, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
 	if err != nil {
-		t.Fatalf("Failed to read .env: %v", err)
+		t.Fatalf("Failed to read .env.production: %v", err)
 	}
 	env := string(envData)
 	for _, expected := range []string{
@@ -278,6 +278,42 @@ func TestSaveLocalAccountRejectsWeakPassword(t *testing.T) {
 
 	if _, err := app.SaveLocalAccount("alice", "", "short"); err == nil {
 		t.Fatal("Expected weak password to be rejected")
+	}
+}
+
+// TestSaveLocalAccountWorksWithProductionBundleOnly reproduces the reported
+// Windows failure: an end-user runtime bundle ships only .env.production /
+// .env.production.template (no .env / .env.example). SaveLocalAccount must
+// write credentials to .env.production and succeed instead of aborting with
+// "no .env file found and could not read .env.example".
+func TestSaveLocalAccountWorksWithProductionBundleOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", t.TempDir())
+	// Runtime-bundle layout: production template only, no dev files.
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte("LIGANDX_API_KEY=CHANGE_ME\n"), 0644); err != nil {
+		t.Fatalf("Failed to write production template: %v", err)
+	}
+
+	app := NewApp()
+	app.projectPath = tmpDir
+
+	if _, err := app.SaveLocalAccount("alice", "alice@example.com", "strongpass"); err != nil {
+		t.Fatalf("SaveLocalAccount failed on production-only bundle: %v", err)
+	}
+
+	envData, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatalf("Failed to read .env.production: %v", err)
+	}
+	env := string(envData)
+	for _, expected := range []string{
+		"LIGANDX_USERNAME=alice",
+		"LIGANDX_PASSWORD=strongpass",
+		"LIGANDX_API_KEY=",
+	} {
+		if !strings.Contains(env, expected) {
+			t.Fatalf(".env.production missing %s in:\n%s", expected, env)
+		}
 	}
 }
 
@@ -868,5 +904,32 @@ func TestRegistryCredentialsFromLicenseRequiresBridgeMode(t *testing.T) {
 	})
 	if _, ok := app.registryCredentialsFromLicense(); !ok {
 		t.Fatal("expected creds to be accepted under registry_mode=bridge")
+	}
+}
+
+func TestComposePsArgsReusesGlobalFlags(t *testing.T) {
+	upArgs := []string{
+		"compose", "--env-file", ".env.production",
+		"-f", "docker-compose.yml", "-f", "docker-compose.gpu.yml",
+		"up", "-d", "--pull=never", "gateway", "frontend", "proxy",
+	}
+	got := composePsArgs(upArgs)
+	want := []string{
+		"compose", "--env-file", ".env.production",
+		"-f", "docker-compose.yml", "-f", "docker-compose.gpu.yml",
+		"ps", "--all",
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("composePsArgs() = %v, want %v", got, want)
+	}
+}
+
+func TestStderrTailKeepsLastNLines(t *testing.T) {
+	tail := &stderrTail{max: 3}
+	for _, line := range []string{"a", "b", "c", "d", "e"} {
+		tail.add(line)
+	}
+	if got := tail.String(); got != "c\nd\ne" {
+		t.Fatalf("stderrTail.String() = %q, want %q", got, "c\nd\ne")
 	}
 }

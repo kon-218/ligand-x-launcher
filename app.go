@@ -252,6 +252,7 @@ type App struct {
 	projectPath   string
 	logStreams    map[string]context.CancelFunc
 	logStreamsMux sync.Mutex
+	composeLogMux sync.Mutex
 
 	// Cloudflare tunnel (see tunnel.go)
 	tunnelCmd *exec.Cmd
@@ -1525,28 +1526,17 @@ func (a *App) runDockerCompose(args []string, message string) error {
 		Timestamp: time.Now().Format("15:04:05"),
 	})
 
+	// Record exactly what we are about to run. Previously only the working
+	// directory was logged, so a reproduction by hand (or reading the on-disk
+	// log) had to guess the args and env. Now the full command and the key
+	// interpolation inputs are captured.
+	a.rotateComposeLogIfLarge()
+	a.emitAndLog("launcher", fmt.Sprintf("Command: docker %s", strings.Join(args, " ")))
+	a.emitAndLog("launcher", a.composeContextLine())
+
 	cmd := exec.Command("docker", args...)
 	cmd.Dir = a.projectPath
-
-	uid := os.Getuid()
-	gid := os.Getgid()
-	if uid < 0 { // os.Getuid() returns -1 on Windows
-		uid = 0
-	}
-	if gid < 0 {
-		gid = 0
-	}
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("UID=%d", uid),
-		fmt.Sprintf("GID=%d", gid),
-		// Pin the compose project name so up/down/status agree regardless of the
-		// install directory's basename. Keep the historical "ligand-x" name so
-		// existing named volumes (especially ligand-x_postgres_data) remain visible.
-		"COMPOSE_PROJECT_NAME=ligand-x",
-	)
-	if path, ok := a.proSourcePath(); ok {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("LIGANDX_PRO_SRC_PATH=%s", path))
-	}
+	cmd.Env = a.composeEnv()
 
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
@@ -1555,10 +1545,18 @@ func (a *App) runDockerCompose(args []string, message string) error {
 		return fmt.Errorf("failed to start docker compose: %v", err)
 	}
 
-	go a.streamOutput(stdout, "docker")
-	go a.streamOutput(stderr, "docker")
+	// Capture stderr into a tail buffer so a failure can report the real reason.
+	// The WaitGroup guarantees both pipes are fully drained before we read the
+	// tail or call Wait()'s result — reading a StdoutPipe/StderrPipe after Wait()
+	// returns is otherwise a race (the pipe is closed on exit).
+	tail := &stderrTail{max: 25}
+	var streamWG sync.WaitGroup
+	streamWG.Add(2)
+	go func() { defer streamWG.Done(); a.streamOutput(stdout, "docker") }()
+	go func() { defer streamWG.Done(); a.streamOutputCapture(stderr, "docker", tail) }()
 
 	waitErr := cmd.Wait()
+	streamWG.Wait()
 
 	// A production "up" can fail outright if Postgres/RabbitMQ's actual stored
 	// credentials have drifted from .env.production: dependents declared with
@@ -1575,15 +1573,28 @@ func (a *App) runDockerCompose(args []string, message string) error {
 		retryStdout, _ := retryCmd.StdoutPipe()
 		retryStderr, _ := retryCmd.StderrPipe()
 		if startErr := retryCmd.Start(); startErr == nil {
-			go a.streamOutput(retryStdout, "docker")
-			go a.streamOutput(retryStderr, "docker")
+			retryTail := &stderrTail{max: 25}
+			var retryWG sync.WaitGroup
+			retryWG.Add(2)
+			go func() { defer retryWG.Done(); a.streamOutput(retryStdout, "docker") }()
+			go func() { defer retryWG.Done(); a.streamOutputCapture(retryStderr, "docker", retryTail) }()
 			waitErr = retryCmd.Wait()
+			retryWG.Wait()
+			tail = retryTail // report the final attempt's output
 		}
 	} else if isProductionUpCommand(args) {
 		a.reconcileProductionCredentials()
 	}
 
 	if waitErr != nil {
+		// Record which containers ended up in what state so the failing
+		// dependency is captured even when the user only sees "the proxy failed"
+		// (proxy depends_on gateway/frontend being healthy — it is usually the
+		// victim, not the cause).
+		a.captureComposePs(args)
+		if reason := strings.TrimSpace(tail.String()); reason != "" {
+			return fmt.Errorf("docker compose failed: %v\n--- last docker output ---\n%s", waitErr, reason)
+		}
 		return fmt.Errorf("docker compose failed: %v", waitErr)
 	}
 
@@ -1594,6 +1605,83 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	})
 
 	return nil
+}
+
+// composeEnv builds the environment every docker compose invocation runs with.
+// UID/GID feed container user mapping (os.Getuid() returns -1 on Windows, so we
+// coerce to 0), and COMPOSE_PROJECT_NAME is pinned so up/down/status agree
+// regardless of the install directory's basename and existing named volumes
+// (especially ligand-x_postgres_data) stay visible.
+func (a *App) composeEnv() []string {
+	uid := os.Getuid()
+	gid := os.Getgid()
+	if uid < 0 {
+		uid = 0
+	}
+	if gid < 0 {
+		gid = 0
+	}
+	env := append(os.Environ(),
+		fmt.Sprintf("UID=%d", uid),
+		fmt.Sprintf("GID=%d", gid),
+		"COMPOSE_PROJECT_NAME=ligand-x",
+	)
+	if path, ok := a.proSourcePath(); ok {
+		env = append(env, fmt.Sprintf("LIGANDX_PRO_SRC_PATH=%s", path))
+	}
+	return env
+}
+
+// composeContextLine summarizes the key interpolation inputs for the log: the
+// working directory, the UID/GID passed to compose, and the pinned VERSION read
+// from .env.production (an unset/stale VERSION is a known Windows failure mode).
+func (a *App) composeContextLine() string {
+	uid := os.Getuid()
+	gid := os.Getgid()
+	if uid < 0 {
+		uid = 0
+	}
+	if gid < 0 {
+		gid = 0
+	}
+	version := "(unknown)"
+	if content, err := a.GetEnvContent("prod"); err == nil {
+		if v := strings.TrimSpace(parseEnvFile(content)["VERSION"]); v != "" {
+			version = v
+		}
+	}
+	return fmt.Sprintf("Context: dir=%s UID=%d GID=%d COMPOSE_PROJECT_NAME=ligand-x VERSION=%s", a.projectPath, uid, gid, version)
+}
+
+// captureComposePs runs `docker compose ... ps --all` with the same global flags
+// as the failed up command and records the result. This surfaces the container
+// that actually failed/stayed unhealthy without the user knowing to ask. upArgs
+// is the original "compose ... up ..." arg list; everything before "up" is the
+// set of global compose flags (--env-file, -f overlays) we must reuse.
+func (a *App) captureComposePs(upArgs []string) {
+	cmd := exec.Command("docker", composePsArgs(upArgs)...)
+	cmd.Dir = a.projectPath
+	cmd.Env = a.composeEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		a.emitAndLog("docker", fmt.Sprintf("compose ps --all failed: %v", err))
+		return
+	}
+	a.emitAndLog("docker", "container states after failure (compose ps --all):\n"+strings.TrimSpace(string(out)))
+}
+
+// composePsArgs derives a `compose ... ps --all` arg list from an `up` arg list
+// by reusing every global flag that precedes "up" (--env-file and any -f
+// overlays) so the status query sees the same merged project as the up call.
+func composePsArgs(upArgs []string) []string {
+	psArgs := make([]string, 0, len(upArgs))
+	for _, arg := range upArgs {
+		if arg == "up" {
+			break
+		}
+		psArgs = append(psArgs, arg)
+	}
+	return append(psArgs, "ps", "--all")
 }
 
 // isProductionUpCommand reports whether a docker-compose invocation started
@@ -1664,14 +1752,101 @@ func isContainerRunning(name string) bool {
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
+// composeLogPath returns the persistent on-disk log file the launcher tees all
+// docker output to. The launcher's only error surface used to be transient
+// Wails events ("docker compose failed: exit status 1"), so a Windows failure
+// could never be diagnosed after the fact or carried to another machine. This
+// file is the durable record. It lives under the user config dir so it survives
+// reinstalls of the runtime bundle; if that can't be resolved we fall back to
+// the project directory.
+func (a *App) composeLogPath() string {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		base = a.projectPath
+	}
+	dir := filepath.Join(base, "ligandx-launcher", "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil && a.projectPath != "" {
+		dir = a.projectPath
+	}
+	return filepath.Join(dir, "launcher-compose.log")
+}
+
+// rotateComposeLogIfLarge keeps the persistent log from growing without bound by
+// rolling it over to a single .old sibling once it passes ~5 MB. Called once per
+// docker invocation, not per line.
+func (a *App) rotateComposeLogIfLarge() {
+	a.composeLogMux.Lock()
+	defer a.composeLogMux.Unlock()
+	path := a.composeLogPath()
+	if info, err := os.Stat(path); err == nil && info.Size() > 5*1024*1024 {
+		_ = os.Rename(path, path+".old")
+	}
+}
+
+// logToFile appends a timestamped line to the persistent launcher log. Best
+// effort: a logging failure must never break a docker operation.
+func (a *App) logToFile(service, message string) {
+	a.composeLogMux.Lock()
+	defer a.composeLogMux.Unlock()
+	f, err := os.OpenFile(a.composeLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s [%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), service, message)
+}
+
+// emitAndLog sends a log line to the live UI (as before) and also persists it to
+// the on-disk log so the same information is available after the fact.
+func (a *App) emitAndLog(service, message string) {
+	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		Service:   service,
+		Message:   message,
+		Timestamp: time.Now().Format("15:04:05"),
+	})
+	a.logToFile(service, message)
+}
+
+// stderrTail is a thread-safe ring buffer of the most recent output lines. It
+// lets runDockerCompose surface *why* docker failed in the returned error
+// instead of a bare "exit status 1".
+type stderrTail struct {
+	mu    sync.Mutex
+	lines []string
+	max   int
+}
+
+func (t *stderrTail) add(line string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lines = append(t.lines, line)
+	if len(t.lines) > t.max {
+		t.lines = t.lines[len(t.lines)-t.max:]
+	}
+}
+
+func (t *stderrTail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Join(t.lines, "\n")
+}
+
 func (a *App) streamOutput(r io.Reader, service string) {
+	a.streamOutputCapture(r, service, nil)
+}
+
+// streamOutputCapture streams a docker pipe to the live UI and the on-disk log,
+// optionally also collecting lines into a tail buffer for error reporting. The
+// larger scanner buffer prevents long compose/pull lines from being dropped.
+func (a *App) streamOutputCapture(r io.Reader, service string, sink *stderrTail) {
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-			Service:   service,
-			Message:   scanner.Text(),
-			Timestamp: time.Now().Format("15:04:05"),
-		})
+		line := scanner.Text()
+		a.emitAndLog(service, line)
+		if sink != nil {
+			sink.add(line)
+		}
 	}
 }
 
@@ -2802,23 +2977,21 @@ func (a *App) SaveLocalAccount(username string, email string, password string) (
 		return LauncherConfig{}, fmt.Errorf("failed to generate API key: %w", err)
 	}
 
-	if _, err := a.GetEnvContent("dev"); err != nil {
+	// The public launcher only ever runs the production runtime bundle, which
+	// ships .env.production / .env.production.template (no dev .env). Ensure the
+	// production env exists (GetEnvContent seeds it from the template) and write
+	// credentials there.
+	if _, err := a.GetEnvContent("prod"); err != nil {
 		return LauncherConfig{}, err
 	}
-	setters := []func(string, string) error{a.setEnvValue}
-	if _, err := a.GetEnvContent("prod"); err == nil {
-		setters = append(setters, a.setProductionEnvValue)
+	if err := a.setProductionEnvValue("LIGANDX_USERNAME", username); err != nil {
+		return LauncherConfig{}, err
 	}
-	for _, setter := range setters {
-		if err := setter("LIGANDX_USERNAME", username); err != nil {
-			return LauncherConfig{}, err
-		}
-		if err := setter("LIGANDX_PASSWORD", password); err != nil {
-			return LauncherConfig{}, err
-		}
-		if err := setter("LIGANDX_API_KEY", apiKey); err != nil {
-			return LauncherConfig{}, err
-		}
+	if err := a.setProductionEnvValue("LIGANDX_PASSWORD", password); err != nil {
+		return LauncherConfig{}, err
+	}
+	if err := a.setProductionEnvValue("LIGANDX_API_KEY", apiKey); err != nil {
+		return LauncherConfig{}, err
 	}
 
 	config, _ := a.GetLauncherConfig()
@@ -2836,17 +3009,10 @@ func (a *App) UpdatePassword(newPassword string) error {
 	if err := validateEnvCredential("password", newPassword, 8); err != nil {
 		return err
 	}
-	if _, err := a.GetEnvContent("dev"); err == nil {
-		if err := a.setEnvValue("LIGANDX_PASSWORD", newPassword); err != nil {
-			return err
-		}
+	if _, err := a.GetEnvContent("prod"); err != nil {
+		return err
 	}
-	if _, err := a.GetEnvContent("prod"); err == nil {
-		if err := a.setProductionEnvValue("LIGANDX_PASSWORD", newPassword); err != nil {
-			return err
-		}
-	}
-	return nil
+	return a.setProductionEnvValue("LIGANDX_PASSWORD", newPassword)
 }
 
 func (a *App) licensePath() string {
