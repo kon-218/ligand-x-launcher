@@ -1558,8 +1558,33 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	go a.streamOutput(stdout, "docker")
 	go a.streamOutput(stderr, "docker")
 
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("docker compose failed: %v", err)
+	waitErr := cmd.Wait()
+
+	// A production "up" can fail outright if Postgres/RabbitMQ's actual stored
+	// credentials have drifted from .env.production: dependents declared with
+	// depends_on: condition: service_healthy (gateway -> frontend/proxy) never
+	// become eligible to start, and compose surfaces that as a non-zero exit
+	// rather than just leaving them in "Created". Reconcile credentials and
+	// retry once before giving up, so a single Start click self-heals instead
+	// of silently leaving frontend/proxy un-started.
+	if waitErr != nil && isProductionUpCommand(args) {
+		a.reconcileProductionCredentials()
+		retryCmd := exec.Command("docker", args...)
+		retryCmd.Dir = cmd.Dir
+		retryCmd.Env = cmd.Env
+		retryStdout, _ := retryCmd.StdoutPipe()
+		retryStderr, _ := retryCmd.StderrPipe()
+		if startErr := retryCmd.Start(); startErr == nil {
+			go a.streamOutput(retryStdout, "docker")
+			go a.streamOutput(retryStderr, "docker")
+			waitErr = retryCmd.Wait()
+		}
+	} else if isProductionUpCommand(args) {
+		a.reconcileProductionCredentials()
+	}
+
+	if waitErr != nil {
+		return fmt.Errorf("docker compose failed: %v", waitErr)
 	}
 
 	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
@@ -1569,6 +1594,74 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	})
 
 	return nil
+}
+
+// isProductionUpCommand reports whether a docker-compose invocation started
+// containers (a "compose ... up ..." call) using .env.production, i.e. one
+// where reconcileProductionCredentials should run afterward.
+func isProductionUpCommand(args []string) bool {
+	hasUp, usesProdEnv := false, false
+	for i, arg := range args {
+		if arg == "up" {
+			hasUp = true
+		}
+		if arg == "--env-file" && i+1 < len(args) && strings.Contains(args[i+1], ".env.production") {
+			usesProdEnv = true
+		}
+	}
+	return hasUp && usesProdEnv
+}
+
+// reconcileProductionCredentials re-syncs the already-running Postgres and
+// RabbitMQ containers' actual stored credentials with whatever is currently in
+// .env.production. Postgres only applies POSTGRES_PASSWORD at first initdb, and
+// RabbitMQ only applies RABBITMQ_DEFAULT_PASS on its first boot, so a data
+// volume reused from an earlier install (e.g. after .env.production was reset
+// or a fresh runtime bundle was extracted into a new directory) silently
+// desyncs from a newly generated .env.production: every stateless container
+// (gateway, workers, frontend, proxy) picks up the new secret, but Postgres and
+// RabbitMQ keep authenticating with whatever was baked in at first boot. That
+// mismatch surfaces as "password authentication failed" / AMQP ACCESS_REFUSED,
+// crash-looping workers, and an unhealthy gateway that blocks frontend/proxy
+// from ever starting (their depends_on: condition: service_healthy never
+// passes). Both syncs below are idempotent and go through local admin paths
+// that don't require knowing the previous password: Postgres via the
+// trust-authenticated local socket, RabbitMQ via rabbitmqctl, which changes a
+// user's password without needing the old one.
+func (a *App) reconcileProductionCredentials() {
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return
+	}
+	cur := parseEnvFile(content)
+
+	if pgUser, pgPass := cur["POSTGRES_USER"], cur["POSTGRES_PASSWORD"]; pgUser != "" && pgPass != "" && isContainerRunning("ligandx-postgres") {
+		sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s';", pgUser, strings.ReplaceAll(pgPass, "'", "''"))
+		cmd := exec.Command("docker", "exec", "ligandx-postgres", "psql", "-U", pgUser, "-d", pgUser, "-c", sql)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+				Service:   "launcher",
+				Message:   fmt.Sprintf("Credential reconciliation (postgres) failed: %v: %s", err, strings.TrimSpace(string(out))),
+				Timestamp: time.Now().Format("15:04:05"),
+			})
+		}
+	}
+
+	if rmqUser, rmqPass := cur["RABBITMQ_USER"], cur["RABBITMQ_PASSWORD"]; rmqUser != "" && rmqPass != "" && isContainerRunning("ligandx-rabbitmq") {
+		cmd := exec.Command("docker", "exec", "ligandx-rabbitmq", "rabbitmqctl", "change_password", rmqUser, rmqPass)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+				Service:   "launcher",
+				Message:   fmt.Sprintf("Credential reconciliation (rabbitmq) failed: %v: %s", err, strings.TrimSpace(string(out))),
+				Timestamp: time.Now().Format("15:04:05"),
+			})
+		}
+	}
+}
+
+func isContainerRunning(name string) bool {
+	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", name).Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
 func (a *App) streamOutput(r io.Reader, service string) {
