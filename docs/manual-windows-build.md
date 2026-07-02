@@ -9,8 +9,8 @@ Until that lands, the Windows launcher (`ligandx-windows-amd64.exe`) is built
 **locally from Linux** and uploaded directly to the `latest` release. This works
 because the public launcher's frontend is fully static and pre-embedded
 (`frontend-public/` + committed `wailsjs/`, `frontend:build` empty in
-`wails.json`), and Wails uses a pure-Go WebView2 loader — so **no CGO and no
-`wails build` are required**; a plain `go build` with the embed suffices.
+`wails.json`), and Wails uses a pure-Go WebView2 loader, so **no CGO and no
+`wails build` are required**. A plain `go build` with the embed suffices.
 
 ## Reproduce
 
@@ -38,8 +38,8 @@ rm -f resource_windows_amd64.syso
 #    Delete the old same-named asset first, then POST to the uploads API.
 ```
 
-The produced exe is a **portable** launcher (run directly, no install). Verified:
-`PE32+ executable (GUI) x86-64`, manifest embedded (`asInvoker`, `dpiAware`),
+The produced exe is a **portable** launcher (run directly, no install). Verified as
+`PE32+ executable (GUI) x86-64`, with the manifest embedded (`asInvoker`, `dpiAware`),
 anonymously downloadable from the release.
 
 ## Proper fix (preferred, when a workflow-scoped token is available)

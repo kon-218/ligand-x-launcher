@@ -1,313 +1,215 @@
-# Ligand-X Launcher
 
-A cross-platform desktop installer and launcher for the Ligand-X molecular analysis platform. Built with [Wails](https://wails.io/) (Go + Web technologies).
+
+
+
+# Ligand-X
+
+### Integrated. Self-hosted. Reliable.
+
+**A free, self-hosted desktop app for computational drug discovery. Docking, MD, and more, all running on your own hardware.**
+
+[Latest release](https://github.com/kon-218/ligand-x-launcher/releases/latest)
+[Build status](https://github.com/kon-218/ligand-x-launcher/actions/workflows/launcher-release.yml)
+Platforms
+License
+[Download](https://github.com/kon-218/ligand-x-launcher/releases/latest)
+[Website](https://www.ligand-x.com)
+
+**[Download](#download)**  ·  [Quickstart](#quickstart)  ·  [Features](#features)  ·  [Editions](#editions--licensing)  ·  [Website](https://www.ligand-x.com)
+
+
+
+  
+*Install Docker, open the launcher, and click Install & Start. Ligand-X opens in your browser.*
+
+---
+
+## Download
+
+Grab the latest launcher for your platform. You'll need Docker installed and running first (see [Prerequisites](#prerequisites)).
+
+
+| Platform                          | Download                                                                                                                           | Notes                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| **Windows** (64-bit)              | [ligandx-windows-amd64.exe](https://github.com/kon-218/ligand-x-launcher/releases/latest/download/ligandx-windows-amd64.exe)       | Portable. Double-click to run, no install or admin needed. |
+| **macOS** (Intel + Apple Silicon) | [ligandx-darwin-universal.dmg](https://github.com/kon-218/ligand-x-launcher/releases/latest/download/ligandx-darwin-universal.dmg) | Open the DMG, drag the app to Applications.                |
+| **Linux** (64-bit)                | [ligandx-linux-amd64.AppImage](https://github.com/kon-218/ligand-x-launcher/releases/latest/download/ligandx-linux-amd64.AppImage) | Run `chmod +x`, then double-click or run it.               |
+
+
+Want to compare every install option (desktop and server) in your browser? See the [Download page on ligand-x.com](https://www.ligand-x.com/#download).
+
+---
+
+## What is Ligand-X?
+
+Ligand-X is a computational drug-discovery workbench that runs entirely on hardware you control. The launcher installs, configures, and runs the whole stack as Docker services, so there's no terminal, no `docker compose` commands, and no cloud upload of sensitive structures.
+
+- **One-click install and run.** Download a single binary and click Install & Start. The launcher pulls the images, writes local config, and boots the app for you.
+- **Fine-grained, licensed modules.** Start with the open-core workbench for free, then unlock Pro modules with an Academic or Pro license when you need them.
+- **Built-in diagnostics.** Live service status, logs, and cleanup tools are right there when something needs troubleshooting.
+
+Built with open source tools  ·  Runs locally on your hardware  ·  Always free for academics
+
+### Who it's for
+
+
+|                            |                                                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **Academic lab**           | Run teaching, docking, MD, and local project workflows without managed cloud infrastructure.                     |
+| **Startup discovery team** | Keep early target and ligand work private while standardizing project assets and computational jobs.             |
+| **Computational chemist**  | Go from cleaned structures to docked poses to MD trajectories without stitching separate tools together by hand. |
+
+
+---
+
+## Screenshots
+
+
+|                                                         |                                                                 |
+| ------------------------------------------------------- | --------------------------------------------------------------- |
+| **First-run setup.** Guided install with no terminal.   | **Module selection.** Pick open-core and licensed Pro services. |
+| **Service monitoring.** Live status of every container. | **Diagnostics.** Real-time logs and cleanup tools.              |
+
+
+---
+
+## Quickstart
+
+1. **Install Docker.** Use [Docker Desktop](https://www.docker.com/products/docker-desktop/) on Windows/macOS or [Docker Engine + Compose v2](https://docs.docker.com/engine/install/) on Linux, and make sure it's running.
+2. **Download and open the launcher.** Pick your platform from the [Download](#download) section above.
+3. **Click Install & Start.** Import a license (or continue with Free), choose your modules, and start the stack. Ligand-X opens automatically at [http://localhost:3000](http://localhost:3000).
+
+---
 
 ## Features
 
-- **First-run install** - Downloads Ligand-X runtime files without requiring a git clone
-- **License import** - Verifies Free, Academic, and Pro licenses before unlocking modules
-- **One-click start/stop** - No terminal or Docker Compose commands needed
-- **Selective module downloads** - Pull only the open-core and licensed Pro services selected by the user
-- **Service monitoring** - Real-time status of all Docker containers
-- **Diagnostics** - Advanced logs and cleanup tools for support cases
+- **First-run install.** Downloads the Ligand-X runtime files for you, so there's no git clone.
+- **License import.** Verifies Free, Academic, and Pro licenses before unlocking modules.
+- **One-click start/stop.** No terminal or Docker Compose commands needed.
+- **Selective module downloads.** Pull only the open-core and licensed Pro services you actually select.
+- **Service monitoring.** Real-time status of all Docker containers.
+- **Diagnostics.** Advanced logs and cleanup tools for support cases.
+
+### Start modes
+
+
+| Mode           | Description                                                        |
+| -------------- | ------------------------------------------------------------------ |
+| Production     | Full stack from published images. The default for installed users. |
+| Development    | Source checkout with hot reload, intended for contributors.        |
+| Core Only      | Gateway, Frontend, Structure, Database, Redis.                     |
+| Core + Docking | Core plus the docking service and CPU workers.                     |
+| Core + MD      | Core plus the MD service and GPU workers.                          |
+
+
+---
+
+## How it works
+
+The launcher is a small native desktop app, built with [Wails](https://wails.io/) (Go plus your OS's WebView). It talks directly to the Docker Engine to pull and run the Ligand-X platform, which ships as container images.
+
+```
+Ligand-X Launcher  ──▶  Docker Engine  ──▶  Gateway · Frontend · Structure · Docking · MD · Database · GPU workers
+```
+
+By default the launcher stores runtime files in your user config directory. If you need a custom deployment, point it at a source checkout or set `LIGANDX_RUNTIME_DIR` / `LIGANDX_RUNTIME_BUNDLE_URL`.
+
+Running on a server or a headless machine? The same platform installs with Docker Compose directly. See the [server install path](https://www.ligand-x.com/#download).
+
+---
+
+## Editions & licensing
+
+Ligand-X is open core. The everyday local workbench is free, and the advanced decision modules unlock with a license.
+
+
+| Edition      | License             | Access                                          |
+| ------------ | ------------------- | ----------------------------------------------- |
+| **Free**     | No license file     | Core modules only                               |
+| **Academic** | Signed license file | All Pro modules                                 |
+| **Pro**      | Signed license file | The paid Pro entitlements listed in the license |
+
+
+**Open core** covers projects, the molecule library, Ketcher editing, Mol* viewing, protein cleaning, pocket finding, docking, MD, and MSA/alignment.
+
+**Pro** adds QC, ADMET, Boltz-2, ABFE/RBFE, and GenAI for property risk, binding confidence, and generative design.
+
+The public repository is licensed PolyForm Noncommercial. Commercial use and Pro modules require a Ligand-X Pro license, so [compare Free and Pro](https://www.ligand-x.com/#pro) if you're not sure which you need.
+
+---
+
+## Security & privacy
+
+- **Runs locally.** The platform executes on your own CPU/GPU, via Docker on your machine.
+- **Your data stays put.** Structures, ligands, jobs, and results live in your local workspace. There's no required cloud upload for sensitive structures.
+- **Transparent licensing.** Licenses are signed files that you import, and the Free edition needs none.
+
+---
 
 ## Prerequisites
 
-1. **Docker** - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/macOS) or [Docker Engine](https://docs.docker.com/engine/install/) (Linux); must be running
-2. **Docker Compose** - v2.0+ (bundled with Docker Desktop)
-3. **NVIDIA GPU** *(optional)* - Required for Boltz-2, ABFE/RBFE. Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on Linux, or enable GPU in Docker Desktop settings on Windows/macOS
+1. **Docker.** [Docker Desktop](https://www.docker.com/products/docker-desktop/) on Windows/macOS, or [Docker Engine](https://docs.docker.com/engine/install/) on Linux. It must be running.
+2. **Docker Compose** v2.0+ (bundled with Docker Desktop).
+3. **NVIDIA GPU** *(optional)*, required for Boltz-2 and ABFE/RBFE. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on Linux, or enable GPU in Docker Desktop settings on Windows/macOS.
 
-## Download & Install
-
-Download the latest release for your platform from the [Releases page](https://github.com/kon-218/ligand-x-launcher/releases):
-
-### Windows
-
-1. Download `ligandx-windows-amd64.exe`
-2. Double-click the portable launcher
-3. No install or admin access is required
-
-### macOS
-
-1. Download `ligandx-darwin-universal.dmg`
-2. Open the DMG file
-3. Drag "Ligand-X Launcher" to your Applications folder
-4. Launch from Applications
-
-> **Note**: On first launch, macOS may show "unidentified developer" warning. Right-click the app → Open → Click "Open" in the dialog.
-
-### Linux
-
-1. Download `ligandx-launcher-linux-amd64.AppImage`
-2. Make it executable:
-   ```bash
-   chmod +x ligandx-launcher-linux-amd64.AppImage
-   ```
-3. Double-click to run, or:
-   ```bash
-   ./ligandx-launcher-linux-amd64.AppImage
-   ```
-
-> **Tip**: Move the AppImage to `~/.local/bin/` and it will be available in your application menu.
-
-## Usage
-
-1. **Launch** - Double-click the app or run it from Start Menu/Applications
-2. **License** - Import an Academic or Pro license, or continue with Free edition
-3. **Choose modules** - Select the open-core and licensed Pro services to install
-4. **Install & Start** - The launcher installs runtime files, pulls images, writes local configuration, and starts Ligand-X
-5. **Open App** - Click **Open App** or use the automatically opened browser tab
-
-The launcher stores runtime files in the user config directory by default. Advanced users can point the launcher at a source checkout or set `LIGANDX_RUNTIME_DIR` / `LIGANDX_RUNTIME_BUNDLE_URL` for custom deployments.
-
-## Start Modes
-
-| Mode | Description |
-|------|-------------|
-| Production | Full stack from published images; default for installed users |
-| Development | Source checkout with hot reload; intended for contributors |
-| Core Only | Gateway, Frontend, Structure, Database, Redis |
-| Core + Docking | Core plus docking service and CPU workers |
-| Core + MD | Core plus MD service and GPU workers |
-
-## Building from Source
-
-### Requirements
-
-- Go 1.21+
-- Wails CLI v2.8+
-
-### Install Wails CLI
-
-```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
-```
-
-### Platform-Specific Setup
-
-#### Linux (Ubuntu/Debian)
-
-Install development libraries:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y libgtk-3-dev pkg-config
-```
-
-**For Ubuntu 24.04 (Noble) or newer:**
-```bash
-sudo apt-get install -y libwebkit2gtk-4.1-dev
-```
-
-**For Ubuntu 22.04 (Jammy) or older:**
-```bash
-sudo apt-get install -y libwebkit2gtk-4.0-dev
-```
-
-#### macOS
-
-Install Xcode Command Line Tools (one-time):
-```bash
-xcode-select --install
-```
-
-#### Windows
-
-No additional setup needed.
-
-### Build Commands
-
-```bash
-cd launcher
-
-# Development (with hot reload)
-wails dev
-
-# Build for current platform
-wails build
-
-# Build with NSIS installer (Windows)
-wails build -nsis
-
-# Build for specific platforms
-wails build -platform windows/amd64
-wails build -platform linux/amd64
-wails build -platform darwin/amd64
-wails build -platform darwin/arm64  # Apple Silicon
-```
-
-### Cross-Platform Build (via CI)
-
-The recommended way to build for all platforms is via GitHub Actions:
-
-1. Push a tag: `git tag launcher-v1.0.0 && git push origin launcher-v1.0.0`
-2. GitHub Actions builds for all platforms automatically
-3. Binaries are attached to the GitHub Release
-
-See `.github/workflows/launcher-release.yml` for the CI configuration.
-
-## Architecture
-
-```
-launcher/
-├── main.go                 # Wails app entry point
-├── app.go                  # Go backend (Docker SDK integration)
-├── wails.json              # Wails configuration
-├── go.mod                  # Go module
-├── build/
-│   ├── appicon.png         # App icon (1024x1024)
-│   ├── appicon.svg         # Source icon (vector)
-│   ├── darwin/
-│   │   └── appicon.png     # macOS icon
-│   ├── windows/
-│   │   └── icon.ico        # Windows icon
-│   └── linux/
-│       └── ligandx-launcher.desktop  # Linux desktop entry
-└── frontend/
-    ├── index.html          # UI structure
-    ├── style.css           # Modern dark theme
-    └── app.js              # Frontend logic (Wails bindings)
-```
-
-### Key Technologies
-
-- **Go + Docker SDK** - Native Docker control without shelling out
-- **Wails v2** - Uses OS native WebView (small binary, fast startup)
-- **Pure HTML/CSS/JS** - No build step, no npm, no frameworks
+---
 
 ## Troubleshooting
 
-### Build Issues
+#### Docker not running
 
-#### "webkit2gtk-4.0 was not found" (Ubuntu 24.04)
-
-Ubuntu 24.04 only provides webkit2gtk-4.1, but Wails v2.11 is hardcoded to look for 4.0. You need to create a symlink:
-
-```bash
-sudo ln -s /usr/lib/x86_64-linux-gnu/pkgconfig/webkit2gtk-4.1.pc \
-           /usr/lib/x86_64-linux-gnu/pkgconfig/webkit2gtk-4.0.pc
-```
-
-Then try building again.
-
-**Alternative:** Use the GitHub Actions CI/CD to build (it handles this automatically).
-
-#### "gtk+-3.0 was not found" (Linux)
-You need to install development libraries. See [Platform-Specific Setup](#platform-specific-setup) above.
-
-**Ubuntu 24.04 (Noble):**
-```bash
-sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
-```
-
-**Ubuntu 22.04 (Jammy) or older:**
-```bash
-sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev pkg-config
-```
-
-#### "wails: command not found"
-Wails CLI is installed to `$(go env GOPATH)/bin/wails`. You can either:
-- Add to PATH: `export PATH="$PATH:$(go env GOPATH)/bin"`
-- Or use the full path: `$(go env GOPATH)/bin/wails dev`
-
-### Runtime Issues
-
-#### "Docker not running"
-- Ensure Docker Desktop is running (or Docker daemon on Linux)
-- On Linux, ensure your user is in the `docker` group: `sudo usermod -aG docker $USER`
+- Make sure Docker Desktop is running (or the Docker daemon on Linux).
+- On Linux, add your user to the `docker` group: `sudo usermod -aG docker $USER`.
 
 #### "Runtime files are not installed"
-- Click **Install & Start** in the setup wizard; the launcher downloads `ligand-x-runtime.zip` from the latest release
-- For offline installs, set `LIGANDX_RUNTIME_BUNDLE_URL=file:///path/to/ligand-x-runtime.zip` before starting the launcher
-- Advanced users can click the folder path in the footer and select a source checkout containing `docker-compose.yml`
+
+- Click **Install & Start** in the setup wizard. The launcher downloads `ligand-x-runtime.zip` from the latest release.
+- For offline installs, set `LIGANDX_RUNTIME_BUNDLE_URL=file:///path/to/ligand-x-runtime.zip` before starting the launcher.
+- Advanced users can click the folder path in the footer and select a source checkout that contains `docker-compose.yml`.
 
 #### Services not starting
-- Check the logs panel for error messages
-- Ensure ports 3000, 8000, 5432, 6379, 5672 are available
-- Try "Clean" to remove stale Docker resources
+
+- Check the logs panel for error messages.
+- Make sure ports 3000, 8000, 5432, 6379, and 5672 are free.
+- Try **Clean** to remove stale Docker resources.
 
 #### macOS "unidentified developer" warning
-This happens because the app isn't code-signed with an Apple Developer certificate:
-- Right-click the app → Open → Click "Open" in the dialog
-- Or: System Preferences → Security & Privacy → Click "Open Anyway"
+
+The app isn't code-signed with an Apple Developer certificate. To open it:
+
+- Right-click the app, choose **Open**, then click **Open** in the dialog, or
+- Go to System Settings, then Privacy & Security, and click **Open Anyway**.
 
 #### Linux AppImage won't run
+
 Make sure FUSE is installed and the file is executable:
-```bash
-# Install FUSE (Ubuntu/Debian)
-sudo apt-get install libfuse2
-
-# Make executable
-chmod +x ligandx-launcher-linux-amd64.AppImage
-
-# Run
-./ligandx-launcher-linux-amd64.AppImage
-```
-
-## Development
-
-### Setting Up Your Development Environment
-
-1. **Install Wails CLI:**
-   ```bash
-   go install github.com/wailsapp/wails/v2/cmd/wails@latest
-   ```
-
-2. **Install platform dependencies** (see Platform-Specific Setup above)
-
-3. **Navigate to launcher directory:**
-   ```bash
-   cd launcher
-   ```
-
-### Running in development mode
 
 ```bash
-cd launcher
-wails dev
+sudo apt-get install libfuse2   # Ubuntu/Debian
+chmod +x ligandx-linux-amd64.AppImage
+./ligandx-linux-amd64.AppImage
 ```
 
-Or use the convenience script:
-```bash
-cd launcher
-./scripts/build-dev.sh
-```
+---
 
-This provides:
-- Hot reload for frontend changes
-- Go rebuilds on backend changes
-- Browser DevTools (Ctrl+Shift+I)
-- Dev server at `http://localhost:34115`
+## Support & contact
 
-The first build may take a minute on Linux due to dependencies being compiled. Subsequent rebuilds are much faster.
+- **FAQ:** [docs/FAQ.md](docs/FAQ.md) covers editions, GPU, offline install, ports, and common fixes.
+- **Docs:** [ligand-x.com/#docs](https://www.ligand-x.com/#docs)
+- **Downloads & releases:** [GitHub Releases](https://github.com/kon-218/ligand-x-launcher/releases)
+- **Sales, demos & enterprise:** [Contact us](https://www.ligand-x.com/#contact)
+- **Support cases:** open the launcher's **Diagnostics** panel to collect logs, then include them with your request.
 
-**Note:** On Ubuntu 24.04, you may need to create a webkit symlink first (see Troubleshooting).
+---
 
-### Testing Docker integration
+## Contributing & building from source
 
-```bash
-# Test Docker SDK connection
-cd launcher
-go run . -test-docker
-```
-
-### Regenerating Icons
-
-If you update the app icon:
-
-```bash
-cd launcher
-
-# From SVG source (requires ImageMagick)
-convert -background none build/appicon.svg -resize 1024x1024 build/appicon.png
-convert -background none build/appicon.svg -resize 1024x1024 build/darwin/appicon.png
-convert -background none build/appicon.svg -resize 256x256 \
-  -define icon:auto-resize=256,128,64,48,32,16 build/windows/icon.ico
-
-# Or use Wails to generate from PNG
-wails generate icons build/appicon.png
-```
+This README is the product front page. If you want to build the launcher, run it in development mode, or contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Same as the main Ligand-X project.
+The public Ligand-X launcher uses the PolyForm Noncommercial license, the same as the main Ligand-X project. Commercial use and Pro modules require a Ligand-X Pro license.
+
+---
+
+[Website](https://www.ligand-x.com) · [Docs](https://www.ligand-x.com/#docs) · FAQ · [Releases](https://github.com/kon-218/ligand-x-launcher/releases) · [Contributing](CONTRIBUTING.md) · [Pro](https://www.ligand-x.com/#pro)
