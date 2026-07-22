@@ -40,6 +40,32 @@ x-runtime-password: &runtime-password LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
 x-runtime-internal-secret: &runtime-internal-secret INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET (see .env.example)}
 
 services:
+  # Keep ABFE/RBFE persistent outputs independent of image-local appuser UIDs.
+  # This repairs existing volumes in place and grants access only to the shared
+  # scientific-output group used by the API and long-worker containers.
+  scientific-output-init:
+    image: alpine:3.21
+    command:
+      - sh
+      - -ec
+      - |
+        case "$${SCIENTIFIC_OUTPUT_GID}" in
+          ''|*[!0-9]*) echo "SCIENTIFIC_OUTPUT_GID must be numeric" >&2; exit 64 ;;
+        esac
+        for root in /app/data/abfe_outputs /app/data/rbfe_outputs; do
+          mkdir -p "$${root}/jobs"
+          chgrp -R "$${SCIENTIFIC_OUTPUT_GID}" "$${root}"
+          find "$${root}" -type d -exec chmod u+rwx,g+rwx,g+s,o-rwx {} +
+          find "$${root}" -type f -exec chmod u+rw,g+rw,o-rwx {} +
+        done
+    environment:
+      SCIENTIFIC_OUTPUT_GID: "${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}"
+    user: "0:0"
+    volumes:
+      - abfe_outputs:/app/data/abfe_outputs
+      - rbfe_outputs:/app/data/rbfe_outputs
+    restart: "no"
+
   # ============================================================
   # Gateway Service
   # ============================================================
@@ -60,6 +86,7 @@ services:
       - *runtime-api-key
       - *runtime-username
       - *runtime-password
+      - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
       - REDIS_URL=${REDIS_URL:?REDIS_URL must be set (e.g. redis://redis:6379/0)}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -82,6 +109,7 @@ services:
       - *runtime-internal-secret
     volumes:
       - ./data/license:/app/data/license:ro
+      - runtime_settings:/app/data/settings
     depends_on:
       redis:
         condition: service_healthy
@@ -122,11 +150,14 @@ services:
       - backend
     expose:
       - "8001"
+    volumes:
+      - runtime_settings:/app/data/settings
     environment:
       - *runtime-app-env
       - *runtime-api-key
       - *runtime-username
       - *runtime-password
+      - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
@@ -163,6 +194,7 @@ services:
       - backend
     volumes:
       - ${DEEPPOCKET_MODELS_PATH:-/opt/deeppocket_models}:/models:ro
+      - scientific_artifacts:/app/data/scientific_artifacts
     expose:
       - "8012"
     environment:
@@ -378,6 +410,7 @@ services:
       - backend
     volumes:
       - msa_cache:/app/data/msa_cache
+      - runtime_settings:/app/data/settings
     expose:
       - "8009"
     environment:
@@ -385,6 +418,7 @@ services:
       - *runtime-api-key
       - *runtime-username
       - *runtime-password
+      - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
@@ -501,6 +535,8 @@ services:
     command: [ "abfe", "8010" ]
     networks:
       - backend
+    group_add:
+      - "${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}"
     volumes:
       - abfe_outputs:/app/data/abfe_outputs
     expose:
@@ -512,6 +548,16 @@ services:
       - *runtime-password
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ABFE_OUTPUT_DIR=/app/data/abfe_outputs
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+    depends_on:
+      scientific-output-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
       interval: 30s
@@ -538,6 +584,8 @@ services:
     command: [ "rbfe", "8011" ]
     networks:
       - backend
+    group_add:
+      - "${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}"
     volumes:
       - rbfe_outputs:/app/data/rbfe_outputs
     expose:
@@ -552,7 +600,10 @@ services:
       - RBFE_OUTPUT_DIR=/app/data/rbfe_outputs
       - DOCKING_URL=http://docking:8002
     depends_on:
-      - docking
+      scientific-output-init:
+        condition: service_completed_successfully
+      docking:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
       interval: 30s
@@ -822,6 +873,8 @@ services:
     command: [ "worker-gpu-long" ]
     networks:
       - backend
+    group_add:
+      - "${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}"
     environment:
       - *runtime-app-env
       - *runtime-api-key
@@ -831,9 +884,12 @@ services:
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
       - CELERY_CONCURRENCY=${GPU_LONG_CONCURRENCY:-1}
+      - LIGANDX_REQUIRE_CUDA=${LIGANDX_REQUIRE_CUDA:-1}
       - RBFE_OUTPUT_DIR=/app/data/rbfe_outputs
       - ABFE_OUTPUT_DIR=/app/data/abfe_outputs
     depends_on:
+      scientific-output-init:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       redis:
@@ -879,6 +935,7 @@ services:
       - *runtime-api-key
       - *runtime-username
       - *runtime-password
+      - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -893,6 +950,7 @@ services:
         condition: service_healthy
     volumes:
       - docking_outputs:/app/data/docking_outputs
+      - runtime_settings:/app/data/settings
     healthcheck:
       test: ["CMD", "celery", "-A", "lib.tasks.cpu_docking_tasks", "inspect", "ping"]
       interval: 60s
@@ -1287,6 +1345,7 @@ volumes:
   qc_jobs:
   qc_results:
   msa_cache:
+  runtime_settings:
   reinvent_campaigns:
   kinetics_jobs:
 
