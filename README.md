@@ -32,7 +32,7 @@ Grab the latest launcher for your platform. You'll need Docker installed and run
 | Platform                          | Download                                                                                                                           | Notes                                                      |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | **Windows** (64-bit)              | [ligandx-windows-amd64.exe](https://github.com/kon-218/ligand-x-launcher/releases/latest/download/ligandx-windows-amd64.exe)       | Portable. Double-click to run, no install or admin needed. |
-| **macOS** (Intel + Apple Silicon) | [ligandx-darwin-universal.dmg](https://github.com/kon-218/ligand-x-launcher/releases/latest/download/ligandx-darwin-universal.dmg) | Open the DMG, drag the app to Applications.                |
+| **macOS** (Intel + Apple Silicon) | [ligandx-darwin-universal.dmg](https://github.com/kon-218/ligand-x-launcher/releases/latest/download/ligandx-darwin-universal.dmg) | **Preview / untested.** Open the DMG and drag the app to Applications.                |
 | **Linux** (64-bit)                | [ligandx-linux-amd64.AppImage](https://github.com/kon-218/ligand-x-launcher/releases/latest/download/ligandx-linux-amd64.AppImage) | Run `chmod +x`, then double-click or run it.               |
 
 
@@ -189,6 +189,32 @@ sudo apt-get install libfuse2   # Ubuntu/Debian
 chmod +x ligandx-linux-amd64.AppImage
 ./ligandx-linux-amd64.AppImage
 ```
+
+---
+
+## Backup and restore
+
+Supported recovery is an **offline, single-host** procedure using the versioned
+package produced by the public runtime checkout (`scripts/backup.sh` /
+`make db-backup`). The launcher intentionally does **not** expose arbitrary shell
+restore commands; use the allowlisted Make targets from the runtime project
+directory that owns your Compose stack.
+
+1. **Backup (non-destructive):** `make db-backup`
+   Creates `backups/ligandx_backup_<stamp>.tar.gz` with a custom-format PostgreSQL
+   dump, scientific artifacts, custody/schema metadata, manifest, and SHA-256
+   checksums. Application `.env` secrets and signing private keys are not included.
+2. **Qualify without touching live data:** `make db-restore-drill STAMP=<stamp> SAMPLE=all`
+   Restores into disposable isolated DB + artifact targets, re-hashes artifacts,
+   then tears staging down.
+3. **Real recovery:** stop the stack in the launcher (or `make down`), then
+   `make db-restore STAMP=<stamp> CONFIRM=yes` (isolated staging only). After the
+   restore report under `backups/restore-reports/` looks correct,
+   `make db-restore STAMP=<stamp> CONFIRM=yes PROMOTE=yes` switches to the restored
+   targets and keeps the previous DB/artifacts for rollback.
+
+Restore never imports a plain SQL dump into the active populated live database.
+Details: `ligand-x/docs/audit/restore-qualification.md` in the public runtime repo.
 
 ---
 

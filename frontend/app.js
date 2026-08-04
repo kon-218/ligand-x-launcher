@@ -150,6 +150,8 @@ async function updateStatus() {
         
         // Update count
         document.getElementById('runningCount').textContent = status.totalRunning;
+        const platformBadge = document.getElementById('platformQualification');
+        if (platformBadge) platformBadge.textContent = `Platform `;
         
         // Update services grid
         const grid = document.getElementById('servicesGrid');

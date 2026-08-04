@@ -7,8 +7,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -17,8 +19,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,11 +41,12 @@ type ServiceStatus struct {
 }
 
 type SystemStatus struct {
-	DockerInstalled bool            `json:"dockerInstalled"`
-	DockerRunning   bool            `json:"dockerRunning"`
-	Services        []ServiceStatus `json:"services"`
-	TotalRunning    int             `json:"totalRunning"`
-	TotalServices   int             `json:"totalServices"`
+	DockerInstalled       bool            `json:"dockerInstalled"`
+	DockerRunning         bool            `json:"dockerRunning"`
+	Services              []ServiceStatus `json:"services"`
+	TotalRunning          int             `json:"totalRunning"`
+	TotalServices         int             `json:"totalServices"`
+	PlatformQualification string          `json:"platformQualification"`
 }
 
 type LogEntry struct {
@@ -171,6 +176,7 @@ type registryTokenRequest struct {
 	Repositories []string `json:"repositories"`
 	Entitlements []string `json:"entitlements"`
 	MachineID    string   `json:"machine_id"`
+	Version      string   `json:"version"`
 }
 
 type registryTokenResponse struct {
@@ -189,7 +195,6 @@ var proEntitlements = map[string]bool{
 	"boltz2":      true,
 	"free-energy": true,
 	"reinvent":    true,
-	"kinetics":    true,
 }
 
 // gpuRequiredRuntime lists services that genuinely cannot run without a GPU and
@@ -207,7 +212,6 @@ var gpuRequiredRuntime = map[string]bool{
 	"rbfe":            true,
 	"boltz2":          true,
 	"worker-gpu-long": true,
-	"worker-kinetics": true,
 }
 
 // ligandxServiceSet is every docker-compose service name that belongs to the
@@ -217,10 +221,10 @@ var ligandxServiceSet = map[string]bool{
 	"gateway": true, "frontend": true, "proxy": true, "structure": true,
 	"docking": true, "md": true, "admet": true, "boltz2": true,
 	"qc": true, "alignment": true, "ketcher": true, "msa": true,
-	"abfe": true, "rbfe": true, "reinvent": true, "kinetics": true,
+	"abfe": true, "rbfe": true, "reinvent": true,
 	"pocket-finder": true, "postgres": true, "redis": true, "rabbitmq": true,
 	"worker-qc": true, "worker-gpu-short": true, "worker-gpu-long": true,
-	"worker-cpu": true, "worker-reinvent": true, "worker-kinetics": true, "flower": true,
+	"worker-cpu": true, "worker-reinvent": true, "flower": true,
 }
 
 // isLigandxProject reports whether a compose project name looks like a Ligand-X
@@ -234,6 +238,33 @@ const defaultRuntimeBundleURL = "https://github.com/kon-218/ligand-x-launcher/re
 const runtimeBundleAssetName = "ligand-x-runtime.zip"
 
 const latestReleaseAPIURL = "https://api.github.com/repos/kon-218/ligand-x-launcher/releases/latest"
+
+const runtimeBundleManifestAssetName = "ligand-x-runtime-manifest.json"
+const runtimeBundleSignatureAssetName = "ligand-x-runtime-manifest.sig"
+const runtimeBundleMaxDownloadBytes int64 = 256 * 1024 * 1024
+const runtimeBundleMaxExpandedBytes uint64 = 1024 * 1024 * 1024
+const runtimeBundleMaxFiles = 128
+
+// Injected into public builds with: -ldflags "-X main.runtimeBundlePublicKeyB64=<base64 raw Ed25519 public key>".
+// A public build without a trust root fails closed before downloading a runtime bundle.
+var runtimeBundlePublicKeyB64 string
+
+type runtimeReleaseArtifact struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+type runtimeBundleManifest struct {
+	Schema    string                            `json:"schema"`
+	Version   string                            `json:"version"`
+	Asset     string                            `json:"asset"`
+	SHA256    string                            `json:"sha256"`
+	Size      int64                             `json:"size"`
+	IssuedAt  string                            `json:"issued_at"`
+	ExpiresAt string                            `json:"expires_at"`
+	GitCommit string                            `json:"git_commit"`
+	Artifacts map[string]runtimeReleaseArtifact `json:"artifacts,omitempty"`
+}
 
 // defaultPinnedImageVersion is the image tag this launcher build was published
 // against. It is the last-resort fallback for VERSION self-healing when the
@@ -465,6 +496,165 @@ func resolveLatestRuntimeBundleURL() (string, string, error) {
 	return "", "", fmt.Errorf("asset %q not found in latest release %q", runtimeBundleAssetName, release.TagName)
 }
 
+func companionRuntimeAssetURL(bundleURL, assetName string) (string, error) {
+	parsed, err := url.Parse(bundleURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" {
+		return filepath.Join(filepath.Dir(bundleURL), assetName), nil
+	}
+	parsed.Path = pathpkg.Join(pathpkg.Dir(parsed.Path), assetName)
+	parsed.RawPath = ""
+	return parsed.String(), nil
+}
+
+func decodeRuntimeBundlePublicKey(encoded string) (ed25519.PublicKey, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		raw, err = base64.RawStdEncoding.DecodeString(strings.TrimSpace(encoded))
+	}
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid runtime bundle public key")
+	}
+	return ed25519.PublicKey(raw), nil
+}
+
+func verifyRuntimeBundleManifest(manifestBytes, signatureBytes []byte, expectedTag string) (runtimeBundleManifest, error) {
+	publicKey, err := decodeRuntimeBundlePublicKey(runtimeBundlePublicKeyB64)
+	if err != nil {
+		return runtimeBundleManifest{}, fmt.Errorf("runtime release trust root is not configured: %w", err)
+	}
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(signatureBytes)))
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return runtimeBundleManifest{}, fmt.Errorf("invalid runtime manifest signature encoding")
+	}
+	if !ed25519.Verify(publicKey, manifestBytes, signature) {
+		return runtimeBundleManifest{}, fmt.Errorf("runtime manifest signature verification failed")
+	}
+	var manifest runtimeBundleManifest
+	decoder := json.NewDecoder(bytes.NewReader(manifestBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return runtimeBundleManifest{}, fmt.Errorf("invalid runtime manifest: %w", err)
+	}
+	if manifest.Schema != "ligandx-runtime-manifest/1" || manifest.Asset != runtimeBundleAssetName {
+		return runtimeBundleManifest{}, fmt.Errorf("unsupported runtime manifest")
+	}
+	if !isPinnedImageVersion(manifest.Version) || (expectedTag != "" && manifest.Version != expectedTag) {
+		return runtimeBundleManifest{}, fmt.Errorf("runtime manifest version mismatch")
+	}
+	if manifest.Size <= 0 || manifest.Size > runtimeBundleMaxDownloadBytes {
+		return runtimeBundleManifest{}, fmt.Errorf("runtime bundle size is outside allowed bounds")
+	}
+	runtimeArtifact, ok := manifest.Artifacts[runtimeBundleAssetName]
+	if !ok || runtimeArtifact.SHA256 != manifest.SHA256 || runtimeArtifact.Size != manifest.Size {
+		return runtimeBundleManifest{}, fmt.Errorf("runtime artifact is missing from signed release manifest")
+	}
+	for name, artifact := range manifest.Artifacts {
+		if name == "" || artifact.Size <= 0 || len(artifact.SHA256) != 64 {
+			return runtimeBundleManifest{}, fmt.Errorf("invalid signed artifact metadata")
+		}
+		if _, err := hex.DecodeString(artifact.SHA256); err != nil {
+			return runtimeBundleManifest{}, fmt.Errorf("invalid signed artifact digest")
+		}
+	}
+	if len(manifest.SHA256) != 64 {
+		return runtimeBundleManifest{}, fmt.Errorf("invalid runtime bundle digest")
+	}
+	if _, err := hex.DecodeString(manifest.SHA256); err != nil {
+		return runtimeBundleManifest{}, fmt.Errorf("invalid runtime bundle digest")
+	}
+	issuedAt, err := time.Parse(time.RFC3339, manifest.IssuedAt)
+	if err != nil || issuedAt.After(time.Now().UTC().Add(5*time.Minute)) {
+		return runtimeBundleManifest{}, fmt.Errorf("invalid runtime manifest issuance time")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, manifest.ExpiresAt)
+	if err != nil || !expiresAt.After(issuedAt) || time.Now().UTC().After(expiresAt) {
+		return runtimeBundleManifest{}, fmt.Errorf("runtime manifest is expired or has invalid expiry")
+	}
+	if len(manifest.GitCommit) != 40 {
+		return runtimeBundleManifest{}, fmt.Errorf("invalid runtime manifest source commit")
+	}
+	if _, err := hex.DecodeString(manifest.GitCommit); err != nil {
+		return runtimeBundleManifest{}, fmt.Errorf("invalid runtime manifest source commit")
+	}
+	return manifest, nil
+}
+
+func verifyRuntimeBundleFile(path string, manifest runtimeBundleManifest) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() != manifest.Size {
+		return fmt.Errorf("runtime bundle size mismatch")
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), manifest.SHA256) {
+		return fmt.Errorf("runtime bundle digest mismatch")
+	}
+	return nil
+}
+
+func numericReleaseVersion(version string) ([3]int, bool) {
+	var parsed [3]int
+	base := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	base = strings.SplitN(base, "-", 2)[0]
+	parts := strings.Split(base, ".")
+	if len(parts) != 3 {
+		return parsed, false
+	}
+	for index, part := range parts {
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 {
+			return parsed, false
+		}
+		parsed[index] = value
+	}
+	return parsed, true
+}
+
+func compareReleaseVersions(left, right string) (int, bool) {
+	leftParts, leftOK := numericReleaseVersion(left)
+	rightParts, rightOK := numericReleaseVersion(right)
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	for index := range leftParts {
+		if leftParts[index] < rightParts[index] {
+			return -1, true
+		}
+		if leftParts[index] > rightParts[index] {
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+func enforceRuntimeRollbackPolicy(runtimeDir, candidate string) error {
+	data, err := os.ReadFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	current := strings.TrimSpace(string(data))
+	if comparison, comparable := compareReleaseVersions(candidate, current); !comparable || comparison < 0 {
+		return fmt.Errorf("runtime downgrade rejected: installed=%s candidate=%s", current, candidate)
+	}
+	return nil
+}
+
 func (a *App) GetDistributionStatus() DistributionStatus {
 	composePath := filepath.Join(a.projectPath, "docker-compose.yml")
 	_, err := os.Stat(composePath)
@@ -518,16 +708,56 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Could not resolve latest release (%v); falling back to %s", resolveErr, bundleURL), Timestamp: time.Now().Format("15:04:05")})
 	}
 
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Downloading runtime bundle from: %s", bundleURL), Timestamp: time.Now().Format("15:04:05")})
+	manifestURL, err := companionRuntimeAssetURL(bundleURL, runtimeBundleManifestAssetName)
+	if err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("failed to resolve runtime manifest URL: %w", err)
+	}
+	signatureURL, err := companionRuntimeAssetURL(bundleURL, runtimeBundleSignatureAssetName)
+	if err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("failed to resolve runtime signature URL: %w", err)
+	}
+	manifestPath := filepath.Join(runtimeDir, runtimeBundleManifestAssetName)
+	signaturePath := filepath.Join(runtimeDir, runtimeBundleSignatureAssetName)
+	if err := downloadFileLimited(manifestURL, manifestPath, 64*1024); err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("failed to download signed runtime manifest: %w", err)
+	}
+	defer os.Remove(manifestPath)
+	if err := downloadFileLimited(signatureURL, signaturePath, 4*1024); err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("failed to download runtime manifest signature: %w", err)
+	}
+	defer os.Remove(signaturePath)
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return a.GetDistributionStatus(), err
+	}
+	signatureBytes, err := os.ReadFile(signaturePath)
+	if err != nil {
+		return a.GetDistributionStatus(), err
+	}
+	expectedVersion := strings.TrimPrefix(releaseTag, "launcher-")
+	manifest, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, expectedVersion)
+	if err != nil {
+		return a.GetDistributionStatus(), err
+	}
+	if err := enforceRuntimeRollbackPolicy(runtimeDir, manifest.Version); err != nil {
+		return a.GetDistributionStatus(), err
+	}
+	releaseTag = manifest.Version
 
-	zipPath := filepath.Join(runtimeDir, "ligand-x-runtime.zip")
-	if err := downloadFile(bundleURL, zipPath); err != nil {
+	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Downloading verified runtime bundle %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
+	zipPath := filepath.Join(runtimeDir, runtimeBundleAssetName)
+	if err := downloadFileLimited(bundleURL, zipPath, manifest.Size); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to download runtime bundle from %s: %w", bundleURL, err)
 	}
 	defer os.Remove(zipPath)
-
+	if err := verifyRuntimeBundleFile(zipPath, manifest); err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("runtime bundle verification failed: %w", err)
+	}
 	if err := extractRuntimeBundle(zipPath, runtimeDir); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to extract runtime bundle: %w", err)
+	}
+	if err := writePrivateFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"), []byte(releaseTag+"\n")); err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("failed to persist runtime version: %w", err)
 	}
 
 	a.projectPath = runtimeDir
@@ -549,46 +779,144 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 	return a.GetDistributionStatus(), nil
 }
 
-func downloadFile(sourceURL, dest string) error {
+func approvedRuntimeDownloadURL(sourceURL string) (*url.URL, error) {
 	parsed, err := url.Parse(sourceURL)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Scheme == "" || parsed.Scheme == "file" {
+		if isPublicBuild {
+			return nil, fmt.Errorf("local runtime bundle URLs are disabled in public builds")
+		}
+		return parsed, nil
+	}
+	if parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" {
+		return nil, fmt.Errorf("runtime bundle URL must use HTTPS without embedded credentials")
+	}
+	if port := parsed.Port(); port != "" && port != "443" {
+		return nil, fmt.Errorf("runtime bundle URL uses an unapproved port")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	approved := host == "github.com" || host == "api.github.com" ||
+		host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com" ||
+		strings.HasSuffix(host, ".githubusercontent.com")
+	if !approved {
+		return nil, fmt.Errorf("runtime bundle host is not approved: %s", host)
+	}
+	return parsed, nil
+}
+
+func downloadFileLimited(sourceURL, dest string, maxBytes int64) error {
+	parsed, err := approvedRuntimeDownloadURL(sourceURL)
 	if err != nil {
 		return err
 	}
+	var reader io.ReadCloser
 	if parsed.Scheme == "file" || parsed.Scheme == "" {
 		path := parsed.Path
 		if parsed.Scheme == "" {
 			path = sourceURL
 		}
-		in, err := os.Open(path)
+		reader, err = os.Open(path)
 		if err != nil {
 			return err
 		}
-		defer in.Close()
-		out, err := os.Create(dest)
-		if err != nil {
-			return err
+	} else {
+		client := &http.Client{
+			Timeout: 20 * time.Minute,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 5 {
+					return fmt.Errorf("too many runtime bundle redirects")
+				}
+				_, err := approvedRuntimeDownloadURL(req.URL.String())
+				return err
+			},
 		}
-		defer out.Close()
-		_, err = io.Copy(out, in)
-		return err
+		resp, requestErr := client.Get(sourceURL)
+		if requestErr != nil {
+			return requestErr
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return fmt.Errorf("HTTP %d from %s", resp.StatusCode, sourceURL)
+		}
+		if resp.ContentLength > maxBytes {
+			resp.Body.Close()
+			return fmt.Errorf("download exceeds maximum size")
+		}
+		reader = resp.Body
 	}
+	defer reader.Close()
 
-	client := &http.Client{Timeout: 20 * time.Minute}
-	resp, err := client.Get(sourceURL)
+	if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+		return err
+	}
+	out, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d from %s", resp.StatusCode, sourceURL)
+	tmpPath := out.Name()
+	defer os.Remove(tmpPath)
+	if err := out.Chmod(0600); err != nil {
+		out.Close()
+		return err
 	}
-	out, err := os.Create(dest)
+	written, copyErr := io.Copy(out, io.LimitReader(reader, maxBytes+1))
+	if copyErr == nil && written > maxBytes {
+		copyErr = fmt.Errorf("download exceeds maximum size")
+	}
+	if copyErr == nil {
+		copyErr = out.Sync()
+	}
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(tmpPath, dest); err != nil {
+		if removeErr := os.Remove(dest); removeErr != nil && !os.IsNotExist(removeErr) {
+			return err
+		}
+		if retryErr := os.Rename(tmpPath, dest); retryErr != nil {
+			return retryErr
+		}
+	}
+	return nil
+}
+
+func rejectRuntimeSymlinkPath(baseDir, target string) error {
+	baseAbs, err := filepath.Abs(baseDir)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, resp.Body)
-	return err
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(baseAbs, targetAbs)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("runtime bundle target escapes destination")
+	}
+	current := baseAbs
+	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("runtime bundle target traverses a symbolic link: %s", current)
+		}
+	}
+	return nil
 }
 
 func extractRuntimeBundle(zipPath, destDir string) error {
@@ -598,7 +926,23 @@ func extractRuntimeBundle(zipPath, destDir string) error {
 	}
 	defer zr.Close()
 
+	if len(zr.File) > runtimeBundleMaxFiles {
+		return fmt.Errorf("runtime bundle contains too many entries")
+	}
+	var expandedBytes uint64
+	required := map[string]bool{
+		"docker-compose.yml":       false,
+		".env.production.template": false,
+	}
+
 	for _, f := range zr.File {
+		if f.UncompressedSize64 > runtimeBundleMaxExpandedBytes-expandedBytes {
+			return fmt.Errorf("runtime bundle exceeds expanded-size limit")
+		}
+		expandedBytes += f.UncompressedSize64
+		if f.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("runtime bundle contains a symbolic link: %s", f.Name)
+		}
 		name := normalizedRuntimeEntryName(f.Name)
 		if name == "" || !runtimeEntryAllowed(name) {
 			continue
@@ -608,6 +952,9 @@ func extractRuntimeBundle(zipPath, destDir string) error {
 		cleanTarget, _ := filepath.Abs(target)
 		if cleanTarget != cleanDest && !strings.HasPrefix(cleanTarget, cleanDest+string(os.PathSeparator)) {
 			return fmt.Errorf("unsafe path in runtime bundle: %s", f.Name)
+		}
+		if err := rejectRuntimeSymlinkPath(destDir, target); err != nil {
+			return err
 		}
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0755); err != nil {
@@ -632,12 +979,16 @@ func extractRuntimeBundle(zipPath, destDir string) error {
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, f.Mode())
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 		if err != nil {
 			rc.Close()
 			return err
 		}
-		_, copyErr := io.Copy(out, rc)
+		entrySize := int64(f.UncompressedSize64) // #nosec G115 -- bounded by runtimeBundleMaxExpandedBytes above.
+		written, copyErr := io.Copy(out, io.LimitReader(rc, entrySize+1))
+		if copyErr == nil && written != entrySize {
+			copyErr = fmt.Errorf("runtime bundle entry size mismatch: %s", f.Name)
+		}
 		closeErr := out.Close()
 		rc.Close()
 		if copyErr != nil {
@@ -645,6 +996,14 @@ func extractRuntimeBundle(zipPath, destDir string) error {
 		}
 		if closeErr != nil {
 			return closeErr
+		}
+		if _, needed := required[name]; needed {
+			required[name] = true
+		}
+	}
+	for name, present := range required {
+		if !present {
+			return fmt.Errorf("runtime bundle is missing required file: %s", name)
 		}
 	}
 	return nil
@@ -996,8 +1355,13 @@ func formatBytes(n uint64) string {
 }
 
 func (a *App) GetSystemStatus() SystemStatus {
+	qualification := "qualified"
+	if goruntime.GOOS == "darwin" {
+		qualification = "preview/untested"
+	}
 	status := SystemStatus{
-		Services: []ServiceStatus{},
+		Services:              []ServiceStatus{},
+		PlatformQualification: qualification,
 	}
 
 	dockerOk, _ := a.CheckDocker()
@@ -1846,7 +2210,7 @@ func (a *App) composeLogPath() string {
 		base = a.projectPath
 	}
 	dir := filepath.Join(base, "ligandx-launcher", "logs")
-	if err := os.MkdirAll(dir, 0o755); err != nil && a.projectPath != "" {
+	if err := os.MkdirAll(dir, 0o700); err != nil && a.projectPath != "" {
 		dir = a.projectPath
 	}
 	return filepath.Join(dir, "launcher-compose.log")
@@ -1869,11 +2233,12 @@ func (a *App) rotateComposeLogIfLarge() {
 func (a *App) logToFile(service, message string) {
 	a.composeLogMux.Lock()
 	defer a.composeLogMux.Unlock()
-	f, err := os.OpenFile(a.composeLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(a.composeLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
 	defer f.Close()
+	ensurePrivateFileMode(a.composeLogPath())
 	fmt.Fprintf(f, "%s [%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), service, message)
 }
 
@@ -2020,6 +2385,47 @@ func (a *App) BrowseForFolder(title string) (string, error) {
 	return path, nil
 }
 
+func writePrivateFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return err
+		}
+		if retryErr := os.Rename(tmpPath, path); retryErr != nil {
+			return retryErr
+		}
+	}
+	return os.Chmod(path, 0600)
+}
+
+func ensurePrivateFileMode(path string) {
+	_ = os.Chmod(path, 0600)
+}
+
 func (a *App) GetEnvContent(mode string) (string, error) {
 	var envFile, templateFile string
 	if mode == "prod" {
@@ -2033,6 +2439,7 @@ func (a *App) GetEnvContent(mode string) (string, error) {
 	envPath := filepath.Join(a.projectPath, envFile)
 	data, err := os.ReadFile(envPath)
 	if err == nil {
+		ensurePrivateFileMode(envPath)
 		return string(data), nil
 	}
 
@@ -2044,7 +2451,7 @@ func (a *App) GetEnvContent(mode string) (string, error) {
 	}
 
 	// Write template as the starting env file so docker compose can read it immediately
-	_ = os.WriteFile(envPath, data, 0644)
+	_ = writePrivateFile(envPath, data)
 
 	return string(data), nil
 }
@@ -2057,7 +2464,7 @@ func (a *App) SaveEnvContent(mode string, content string) error {
 		envFile = ".env"
 	}
 	envPath := filepath.Join(a.projectPath, envFile)
-	return os.WriteFile(envPath, []byte(content), 0644)
+	return writePrivateFile(envPath, []byte(content))
 }
 
 // getReinventModelsPath reads REINVENT_MODELS_PATH from .env, falling back to /opt/reinvent_models.
@@ -2149,7 +2556,7 @@ func (a *App) setEnvFileValue(fileName, key, value string) error {
 	if !updated {
 		lines = append(lines, prefix+value)
 	}
-	return os.WriteFile(envPath, []byte(strings.Join(lines, "\n")), 0644)
+	return writePrivateFile(envPath, []byte(strings.Join(lines, "\n")))
 }
 
 // parseEnvFile parses KEY=VALUE lines (ignoring comments/blanks) into a map.
@@ -2195,7 +2602,7 @@ func (a *App) ensureProductionEnv() error {
 	}
 
 	// Generate any missing secrets.
-	secretKeys := []string{"POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD", "QC_SECRET_KEY", "LIGANDX_API_KEY", "LIGANDX_PASSWORD", "FLOWER_PASSWORD", "INTERNAL_WORKER_SECRET"}
+	secretKeys := []string{"POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD", "QC_SECRET_KEY", "LIGANDX_PASSWORD", "FLOWER_PASSWORD", "INTERNAL_WORKER_SECRET"}
 	for _, key := range secretKeys {
 		if isEnvPlaceholder(cur[key]) {
 			v, err := generateAPIKey()
@@ -2943,21 +3350,6 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Edition:     "pro",
 			Entitlement: "reinvent",
 		},
-		{
-			ID:          "kinetics",
-			Name:        "Kinetics (WESTPA / RAMD)",
-			Description: "Pro package: GPU weighted-ensemble unbinding kinetics",
-			Services:    []string{"kinetics", "worker-kinetics"},
-			Images: []string{
-				imageRef(proPrefix+"/kinetics", version),
-				imageRef(proPrefix+"/worker-kinetics", version),
-			},
-			SizeMB:      4000,
-			Required:    false,
-			DefaultOn:   false,
-			Edition:     "pro",
-			Entitlement: "kinetics",
-		},
 	}
 	for i := range groups {
 		if groups[i].Edition == "" {
@@ -3004,7 +3396,7 @@ func (a *App) SaveLauncherConfig(config LauncherConfig) error {
 
 	// Create config directory if it doesn't exist
 	configDir := filepath.Dir(configPath)
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -3013,7 +3405,7 @@ func (a *App) SaveLauncherConfig(config LauncherConfig) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := writePrivateFile(configPath, data); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
@@ -3054,11 +3446,6 @@ func (a *App) SaveLocalAccount(username string, email string, password string) (
 		return LauncherConfig{}, err
 	}
 
-	apiKey, err := generateAPIKey()
-	if err != nil {
-		return LauncherConfig{}, fmt.Errorf("failed to generate API key: %w", err)
-	}
-
 	// The public launcher only ever runs the production runtime bundle, which
 	// ships .env.production / .env.production.template (no dev .env). Ensure the
 	// production env exists (GetEnvContent seeds it from the template) and write
@@ -3072,10 +3459,6 @@ func (a *App) SaveLocalAccount(username string, email string, password string) (
 	if err := a.setProductionEnvValue("LIGANDX_PASSWORD", password); err != nil {
 		return LauncherConfig{}, err
 	}
-	if err := a.setProductionEnvValue("LIGANDX_API_KEY", apiKey); err != nil {
-		return LauncherConfig{}, err
-	}
-
 	config, _ := a.GetLauncherConfig()
 	config.UserProfile = UserProfile{Username: username, Email: email}
 	config.ConfigVersion = 2
@@ -3085,8 +3468,7 @@ func (a *App) SaveLocalAccount(username string, email string, password string) (
 	return config, nil
 }
 
-// UpdatePassword updates LIGANDX_PASSWORD in both env files without
-// touching any other credentials or regenerating the API key.
+// UpdatePassword updates LIGANDX_PASSWORD without touching any other credentials.
 func (a *App) UpdatePassword(newPassword string) error {
 	if err := validateEnvCredential("password", newPassword, 8); err != nil {
 		return err
@@ -3109,6 +3491,15 @@ func (a *App) GetLicenseStatus() LicenseSummary {
 	return status
 }
 
+func (a *App) persistImportedLicense(data []byte) error {
+	dest := a.licensePath()
+	if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+		return err
+	}
+	// License certificates contain customer and entitlement metadata, so keep the imported copy owner-only.
+	return writePrivateFile(dest, data)
+}
+
 func (a *App) ImportLicense(path string) (LicenseSummary, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -3123,14 +3514,7 @@ func (a *App) ImportLicense(path string) (LicenseSummary, error) {
 		return status, fmt.Errorf("invalid license: %s", status.Reason)
 	}
 
-	dest := a.licensePath()
-	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return status, err
-	}
-	// The gateway runs as a non-root container user and reads this file via a
-	// read-only bind mount. The license certificate is signed, not a private key;
-	// keep it host-readable so Docker UID/GID mappings do not downgrade users to Free.
-	if err := os.WriteFile(dest, data, 0644); err != nil {
+	if err := a.persistImportedLicense(data); err != nil {
 		return status, err
 	}
 
@@ -3158,6 +3542,7 @@ func (a *App) SelectLicenseFile() (LicenseSummary, error) {
 }
 
 func (a *App) readLicenseStatus() (LicenseSummary, error) {
+	ensurePrivateFileMode(a.licensePath())
 	data, err := os.ReadFile(a.licensePath())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -3230,7 +3615,7 @@ func summarizeLicensePayload(payload map[string]interface{}) LicenseSummary {
 	edition, _ := payload["edition"].(string)
 	entitlements := stringSlice(payload["entitlements"])
 	if edition == "academic" {
-		entitlements = []string{"admet", "boltz2", "free-energy", "kinetics", "qc", "reinvent"}
+		entitlements = []string{"admet", "boltz2", "free-energy", "qc", "reinvent"}
 	}
 
 	status := LicenseSummary{
@@ -3399,57 +3784,7 @@ func machineID() string {
 	return fmt.Sprintf("%s/%s", goruntime.GOOS, host)
 }
 
-func (a *App) registryCredentialsFromBroker(groupIDs []string, groupMap map[string]ServiceGroup) (registryCredentials, bool, error) {
-	tokenURL := strings.TrimSpace(os.Getenv("LIGANDX_REGISTRY_TOKEN_URL"))
-	if tokenURL == "" {
-		return registryCredentials{}, false, nil
-	}
-
-	accessToken := strings.TrimSpace(os.Getenv("LIGANDX_VENDOR_ACCESS_TOKEN"))
-	if accessToken == "" {
-		return registryCredentials{}, true, fmt.Errorf("LIGANDX_VENDOR_ACCESS_TOKEN is required when LIGANDX_REGISTRY_TOKEN_URL is set")
-	}
-
-	license := a.GetLicenseStatus()
-	if !license.Valid || license.Edition == "free" {
-		return registryCredentials{}, true, fmt.Errorf("valid Pro or Academic license required before requesting registry credentials")
-	}
-
-	reqBody := registryTokenRequest{
-		LicenseID:    license.LicenseID,
-		Groups:       groupIDs,
-		Repositories: selectedProRepositories(groupIDs, groupMap),
-		Entitlements: license.Entitlements,
-		MachineID:    machineID(),
-	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return registryCredentials{}, true, err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
-	if err != nil {
-		return registryCredentials{}, true, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return registryCredentials{}, true, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return registryCredentials{}, true, fmt.Errorf("registry token broker returned %s: %s", resp.Status, strings.TrimSpace(string(limited)))
-	}
-
-	var tokenResp registryTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return registryCredentials{}, true, err
-	}
+func validateRegistryTokenResponse(tokenResp registryTokenResponse, repositories []string) (registryCredentials, error) {
 	secret := tokenResp.Token
 	if secret == "" {
 		secret = tokenResp.IdentityToken
@@ -3462,8 +3797,88 @@ func (a *App) registryCredentialsFromBroker(groupIDs []string, groupMap map[stri
 		Username: stringValueOrDefault(tokenResp.Username, "oauth2"),
 		Token:    secret,
 	}
-	if creds.Token == "" {
-		return registryCredentials{}, true, fmt.Errorf("registry token broker response did not include a token")
+	expiresAt, expiryErr := time.Parse(time.RFC3339, tokenResp.ExpiresAt)
+	now := time.Now().UTC()
+	if expiryErr != nil || now.After(expiresAt) || expiresAt.After(now.Add(15*time.Minute+30*time.Second)) {
+		return registryCredentials{}, fmt.Errorf("registry token broker returned an invalid expiry")
+	}
+	if !slices.Equal(tokenResp.Repositories, repositories) {
+		return registryCredentials{}, fmt.Errorf("registry token broker returned an unexpected repository scope")
+	}
+	if creds.Host != "ghcr.io" || creds.Token == "" {
+		return registryCredentials{}, fmt.Errorf("registry token broker response did not include valid GHCR credentials")
+	}
+	return creds, nil
+}
+
+func (a *App) registryCredentialsFromBroker(groupIDs []string, groupMap map[string]ServiceGroup) (registryCredentials, bool, error) {
+	tokenURL := strings.TrimSpace(os.Getenv("LIGANDX_REGISTRY_TOKEN_URL"))
+	if tokenURL == "" {
+		return registryCredentials{}, false, nil
+	}
+	parsedTokenURL, parseErr := url.Parse(tokenURL)
+	if parseErr != nil || parsedTokenURL.Scheme != "https" || parsedTokenURL.Hostname() == "" || parsedTokenURL.User != nil {
+		return registryCredentials{}, true, fmt.Errorf("LIGANDX_REGISTRY_TOKEN_URL must be an HTTPS URL without embedded credentials")
+	}
+	accessToken := strings.TrimSpace(os.Getenv("LIGANDX_VENDOR_ACCESS_TOKEN"))
+	if accessToken == "" {
+		return registryCredentials{}, true, fmt.Errorf("LIGANDX_VENDOR_ACCESS_TOKEN is required when LIGANDX_REGISTRY_TOKEN_URL is set")
+	}
+	license := a.GetLicenseStatus()
+	if !license.Valid || license.Edition == "free" {
+		return registryCredentials{}, true, fmt.Errorf("valid Pro or Academic license required before requesting registry credentials")
+	}
+	version, _ := a.productionImageSettings()
+	if !isPinnedImageVersion(version) {
+		return registryCredentials{}, true, fmt.Errorf("registry token request requires an immutable VERSION")
+	}
+	repositories := selectedProRepositories(groupIDs, groupMap)
+	reqBody := registryTokenRequest{
+		LicenseID:    license.LicenseID,
+		Groups:       groupIDs,
+		Repositories: repositories,
+		Entitlements: license.Entitlements,
+		MachineID:    machineID(),
+		Version:      version,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return registryCredentials{}, true, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
+	if err != nil {
+		return registryCredentials{}, true, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(next *http.Request, via []*http.Request) error {
+			if len(via) >= 5 || next.URL.Scheme != "https" || next.URL.User != nil {
+				return fmt.Errorf("registry broker redirect rejected")
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return registryCredentials{}, true, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return registryCredentials{}, true, fmt.Errorf("registry token broker returned %s: %s", resp.Status, strings.TrimSpace(string(limited)))
+	}
+	var tokenResp registryTokenResponse
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 64*1024))
+	if err := decoder.Decode(&tokenResp); err != nil {
+		return registryCredentials{}, true, err
+	}
+	creds, validationErr := validateRegistryTokenResponse(tokenResp, repositories)
+	if validationErr != nil {
+		return registryCredentials{}, true, validationErr
 	}
 	return creds, true, nil
 }
@@ -3482,6 +3897,10 @@ func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[st
 
 	if creds, configured, err := a.registryCredentialsFromBroker(groupIDs, groupMap); configured || err != nil {
 		return creds, configured && err == nil, err
+	}
+
+	if isPublicBuild {
+		return registryCredentials{}, false, fmt.Errorf("public launcher requires the short-lived registry token broker")
 	}
 
 	creds, ok := a.registryCredentialsFromLicense()

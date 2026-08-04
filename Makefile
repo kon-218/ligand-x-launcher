@@ -16,13 +16,14 @@
 # by this Makefile - see .github/workflows/.
 # ============================================================
 
-.PHONY: help setup dev dev-public build build-public build-all runtime-bundle pin-release validate-staging test fmt vet deps clean install-wails
+.PHONY: help setup dev dev-public build build-public build-all runtime-bundle sync-runtime-topology check-runtime-topology pin-release validate-staging test fmt vet deps clean install-wails
 
 # ============================================================
 # Configuration
 # ============================================================
 
 VERSION ?= 1.0.0
+PUBLIC_REPO ?= ../ligand-x
 WAILS   := $(shell go env GOPATH)/bin/wails
 
 # ============================================================
@@ -48,7 +49,9 @@ help:
 	@echo "  make build            - Build dev launcher for current platform -> build/bin/ligandx-launcher"
 	@echo "  make build-public     - Build public launcher for current platform -> build/bin/ligandx"
 	@echo "  make build-all        - Native binaries for all platforms -> dist/"
-	@echo "  make runtime-bundle   - Build ligand-x-runtime.zip -> dist/"
+	@echo "  make runtime-bundle   - Build and validate canonical ligand-x-runtime.zip -> dist/"
+	@echo "  make sync-runtime-topology - Regenerate launcher Compose snapshot from public canonical Compose"
+	@echo "  make check-runtime-topology - Fail if launcher Compose snapshot has drifted"
 	@echo "  make pin-release RELEASE=vX.Y.Z - Pin .env.production VERSION to a release"
 	@echo "  make validate-staging - Start pinned prod images and verify all 25 services are healthy"
 	@echo "  make clean            - Remove build/bin, dist, and packaged artifacts"
@@ -102,7 +105,13 @@ build-all:
 	@bash scripts/build-all.sh $(VERSION)
 
 runtime-bundle:
-	@bash scripts/build-runtime-bundle.sh
+	@VERSION="$(VERSION)" LIGANDX_PUBLIC_REPO="$(PUBLIC_REPO)" bash scripts/build-runtime-bundle.sh
+
+sync-runtime-topology:
+	@LIGANDX_PUBLIC_REPO="$(PUBLIC_REPO)" bash scripts/sync-runtime-topology.sh
+
+check-runtime-topology:
+	@LIGANDX_PUBLIC_REPO="$(PUBLIC_REPO)" bash scripts/check-runtime-topology.sh
 
 pin-release:
 	@if [ -z "$(RELEASE)" ]; then echo "Usage: make pin-release RELEASE=vX.Y.Z"; exit 1; fi

@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,14 +39,18 @@ func TestGetServiceGroups(t *testing.T) {
 	groups := app.GetServiceGroups()
 
 	// Verify groups returned (free/core groups plus Pro packages)
-	if len(groups) != 9 {
-		t.Errorf("Expected 9 service groups, got %d", len(groups))
+	if len(groups) != 8 {
+		t.Errorf("Expected 8 stable service groups, got %d", len(groups))
 	}
 
 	// Create a map for easier lookup
 	groupMap := make(map[string]*ServiceGroup)
 	for i, g := range groups {
 		groupMap[g.ID] = &groups[i]
+	}
+
+	if _, ok := groupMap["kinetics"]; ok {
+		t.Error("preview kinetics group must be absent from the stable launcher")
 	}
 
 	// Verify "core" properties
@@ -277,7 +284,6 @@ func TestSaveLocalAccountWritesEnvAndConfig(t *testing.T) {
 	for _, expected := range []string{
 		"LIGANDX_USERNAME=alice",
 		"LIGANDX_PASSWORD=strongpass",
-		"LIGANDX_API_KEY=",
 	} {
 		if !strings.Contains(env, expected) {
 			t.Fatalf(".env missing %s in:\n%s", expected, env)
@@ -317,7 +323,7 @@ func TestSaveLocalAccountWorksWithProductionBundleOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", t.TempDir())
 	// Runtime-bundle layout: production template only, no dev files.
-	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte("LIGANDX_API_KEY=CHANGE_ME\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte("LIGANDX_USERNAME=admin\nLIGANDX_PASSWORD=CHANGE_ME\n"), 0644); err != nil {
 		t.Fatalf("Failed to write production template: %v", err)
 	}
 
@@ -336,7 +342,6 @@ func TestSaveLocalAccountWorksWithProductionBundleOnly(t *testing.T) {
 	for _, expected := range []string{
 		"LIGANDX_USERNAME=alice",
 		"LIGANDX_PASSWORD=strongpass",
-		"LIGANDX_API_KEY=",
 	} {
 		if !strings.Contains(env, expected) {
 			t.Fatalf(".env.production missing %s in:\n%s", expected, env)
@@ -447,6 +452,18 @@ func TestRuntimeBundleExtractionSelfHealsStaleDirectorySource(t *testing.T) {
 	if _, err := w.Write([]byte("server { listen 80; }\n")); err != nil {
 		t.Fatal(err)
 	}
+	for name, content := range map[string]string{
+		"ligand-x-main/docker-compose.yml":       "services: {}\n",
+		"ligand-x-main/.env.production.template": "VERSION=v1.2.3\n",
+	} {
+		requiredWriter, createErr := zw.Create(name)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, writeErr := requiredWriter.Write([]byte(content)); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +507,6 @@ func TestEnsureProductionEnvReplacesUnsafeDefaults(t *testing.T) {
 		"REDIS_PASSWORD=CHANGE_ME",
 		"REDIS_URL=redis://:CHANGE_ME@redis:6379/0",
 		"QC_SECRET_KEY=CHANGE_ME",
-		"LIGANDX_API_KEY=CHANGE_ME",
 		"LIGANDX_PASSWORD=CHANGE_ME",
 		"FLOWER_PASSWORD=CHANGE_ME",
 		"NEXT_PUBLIC_API_URL=https://your-domain.com",
@@ -574,7 +590,6 @@ func TestDevComposeArgsFallsBackToProductionEnvWithoutMissingOverrides(t *testin
 		"REDIS_PASSWORD=CHANGE_ME",
 		"REDIS_URL=redis://:CHANGE_ME@redis:6379/0",
 		"QC_SECRET_KEY=CHANGE_ME",
-		"LIGANDX_API_KEY=CHANGE_ME",
 		"FLOWER_PASSWORD=CHANGE_ME",
 	}, "\n")
 	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(template), 0644); err != nil {
@@ -647,7 +662,7 @@ func TestCheckGPU(t *testing.T) {
 // either is rotated alone, every signed license silently fails verification
 // at one verifier or the other.
 func TestEmbeddedPublicKeyMatchesPemFile(t *testing.T) {
-	pemPath := filepath.Join("..", "lib", "licensing", "public_key.pem")
+	pemPath := filepath.Join("..", "ligand-x", "lib", "licensing", "public_key.pem")
 	onDisk, err := os.ReadFile(pemPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", pemPath, err)
@@ -975,5 +990,294 @@ func TestStderrTailKeepsLastNLines(t *testing.T) {
 	}
 	if got := tail.String(); got != "c\nd\ne" {
 		t.Fatalf("stderrTail.String() = %q, want %q", got, "c\nd\ne")
+	}
+}
+
+func requirePrivateMode(t *testing.T, path string) {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected %s mode 0600, got %04o", path, got)
+	}
+}
+
+func TestPrivatePersistenceUsesOwnerOnlyMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env.production")
+	if err := os.WriteFile(envPath, []byte("SECRET=old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.projectPath = tmpDir
+	if _, err := app.GetEnvContent("prod"); err != nil {
+		t.Fatal(err)
+	}
+	requirePrivateMode(t, envPath)
+	if err := app.SaveEnvContent("prod", "SECRET=new\n"); err != nil {
+		t.Fatal(err)
+	}
+	requirePrivateMode(t, envPath)
+
+	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", filepath.Join(tmpDir, "config"))
+	if err := app.SaveLauncherConfig(LauncherConfig{ConfigVersion: 2}); err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := app.getConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePrivateMode(t, configPath)
+
+	app.logToFile("test", "redacted diagnostic")
+	requirePrivateMode(t, app.composeLogPath())
+}
+
+func TestWritePrivateFileReplacesExistingContentAndMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateFile(path, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("unexpected private file content %q", data)
+	}
+	requirePrivateMode(t, path)
+}
+
+func signRuntimeManifestForTest(t *testing.T, bundle []byte, version string, expiresAt time.Time) ([]byte, []byte) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := runtimeBundlePublicKeyB64
+	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
+	t.Cleanup(func() { runtimeBundlePublicKeyB64 = oldKey })
+	digest := sha256.Sum256(bundle)
+	manifest, err := json.Marshal(runtimeBundleManifest{
+		Schema:    "ligandx-runtime-manifest/1",
+		Version:   version,
+		Asset:     runtimeBundleAssetName,
+		SHA256:    fmt.Sprintf("%x", digest),
+		Size:      int64(len(bundle)),
+		IssuedAt:  time.Now().UTC().Format(time.RFC3339),
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+		GitCommit: strings.Repeat("a", 40),
+		Artifacts: map[string]runtimeReleaseArtifact{
+			runtimeBundleAssetName: {SHA256: fmt.Sprintf("%x", digest), Size: int64(len(bundle))},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, manifest))
+	return manifest, []byte(signature)
+}
+
+func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
+	bundle := []byte("signed runtime bundle")
+	manifestBytes, signatureBytes := signRuntimeManifestForTest(t, bundle, "v1.2.3", time.Now().Add(time.Hour))
+	manifest, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v1.2.3")
+	if err != nil {
+		t.Fatalf("valid manifest rejected: %v", err)
+	}
+
+	if _, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v9.9.9"); err == nil {
+		t.Fatal("manifest for a different release tag was accepted")
+	}
+	trustedKey := runtimeBundlePublicKeyB64
+	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(otherPublic)
+	if _, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v1.2.3"); err == nil {
+		t.Fatal("manifest signed by an untrusted signer was accepted")
+	}
+	runtimeBundlePublicKeyB64 = trustedKey
+	expiredManifest, expiredSignature := signRuntimeManifestForTest(
+		t, bundle, "v1.2.3", time.Now().Add(-time.Minute),
+	)
+	if _, err := verifyRuntimeBundleManifest(expiredManifest, expiredSignature, "v1.2.3"); err == nil {
+		t.Fatal("expired runtime manifest was accepted")
+	}
+
+	bundlePath := filepath.Join(t.TempDir(), runtimeBundleAssetName)
+	if err := os.WriteFile(bundlePath, bundle, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRuntimeBundleFile(bundlePath, manifest); err != nil {
+		t.Fatalf("valid bundle rejected: %v", err)
+	}
+	tamperedManifest := bytes.Replace(manifestBytes, []byte("v1.2.3"), []byte("v9.9.9"), 1)
+	if _, err := verifyRuntimeBundleManifest(tamperedManifest, signatureBytes, ""); err == nil {
+		t.Fatal("tampered signed manifest was accepted")
+	}
+	if err := os.WriteFile(bundlePath, append(bundle, byte(0)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRuntimeBundleFile(bundlePath, manifest); err == nil {
+		t.Fatal("tampered bundle was accepted")
+	}
+}
+
+func TestRuntimeRollbackPolicyRejectsOlderVersion(t *testing.T) {
+	runtimeDir := t.TempDir()
+	if err := writePrivateFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"), []byte("v2.1.0\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforceRuntimeRollbackPolicy(runtimeDir, "v2.0.9"); err == nil {
+		t.Fatal("runtime downgrade was accepted")
+	}
+	if err := enforceRuntimeRollbackPolicy(runtimeDir, "v2.1.1"); err != nil {
+		t.Fatalf("runtime upgrade was rejected: %v", err)
+	}
+}
+
+func TestRuntimeDownloadRejectsUnapprovedHost(t *testing.T) {
+	if _, err := approvedRuntimeDownloadURL("https://attacker.example/runtime.zip"); err == nil {
+		t.Fatal("unapproved runtime host was accepted")
+	}
+}
+
+func TestRuntimeBundleRejectsTooManyEntries(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "runtime.zip")
+	file, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for index := 0; index < runtimeBundleMaxFiles+1; index++ {
+		entry, createErr := writer.Create(fmt.Sprintf("ignored-%03d", index))
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, writeErr := entry.Write([]byte("x")); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractRuntimeBundle(zipPath, t.TempDir()); err == nil {
+		t.Fatal("oversized entry-count archive was accepted")
+	}
+}
+
+func TestRuntimeBundleRejectsSymlinkEntry(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "runtime.zip")
+	file, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	header := &zip.FileHeader{Name: "docker-compose.yml"}
+	header.SetMode(os.ModeSymlink | 0777)
+	entry, err := writer.CreateHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("target")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractRuntimeBundle(zipPath, t.TempDir()); err == nil {
+		t.Fatal("symbolic-link archive entry was accepted")
+	}
+}
+
+func TestRuntimeBundleTargetRejectsExistingSymlink(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlink creation requires platform-specific privileges on Windows")
+	}
+	base := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "docker-compose.yml")
+	if err := os.Symlink(outside, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectRuntimeSymlinkPath(base, target); err == nil {
+		t.Fatal("existing target symlink was accepted")
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "unchanged" {
+		t.Fatal("symlink target was modified")
+	}
+}
+
+func TestPasswordUpdateAndLicenseImportPersistenceStayPrivate(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", t.TempDir())
+	template := "LIGANDX_USERNAME=admin\nLIGANDX_PASSWORD=CHANGE_ME\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(template), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.projectPath = tmpDir
+	if _, err := app.SaveLocalAccount("alice", "alice@example.com", "strongpass"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.UpdatePassword("replacement-pass"); err != nil {
+		t.Fatal(err)
+	}
+	requirePrivateMode(t, filepath.Join(tmpDir, ".env.production"))
+	if err := app.persistImportedLicense([]byte("signed-public-claims")); err != nil {
+		t.Fatal(err)
+	}
+	requirePrivateMode(t, app.licensePath())
+}
+
+func TestRegistryTokenResponseMustBeShortLivedAndExactlyScoped(t *testing.T) {
+	repositories := []string{"ghcr.io/kon-218/ligand-x-pro/admet"}
+	valid := registryTokenResponse{
+		Host:         "ghcr.io",
+		Username:     "oauth2",
+		Token:        "short-lived-token",
+		ExpiresAt:    time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339),
+		Repositories: repositories,
+	}
+	if _, err := validateRegistryTokenResponse(valid, repositories); err != nil {
+		t.Fatalf("valid scoped token response rejected: %v", err)
+	}
+	wrongScope := valid
+	wrongScope.Repositories = []string{"ghcr.io/kon-218/ligand-x-pro/qc"}
+	if _, err := validateRegistryTokenResponse(wrongScope, repositories); err == nil {
+		t.Fatal("unexpected repository scope was accepted")
+	}
+	expired := valid
+	expired.ExpiresAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	if _, err := validateRegistryTokenResponse(expired, repositories); err == nil {
+		t.Fatal("expired registry token was accepted")
+	}
+	wrongHost := valid
+	wrongHost.Host = "registry.attacker.example"
+	if _, err := validateRegistryTokenResponse(wrongHost, repositories); err == nil {
+		t.Fatal("non-GHCR registry token was accepted")
 	}
 }

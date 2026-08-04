@@ -2,16 +2,16 @@ name: Build & Release Public Launcher
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'launcher-v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., 1.0.0). Leave as latest for the rolling public release.'
+        description: 'Immutable runtime/image version (e.g., v1.0.0); latest is rejected.'
         required: true
-        default: 'latest'
+      public_ref:
+        description: 'Exact ligand-x public tag or commit containing the canonical runtime topology.'
+        required: true
 
 permissions:
   contents: write
@@ -20,10 +20,9 @@ env:
   # Match go.mod (`go 1.25.0`) so CI uses the project toolchain directly
   # instead of auto-downloading a newer one mid-build.
   GO_VERSION: '1.25'
-  # Pin the Wails CLI to the version in go.mod to avoid CLI/library drift
-  # (the build log warned: "go.mod is using Wails '2.11.0' but the CLI is 'v2.12.0'").
-  WAILS_VERSION: 'v2.11.0'
-  PUBLIC_RELEASE_TAG: latest
+  # Pin the Wails CLI to the version in go.mod to avoid CLI/library drift.
+  WAILS_VERSION: "v2.11.0"
+  RUNTIME_BUNDLE_PUBLIC_KEY_B64: ${{ vars.LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 }}
 
 concurrency:
   group: public-launcher-release-${{ github.ref }}
@@ -37,10 +36,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.sum
@@ -57,7 +56,8 @@ jobs:
         run: |
           set -euo pipefail
           WAILS_BIN="$(go env GOPATH)/bin/wails"
-          "$WAILS_BIN" build -platform linux/amd64 -tags "public,webkit2_41" -o ligandx
+          : "${RUNTIME_BUNDLE_PUBLIC_KEY_B64:?Repository variable LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 is required}"
+          "$WAILS_BIN" build -platform linux/amd64 -tags "public,webkit2_41" -ldflags "-X main.runtimeBundlePublicKeyB64=${RUNTIME_BUNDLE_PUBLIC_KEY_B64}" -o ligandx
           # Fail loudly if this is the non-production stub (it embeds
           # internal/app/app_default_unix.go, which is //go:build !production).
           if grep -aq "app_default_unix.go" build/bin/ligandx; then
@@ -108,7 +108,7 @@ jobs:
           mv *.AppImage ligandx-linux-amd64.AppImage
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ligandx-linux-amd64.AppImage
           path: ligandx-linux-amd64.AppImage
@@ -120,12 +120,15 @@ jobs:
   # ============================================================
   build-windows:
     runs-on: windows-latest
+    env:
+      WINDOWS_SIGNING_CERT_PFX_B64: ${{ secrets.LIGANDX_WINDOWS_SIGNING_CERT_PFX_B64 }}
+      WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.LIGANDX_WINDOWS_SIGNING_CERT_PASSWORD }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.sum
@@ -145,7 +148,10 @@ jobs:
           # tags. Please use 'wails build'...". We ship the bare exe (no NSIS):
           # it matches the "double-click to run, no install" release notes and
           # removes the makensis dependency that was silently failing.
-          wails build -platform windows/amd64 -tags public -o ligandx
+          if ([string]::IsNullOrWhiteSpace($env:RUNTIME_BUNDLE_PUBLIC_KEY_B64)) {
+            throw "Repository variable LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 is required"
+          }
+          wails build -platform windows/amd64 -tags public -ldflags "-X main.runtimeBundlePublicKeyB64=$env:RUNTIME_BUNDLE_PUBLIC_KEY_B64" -o ligandx
           if ($LASTEXITCODE -ne 0) { throw "wails build failed (exit $LASTEXITCODE)" }
 
           # Discover the produced binary by name, NOT by extension: this Wails
@@ -172,8 +178,27 @@ jobs:
           # Always emit a .exe so Windows treats it as runnable on double-click.
           Move-Item $exe.FullName "build/bin/ligandx-windows-amd64.exe" -Force
 
+      - name: Authenticode-sign and verify Windows launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PFX_B64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            throw "Windows signing certificate and password secrets are required"
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "ligandx-windows-signing.pfx"
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_PFX_B64))
+            & signtool sign /fd SHA256 /td SHA256 /tr https://timestamp.digicert.com /f $pfx /p $env:WINDOWS_SIGNING_CERT_PASSWORD build/bin/ligandx-windows-amd64.exe
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed" }
+            & signtool verify /pa /all build/bin/ligandx-windows-amd64.exe
+            if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed" }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ligandx-windows-amd64.exe
           path: build/bin/ligandx-windows-amd64.exe
@@ -185,12 +210,19 @@ jobs:
   # ============================================================
   build-macos-universal:
     runs-on: macos-latest
+    env:
+      MACOS_SIGNING_CERT_P12_B64: ${{ secrets.LIGANDX_MACOS_SIGNING_CERT_P12_B64 }}
+      MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.LIGANDX_MACOS_SIGNING_CERT_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.LIGANDX_MACOS_SIGNING_IDENTITY }}
+      MACOS_NOTARY_KEY_P8_B64: ${{ secrets.LIGANDX_MACOS_NOTARY_KEY_P8_B64 }}
+      MACOS_NOTARY_KEY_ID: ${{ secrets.LIGANDX_MACOS_NOTARY_KEY_ID }}
+      MACOS_NOTARY_ISSUER_ID: ${{ secrets.LIGANDX_MACOS_NOTARY_ISSUER_ID }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.sum
@@ -205,13 +237,38 @@ jobs:
         run: |
           set -euo pipefail
           WAILS_BIN="$(go env GOPATH)/bin/wails"
-          "$WAILS_BIN" build -platform darwin/universal -tags public -o ligandx
+          : "${RUNTIME_BUNDLE_PUBLIC_KEY_B64:?Repository variable LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 is required}"
+          "$WAILS_BIN" build -platform darwin/universal -tags public -ldflags "-X main.runtimeBundlePublicKeyB64=${RUNTIME_BUNDLE_PUBLIC_KEY_B64}" -o ligandx
           # Fail loudly if this is the non-production stub (it embeds
           # internal/app/app_default_unix.go, which is //go:build !production).
           if grep -aqr "app_default_unix.go" build/bin/ligandx.app/Contents/MacOS/; then
-            echo "::error::Built binary is the Wails stub (missing 'production' tag)"
+            echo "::error::Built binary is the Wails stub (missing production tag)"
             exit 1
           fi
+
+      - name: Code-sign and verify macOS app
+        run: |
+          set -euo pipefail
+          : "${MACOS_SIGNING_CERT_P12_B64:?macOS signing certificate secret is required}"
+          : "${MACOS_SIGNING_CERT_PASSWORD:?macOS signing certificate password is required}"
+          : "${MACOS_SIGNING_IDENTITY:?macOS signing identity is required}"
+          keychain="${RUNNER_TEMP}/ligandx-signing.keychain-db"
+          certificate="${RUNNER_TEMP}/ligandx-signing.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          cleanup() {
+            security delete-keychain "${keychain}" >/dev/null 2>&1 || true
+            rm -f "${certificate}"
+          }
+          trap cleanup EXIT
+          python3 -c "import base64, os, pathlib; pathlib.Path(os.environ[\"RUNNER_TEMP\"], \"ligandx-signing.p12\").write_bytes(base64.b64decode(os.environ[\"MACOS_SIGNING_CERT_P12_B64\"], validate=True))"
+          security create-keychain -p "${keychain_password}" "${keychain}"
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p "${keychain_password}" "${keychain}"
+          security import "${certificate}" -k "${keychain}" -P "${MACOS_SIGNING_CERT_PASSWORD}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain}"
+          security list-keychains -d user -s "${keychain}"
+          codesign --force --deep --options runtime --timestamp --sign "${MACOS_SIGNING_IDENTITY}" build/bin/ligandx.app
+          codesign --verify --deep --strict --verbose=2 build/bin/ligandx.app
 
       - name: Create DMG
         run: |
@@ -249,8 +306,22 @@ jobs:
               fi
             }
 
+      - name: Notarize and staple macOS disk image
+        run: |
+          set -euo pipefail
+          : "${MACOS_NOTARY_KEY_P8_B64:?macOS notarization key secret is required}"
+          : "${MACOS_NOTARY_KEY_ID:?macOS notarization key ID is required}"
+          : "${MACOS_NOTARY_ISSUER_ID:?macOS notarization issuer ID is required}"
+          notary_key="${RUNNER_TEMP}/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
+          cleanup_notary() { rm -f "${notary_key}"; }
+          trap cleanup_notary EXIT
+          python3 -c "import base64, os, pathlib; pathlib.Path(os.environ[\"RUNNER_TEMP\"], \"AuthKey_\" + os.environ[\"MACOS_NOTARY_KEY_ID\"] + \".p8\").write_bytes(base64.b64decode(os.environ[\"MACOS_NOTARY_KEY_P8_B64\"], validate=True))"
+          xcrun notarytool submit ligandx-darwin-universal.dmg --key "${notary_key}" --key-id "${MACOS_NOTARY_KEY_ID}" --issuer "${MACOS_NOTARY_ISSUER_ID}" --wait
+          xcrun stapler staple ligandx-darwin-universal.dmg
+          xcrun stapler validate ligandx-darwin-universal.dmg
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ligandx-darwin-universal.dmg
           path: ligandx-darwin-universal.dmg
@@ -265,65 +336,169 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Resolve release tag
-        id: release-tag
+      - name: Resolve immutable runtime inputs
+        id: runtime
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLIC_REF: ${{ inputs.public_ref }}
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            echo "tag=${PUBLIC_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-            echo "title=Ligand-X Public Launcher latest" >> "$GITHUB_OUTPUT"
-          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && { [ -z "${VERSION}" ] || [ "${VERSION}" = "${PUBLIC_RELEASE_TAG}" ]; }; then
-            echo "tag=${PUBLIC_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-            echo "title=Ligand-X Public Launcher latest" >> "$GITHUB_OUTPUT"
-          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            echo "tag=launcher-v${VERSION}" >> "$GITHUB_OUTPUT"
-            echo "title=Ligand-X Public Launcher ${VERSION}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            version="v${GITHUB_REF_NAME#launcher-v}"
+            public_ref="${version}"
+            release_tag="${GITHUB_REF_NAME}"
           else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "title=Ligand-X Public Launcher ${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            version="${INPUT_VERSION}"
+            public_ref="${INPUT_PUBLIC_REF}"
+            release_tag="launcher-${version}"
           fi
+          if [[ "${version}" == *latest* ]] || [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::VERSION must be an immutable v-prefixed release tag, not latest: ${version}"
+            exit 64
+          fi
+          if [[ "${public_ref}" == *latest* ]] || {
+            [[ ! "${public_ref}" =~ ^[0-9a-f]{40}$ ]] &&
+            [[ ! "${public_ref}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]];
+          }; then
+            echo "::error::public_ref must be a full commit SHA or immutable v-prefixed release tag: ${public_ref}"
+            exit 64
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "public_ref=${public_ref}" >> "$GITHUB_OUTPUT"
+          echo "tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "title=Ligand-X Public Launcher ${version}" >> "$GITHUB_OUTPUT"
 
-      - name: Create or update release tag
+      - name: Checkout pinned canonical public runtime
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: kon-218/ligand-x
+          ref: ${{ steps.runtime.outputs.public_ref }}
+          path: .canonical/ligand-x
+
+      - name: Install pinned topology-renderer dependency
+        run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
+
+      - name: Create release tag for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
         env:
-          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+          RELEASE_TAG: ${{ steps.runtime.outputs.tag }}
         run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "::error::Release tag already exists: ${RELEASE_TAG}"
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -f "${RELEASE_TAG}"
-          git push -f origin "${RELEASE_TAG}"
+          git tag "${RELEASE_TAG}"
+          git push origin "${RELEASE_TAG}"
 
-      - name: Build runtime bundle
-        run: ./scripts/build-runtime-bundle.sh artifacts/runtime
+      - name: Verify generated launcher topology snapshot
+        env:
+          LIGANDX_PUBLIC_REPO: ${{ github.workspace }}/.canonical/ligand-x
+        run: bash scripts/check-runtime-topology.sh
+
+      - name: Build and validate exact canonical runtime bundle
+        env:
+          VERSION: ${{ steps.runtime.outputs.version }}
+          LIGANDX_PUBLIC_REPO: ${{ github.workspace }}/.canonical/ligand-x
+        run: bash scripts/build-runtime-bundle.sh artifacts/runtime
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
+
+      - name: Create and sign immutable release manifest
+        env:
+          RELEASE_VERSION: ${{ steps.runtime.outputs.version }}
+          SIGNING_PRIVATE_KEY_PEM_B64: ${{ secrets.LIGANDX_RUNTIME_SIGNING_PRIVATE_KEY_PEM_B64 }}
+        run: |
+          set -euo pipefail
+          : "${SIGNING_PRIVATE_KEY_PEM_B64:?Secret LIGANDX_RUNTIME_SIGNING_PRIVATE_KEY_PEM_B64 is required}"
+          : "${RUNTIME_BUNDLE_PUBLIC_KEY_B64:?Variable LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 is required}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          artifact_root = Path("artifacts")
+          bundle = artifact_root / "runtime" / "ligand-x-runtime.zip"
+          required_names = {
+              "ligand-x-runtime.zip",
+              "ligandx-linux-amd64.AppImage",
+              "ligandx-windows-amd64.exe",
+              "ligandx-darwin-universal.dmg",
+          }
+          paths = {path.name: path for path in artifact_root.rglob("*") if path.is_file() and path.name in required_names}
+          missing = sorted(required_names - paths.keys())
+          if missing:
+              raise SystemExit(f"missing release artifacts: {missing}")
+          artifacts = {}
+          for name, path in sorted(paths.items()):
+              data = path.read_bytes()
+              artifacts[name] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+          release = {
+              "schema": "ligandx-runtime-manifest/1",
+              "version": os.environ["RELEASE_VERSION"],
+              "asset": bundle.name,
+              "sha256": artifacts[bundle.name]["sha256"],
+              "size": artifacts[bundle.name]["size"],
+              "issued_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "git_commit": os.environ["GITHUB_SHA"],
+              "artifacts": artifacts,
+          }
+          output = artifact_root / "runtime" / "ligand-x-runtime-manifest.json"
+          output.write_text(json.dumps(release, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          umask 077
+          printf "%s" "${SIGNING_PRIVATE_KEY_PEM_B64}" | base64 --decode > runtime-signing-key.pem
+          derived_public="$(openssl pkey -in runtime-signing-key.pem -pubout -outform DER | tail -c 32 | base64 -w0)"
+          if [ "${derived_public}" != "${RUNTIME_BUNDLE_PUBLIC_KEY_B64}" ]; then
+            echo "::error::Runtime signing private key does not match embedded public key"
+            exit 1
+          fi
+          openssl pkeyutl -sign -rawin \
+            -inkey runtime-signing-key.pem \
+            -in artifacts/runtime/ligand-x-runtime-manifest.json \
+            -out runtime-manifest-signature.bin
+          base64 -w0 runtime-manifest-signature.bin > artifacts/runtime/ligand-x-runtime-manifest.sig
+          printf "\n" >> artifacts/runtime/ligand-x-runtime-manifest.sig
+          openssl pkey -in runtime-signing-key.pem -pubout -out runtime-signing-public.pem
+          openssl pkeyutl -verify -pubin -rawin \
+            -inkey runtime-signing-public.pem \
+            -in artifacts/runtime/ligand-x-runtime-manifest.json \
+            -sigfile runtime-manifest-signature.bin
+          rm -f runtime-signing-key.pem runtime-signing-public.pem runtime-manifest-signature.bin
 
       - name: Display structure
         run: ls -R artifacts
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ steps.release-tag.outputs.tag }}
-          name: ${{ steps.release-tag.outputs.title }}
+          tag_name: ${{ steps.runtime.outputs.tag }}
+          name: ${{ steps.runtime.outputs.title }}
           target_commitish: ${{ github.sha }}
           draft: false
           prerelease: false
-          make_latest: ${{ steps.release-tag.outputs.tag == env.PUBLIC_RELEASE_TAG }}
-          overwrite_files: true
+          make_latest: true
+          overwrite_files: false
           files: |
             artifacts/ligandx-linux-amd64.AppImage/ligandx-linux-amd64.AppImage
             artifacts/ligandx-windows-amd64.exe/ligandx-windows-amd64.exe
             artifacts/ligandx-darwin-universal.dmg/ligandx-darwin-universal.dmg
             artifacts/runtime/ligand-x-runtime.zip
+            artifacts/runtime/ligand-x-runtime-manifest.json
+            artifacts/runtime/ligand-x-runtime-manifest.sig
           body: |
-            ## ${{ steps.release-tag.outputs.title }}
+            ## ${{ steps.runtime.outputs.title }}
 
             Cross-platform public GUI launcher for the Ligand-X molecular analysis platform.
 
@@ -331,9 +506,10 @@ jobs:
 
             | Platform | File | Installation |
             |----------|------|--------------|
-            | **Windows** (64-bit) | `ligandx-windows-amd64.exe` | Portable — double-click to run (no install). SmartScreen may warn (unsigned): **More info → Run anyway**. No admin required. |
-            | **Runtime Bundle** | `ligand-x-runtime.zip` | Downloaded automatically by the launcher on first run |
-            | **macOS** (Intel + Apple Silicon) | `ligandx-darwin-universal.dmg` | Open DMG, drag to Applications |
+            | **Windows** (64-bit) | `ligandx-windows-amd64.exe` | Portable Authenticode-signed binary — double-click to run (no install). No admin required. |
+            | **Runtime Bundle** | `ligand-x-runtime.zip` | Downloaded only after its signed manifest is verified |
+            | **Signed checksums** | `ligand-x-runtime-manifest.json` + `.sig` | Ed25519-authenticated hashes for every release artifact |
+            | **macOS** (Intel + Apple Silicon) | `ligandx-darwin-universal.dmg` | Developer ID-signed, notarized, and stapled. Open DMG, drag to Applications. |
             | **Linux** (64-bit) | `ligandx-linux-amd64.AppImage` | `chmod +x`, double-click to run |
 
             ### Requirements
