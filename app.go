@@ -2743,6 +2743,19 @@ func (a *App) ensureProductionEnv() error {
 		}
 	}
 
+	// Pro images are published on their own cadence, so compose resolves them
+	// through ${PRO_VERSION:-${VERSION}}. An .env.production written by an older
+	// launcher has no PRO_VERSION at all and would silently fall through to
+	// VERSION — pulling Pro tags that were never built for a core-only release.
+	// Seed it from the template whenever the template pins one and the local file
+	// does not, without touching a value the user has chosen.
+	if templatePro := a.templateValue("PRO_VERSION"); templatePro != "" && isEnvPlaceholder(cur["PRO_VERSION"]) {
+		if err := a.setProductionEnvValue("PRO_VERSION", templatePro); err != nil {
+			return err
+		}
+		cur["PRO_VERSION"] = templatePro
+	}
+
 	// The template's resource limits describe a multi-GPU workstation. Docker
 	// rejects any container whose `cpus` exceeds the daemon's CPU count, so on a
 	// smaller machine the stack cannot start at all until these are cut down to
@@ -2755,15 +2768,20 @@ func (a *App) ensureProductionEnv() error {
 // or "" if the template is missing or its VERSION is not a concrete pin. This is
 // the canonical image tag the bundle was published against.
 func (a *App) templatePinnedVersion() string {
-	data, err := os.ReadFile(filepath.Join(a.projectPath, ".env.production.template"))
-	if err != nil {
-		return ""
-	}
-	v := strings.TrimSpace(parseEnvFile(string(data))["VERSION"])
+	v := a.templateValue("VERSION")
 	if !isPinnedImageVersion(v) {
 		return ""
 	}
 	return v
+}
+
+// templateValue reads a single key from .env.production.template.
+func (a *App) templateValue(key string) string {
+	data, err := os.ReadFile(filepath.Join(a.projectPath, ".env.production.template"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parseEnvFile(string(data))[key])
 }
 
 // GetUserSettings returns the user-facing subset of .env.production.

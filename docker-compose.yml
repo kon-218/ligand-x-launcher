@@ -222,7 +222,7 @@ services:
         max-size: 10m
         max-file: '3'
   reinvent:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/reinvent:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/reinvent:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - reinvent
     - '8013'
@@ -502,7 +502,7 @@ services:
         max-size: 10m
         max-file: '3'
   abfe:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/abfe:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/abfe:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - abfe
     - '8010'
@@ -561,7 +561,7 @@ services:
         max-size: 10m
         max-file: '3'
   rbfe:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/rbfe:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/rbfe:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - rbfe
     - '8011'
@@ -623,7 +623,7 @@ services:
         max-size: 10m
         max-file: '3'
   admet:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/admet:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/admet:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - admet
     - '8004'
@@ -666,7 +666,7 @@ services:
         max-size: 10m
         max-file: '3'
   boltz2:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/boltz2:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/boltz2:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - boltz2
     - '8005'
@@ -717,7 +717,7 @@ services:
         max-size: 10m
         max-file: '3'
   qc:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/qc:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/qc:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - qc
     - '8006'
@@ -776,7 +776,7 @@ services:
         max-size: 10m
         max-file: '3'
   worker-qc:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - worker-qc
     networks:
@@ -801,7 +801,7 @@ services:
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
-    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${VERSION:-latest}
+    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${PRO_VERSION:-${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully
@@ -846,7 +846,7 @@ services:
         max-size: 10m
         max-file: '3'
   worker-gpu-short:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-short:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-short:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - worker-gpu-short
     networks:
@@ -870,7 +870,7 @@ services:
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
-    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-short:${VERSION:-latest}
+    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-short:${PRO_VERSION:-${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully
@@ -912,7 +912,7 @@ services:
         max-size: 10m
         max-file: '3'
   worker-gpu-long:
-    image: ${LIGANDX_GPU_LONG_IMAGE:-${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${VERSION:-latest}}
+    image: ${LIGANDX_GPU_LONG_IMAGE:-${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${PRO_VERSION:-${VERSION:-latest}}}
     command:
     - worker-gpu-long
     networks:
@@ -938,7 +938,7 @@ services:
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
-    - LIGANDX_IMAGE_REF=${LIGANDX_GPU_LONG_IMAGE:-${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${VERSION:-latest}}
+    - LIGANDX_IMAGE_REF=${LIGANDX_GPU_LONG_IMAGE:-${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${PRO_VERSION:-${VERSION:-latest}}}
     - RBFE_OUTPUT_DIR=/app/data/rbfe_outputs
     - ABFE_OUTPUT_DIR=/app/data/abfe_outputs
     depends_on:
@@ -1048,7 +1048,7 @@ services:
         max-size: 10m
         max-file: '3'
   worker-reinvent:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${VERSION:-latest}
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${PRO_VERSION:-${VERSION:-latest}}
     command:
     - worker-reinvent
     networks:
@@ -1073,7 +1073,7 @@ services:
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
-    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${VERSION:-latest}
+    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${PRO_VERSION:-${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully

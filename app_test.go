@@ -1678,3 +1678,54 @@ func TestPortFreeDetectsRealListener(t *testing.T) {
 		t.Errorf("port %d reported busy after the listener closed", port)
 	}
 }
+
+// TestEnsureProductionEnvSeedsProVersionForUpgradingInstalls covers the
+// licensed-user upgrade path: compose resolves Pro images through
+// ${PRO_VERSION:-${VERSION}}, so an .env.production written before PRO_VERSION
+// existed would follow VERSION and pull Pro tags that a core-only release never
+// published. The template's pin must be seeded in, without overriding a value
+// the user already set.
+func TestEnsureProductionEnvSeedsProVersionForUpgradingInstalls(t *testing.T) {
+	template := "VERSION=v2026.08.05\nPRO_VERSION=v2026.06.21\n"
+
+	t.Run("seeded when absent", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		app := NewApp()
+		app.projectPath = tmpDir
+		app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+		if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(template), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// Pre-existing file from an older launcher: VERSION only, no PRO_VERSION.
+		if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte("VERSION=v2026.06.21\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.ensureProductionEnv(); err != nil {
+			t.Fatal(err)
+		}
+		content, _ := app.GetEnvContent("prod")
+		if got := parseEnvFile(content)["PRO_VERSION"]; got != "v2026.06.21" {
+			t.Errorf("PRO_VERSION not seeded: got %q, want v2026.06.21", got)
+		}
+	})
+
+	t.Run("user's own value preserved", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		app := NewApp()
+		app.projectPath = tmpDir
+		app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+		if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(template), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte("VERSION=v2026.08.05\nPRO_VERSION=v2026.07.01\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.ensureProductionEnv(); err != nil {
+			t.Fatal(err)
+		}
+		content, _ := app.GetEnvContent("prod")
+		if got := parseEnvFile(content)["PRO_VERSION"]; got != "v2026.07.01" {
+			t.Errorf("user's PRO_VERSION was overwritten: got %q", got)
+		}
+	})
+}
