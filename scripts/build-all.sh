@@ -37,6 +37,9 @@ if [ -z "$LIGANDX_RUNTIME_PUBKEY" ]; then
     exit 1
 fi
 LDFLAGS="-X main.runtimeBundlePublicKeyB64=${LIGANDX_RUNTIME_PUBKEY}"
+# Public releases embed frontend-public/ (update prompt, simplified UX).
+# Without this tag, wails builds the dev frontend/ and ships no update UI.
+BUILD_TAGS="${LIGANDX_BUILD_TAGS:-public}"
 if [ ! -f "$WAILS_BIN" ]; then
     echo "Error: wails CLI not found"
     echo "Install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest"
@@ -58,7 +61,7 @@ echo ""
 # Build for Linux (amd64)
 if [ "$CURRENT_OS" = "linux" ]; then
     echo "Building for Linux (amd64)..."
-    "$WAILS_BIN" build -ldflags "$LDFLAGS" -platform linux/amd64 -o ligandx-launcher-linux-amd64
+    "$WAILS_BIN" build -ldflags "$LDFLAGS" -tags "${BUILD_TAGS},webkit2_41" -platform linux/amd64 -o ligandx-launcher-linux-amd64
     mv build/bin/ligandx-launcher-linux-amd64 "$OUTPUT_DIR/"
     echo "✓ Linux build complete"
 fi
@@ -66,7 +69,7 @@ fi
 # Build for Windows (amd64) - cross-compile from Linux/macOS
 echo ""
 echo "Building for Windows (amd64)..."
-"$WAILS_BIN" build -ldflags "$LDFLAGS" -platform windows/amd64 -o ligandx-launcher.exe 2>/dev/null && {
+"$WAILS_BIN" build -ldflags "$LDFLAGS" -tags "$BUILD_TAGS" -platform windows/amd64 -o ligandx-launcher.exe 2>/dev/null && {
     mv build/bin/ligandx-launcher.exe "$OUTPUT_DIR/ligandx-launcher-windows-amd64.exe"
     echo "✓ Windows build complete"
 } || {
@@ -77,7 +80,7 @@ echo "Building for Windows (amd64)..."
 if [ "$CURRENT_OS" = "darwin" ]; then
     echo ""
     echo "Building for macOS (amd64)..."
-    "$WAILS_BIN" build -ldflags "$LDFLAGS" -platform darwin/amd64 -o ligandx-launcher-darwin-amd64
+    "$WAILS_BIN" build -ldflags "$LDFLAGS" -tags "$BUILD_TAGS" -platform darwin/amd64 -o ligandx-launcher-darwin-amd64
     if [ -d "build/bin/ligandx-launcher-darwin-amd64.app" ]; then
         cp -r "build/bin/ligandx-launcher-darwin-amd64.app" "$OUTPUT_DIR/"
     else
@@ -88,7 +91,7 @@ if [ "$CURRENT_OS" = "darwin" ]; then
     # Build for macOS (arm64) - Apple Silicon
     echo ""
     echo "Building for macOS (arm64)..."
-    "$WAILS_BIN" build -ldflags "$LDFLAGS" -platform darwin/arm64 -o ligandx-launcher-darwin-arm64
+    "$WAILS_BIN" build -ldflags "$LDFLAGS" -tags "$BUILD_TAGS" -platform darwin/arm64 -o ligandx-launcher-darwin-arm64
     if [ -d "build/bin/ligandx-launcher-darwin-arm64.app" ]; then
         cp -r "build/bin/ligandx-launcher-darwin-arm64.app" "$OUTPUT_DIR/"
     else
