@@ -834,7 +834,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: ${WORKER_QC_CPU_LIMIT:-8}
+          cpus: ${WORKER_QC_CPU_LIMIT:-4}
           memory: ${WORKER_QC_MEM_LIMIT:-16G}
         reservations:
           cpus: ${WORKER_QC_CPU_RES:-2}
@@ -901,7 +901,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: ${WORKER_GPU_SHORT_CPU_LIMIT:-8}
+          cpus: ${WORKER_GPU_SHORT_CPU_LIMIT:-4}
           memory: ${WORKER_GPU_SHORT_MEM_LIMIT:-32G}
         reservations:
           cpus: ${WORKER_GPU_SHORT_CPU_RES:-4}
@@ -972,7 +972,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: ${WORKER_GPU_LONG_CPU_LIMIT:-12}
+          cpus: ${WORKER_GPU_LONG_CPU_LIMIT:-4}
           memory: ${WORKER_GPU_LONG_MEM_LIMIT:-48G}
         reservations:
           cpus: ${WORKER_GPU_LONG_CPU_RES:-4}
@@ -1037,7 +1037,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: ${WORKER_CPU_CPU_LIMIT:-16}
+          cpus: ${WORKER_CPU_CPU_LIMIT:-4}
           memory: ${WORKER_CPU_MEM_LIMIT:-32G}
         reservations:
           cpus: ${WORKER_CPU_CPU_RES:-4}
@@ -1099,7 +1099,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: ${WORKER_REINVENT_CPU_LIMIT:-8}
+          cpus: ${WORKER_REINVENT_CPU_LIMIT:-4}
           memory: ${WORKER_REINVENT_MEM_LIMIT:-16G}
         reservations:
           cpus: ${WORKER_REINVENT_CPU_RES:-2}

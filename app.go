@@ -288,6 +288,14 @@ type App struct {
 	// Cloudflare tunnel (see tunnel.go)
 	tunnelCmd *exec.Cmd
 	tunnelMux sync.Mutex
+
+	// Docker-daemon capacity, used to fit resource limits (see resources.go).
+	// hostResourcesFn overrides detection: nil in production, set by tests so
+	// fitting is deterministic instead of depending on the build machine.
+	hostResourcesFn   func() hostResources
+	hostRes           hostResources
+	hostResFromDaemon bool
+	hostResMux        sync.Mutex
 }
 
 func NewApp() *App {
@@ -1541,6 +1549,13 @@ func (a *App) StartServices(mode string) error {
 		})
 	}
 
+	// Resolve host-port conflicts before compose tries to bind (preflight.go).
+	// Must run before the compose args are built, because prodEnvArgs ->
+	// ensureProductionEnv derives CORS_ORIGINS from the (possibly moved) APP_PORT.
+	if err := a.fitPublishedPorts(); err != nil {
+		a.emitAndLog("launcher", fmt.Sprintf("Warning: could not check host ports: %v", err))
+	}
+
 	var args []string
 	var services []string
 
@@ -1621,6 +1636,13 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 		})
 	}
 
+	// Resolve host-port conflicts before compose tries to bind (preflight.go).
+	// Must run before the compose args are built, because prodEnvArgs ->
+	// ensureProductionEnv derives CORS_ORIGINS from the (possibly moved) APP_PORT.
+	if err := a.fitPublishedPorts(); err != nil {
+		a.emitAndLog("launcher", fmt.Sprintf("Warning: could not check host ports: %v", err))
+	}
+
 	allGroups := a.GetServiceGroups()
 	groupMap := make(map[string]ServiceGroup)
 	for _, g := range allGroups {
@@ -1690,6 +1712,13 @@ func (a *App) StartServicesCustom(env string, services []string) error {
 			Message:   fmt.Sprintf("Warning: Could not create data directories: %v", err),
 			Timestamp: time.Now().Format("15:04:05"),
 		})
+	}
+
+	// Resolve host-port conflicts before compose tries to bind (preflight.go).
+	// Must run before the compose args are built, because prodEnvArgs ->
+	// ensureProductionEnv derives CORS_ORIGINS from the (possibly moved) APP_PORT.
+	if err := a.fitPublishedPorts(); err != nil {
+		a.emitAndLog("launcher", fmt.Sprintf("Warning: could not check host ports: %v", err))
 	}
 
 	var args []string
@@ -2245,11 +2274,15 @@ func (a *App) logToFile(service, message string) {
 // emitAndLog sends a log line to the live UI (as before) and also persists it to
 // the on-disk log so the same information is available after the fact.
 func (a *App) emitAndLog(service, message string) {
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-		Service:   service,
-		Message:   message,
-		Timestamp: time.Now().Format("15:04:05"),
-	})
+	// ctx is nil before Wails startup (and under test) — emitting then would
+	// panic, but the on-disk log should still get the line.
+	if a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			Service:   service,
+			Message:   message,
+			Timestamp: time.Now().Format("15:04:05"),
+		})
+	}
 	a.logToFile(service, message)
 }
 
@@ -2328,16 +2361,20 @@ func (a *App) OpenBrowser(url string) {
 	cmd.Start()
 }
 
+// The Open* handlers read the live port from .env.production so they still work
+// after a conflict moved one (see fitPublishedPorts).
+
 func (a *App) OpenFrontend() {
-	a.OpenBrowser("http://localhost:8080") // reverse proxy (APP_PORT); single same-origin entry
+	// reverse proxy (APP_PORT); single same-origin entry
+	a.OpenBrowser(fmt.Sprintf("http://localhost:%d", a.envPort("APP_PORT", 8080)))
 }
 
 func (a *App) OpenAPI() {
-	a.OpenBrowser("http://localhost:8000/docs")
+	a.OpenBrowser(fmt.Sprintf("http://localhost:%d/docs", a.envPort("GATEWAY_PORT", 8000)))
 }
 
 func (a *App) OpenFlower() {
-	a.OpenBrowser("http://localhost:5555/flower")
+	a.OpenBrowser(fmt.Sprintf("http://localhost:%d/flower", a.envPort("FLOWER_PORT", 5555)))
 }
 
 func (a *App) GetProjectPath() string {
@@ -2559,6 +2596,41 @@ func (a *App) setEnvFileValue(fileName, key, value string) error {
 	return writePrivateFile(envPath, []byte(strings.Join(lines, "\n")))
 }
 
+func (a *App) setProductionEnvValues(values map[string]string) error {
+	return a.setEnvFileValues(".env.production", values)
+}
+
+// setEnvFileValues is the batch form of setEnvFileValue: one read/write for the
+// whole set, so rewriting ~20 resource keys doesn't rewrite the file 20 times.
+func (a *App) setEnvFileValues(fileName string, values map[string]string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	envPath := filepath.Join(a.projectPath, fileName)
+	data, _ := os.ReadFile(envPath)
+	lines := strings.Split(string(data), "\n")
+	pending := make(map[string]string, len(values))
+	for k, v := range values {
+		pending[k] = v
+	}
+	for i, l := range lines {
+		eq := strings.Index(l, "=")
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(l[:eq])
+		if v, ok := pending[key]; ok {
+			lines[i] = key + "=" + v
+			delete(pending, key)
+		}
+	}
+	// Append anything the file didn't already declare, in a stable order.
+	for _, k := range sortedKeys(pending) {
+		lines = append(lines, k+"="+pending[k])
+	}
+	return writePrivateFile(envPath, []byte(strings.Join(lines, "\n")))
+}
+
 // parseEnvFile parses KEY=VALUE lines (ignoring comments/blanks) into a map.
 func parseEnvFile(content string) map[string]string {
 	out := make(map[string]string)
@@ -2645,7 +2717,13 @@ func (a *App) ensureProductionEnv() error {
 	if err := a.setProductionEnvValue("NEXT_PUBLIC_API_URL", ""); err != nil {
 		return err
 	}
-	if err := a.setProductionEnvValue("CORS_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080"); err != nil {
+	// Derived from APP_PORT, not hard-coded: the port moves when 8080 is taken
+	// (see fitPublishedPorts), and a stale CORS origin would leave the stack
+	// running but the UI unable to call the API — a far more confusing failure
+	// than the bind error we just avoided.
+	appPort := portOrFallback(cur["APP_PORT"], 8080)
+	if err := a.setProductionEnvValue("CORS_ORIGINS",
+		fmt.Sprintf("http://localhost:%d,http://127.0.0.1:%d", appPort, appPort)); err != nil {
 		return err
 	}
 
@@ -2664,7 +2742,13 @@ func (a *App) ensureProductionEnv() error {
 			return err
 		}
 	}
-	return nil
+
+	// The template's resource limits describe a multi-GPU workstation. Docker
+	// rejects any container whose `cpus` exceeds the daemon's CPU count, so on a
+	// smaller machine the stack cannot start at all until these are cut down to
+	// size. Runs on every start, so an .env.production carried over from bigger
+	// hardware self-heals too.
+	return a.fitResourceLimits(cur)
 }
 
 // templatePinnedVersion returns the VERSION pinned in .env.production.template,
@@ -3097,6 +3181,14 @@ func (a *App) PullImages() error {
 	var services []string
 	for svc := range serviceSet {
 		services = append(services, svc)
+	}
+
+	// Storage pre-flight (preflight.go), same as the progress-reporting path.
+	if warning, err := a.checkDiskSpace(config.SelectedGroups, groupMap, a.CheckImagePresence()); err != nil {
+		a.emitAndLog("launcher", err.Error())
+		return err
+	} else if warning != "" {
+		a.emitAndLog("launcher", warning)
 	}
 
 	if err := a.dockerLoginForProImages(config.SelectedGroups, groupMap); err != nil {
@@ -4184,6 +4276,20 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 				"reason":       "version_not_pinned",
 			})
 			return
+		}
+
+		// Storage pre-flight (preflight.go): running out of space mid-pull costs
+		// the user a very long download and leaves a half-populated image store.
+		if warning, err := a.checkDiskSpace(groupIDs, groupMap, a.CheckImagePresence()); err != nil {
+			a.emitAndLog("launcher", err.Error())
+			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+				"success":      false,
+				"failedGroups": groupIDs,
+				"reason":       "insufficient_disk",
+			})
+			return
+		} else if warning != "" {
+			a.emitAndLog("launcher", warning)
 		}
 
 		hasGPUService := false

@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1279,5 +1281,400 @@ func TestRegistryTokenResponseMustBeShortLivedAndExactlyScoped(t *testing.T) {
 	wrongHost.Host = "registry.attacker.example"
 	if _, err := validateRegistryTokenResponse(wrongHost, repositories); err == nil {
 		t.Fatal("non-GHCR registry token was accepted")
+	}
+}
+
+// --- Resource fitting (resources.go) -------------------------------------
+//
+// Reported by the first external user: an Intel i7-4770K (8 threads) could not
+// start the stack at all —
+//   "Error response from daemon: range of CPUs is from 0.01 to 8.00,
+//    as there are only 8 CPUs available"
+// — because .env.production.template ships WORKER_CPU_CPU_LIMIT=16 and
+// WORKER_GPU_LONG_CPU_LIMIT=12, sized for a workstation. Docker validates
+// `cpus` per container against the daemon's CPU count and refuses to create the
+// container, so this is a hard start failure rather than a slow stack.
+
+func TestFitResourceEnvClampsOversizedCPULimitsToDaemonCPUs(t *testing.T) {
+	cur := map[string]string{
+		"WORKER_CPU_CPU_LIMIT":      "16",
+		"WORKER_CPU_CPU_RES":        "4",
+		"WORKER_GPU_LONG_CPU_LIMIT": "12",
+		"WORKER_GPU_LONG_CPU_RES":   "4",
+		"GATEWAY_CPU_LIMIT":         "2",
+		"GATEWAY_CPU_RES":           "0.5",
+		"CPU_WORKER_CONCURRENCY":    "4",
+		"GPU_LONG_CONCURRENCY":      "1",
+	}
+	updates, notes := fitResourceEnv(cur, hostResources{CPUs: 8}, true)
+
+	want := map[string]string{
+		"WORKER_CPU_CPU_LIMIT":      "8",
+		"WORKER_GPU_LONG_CPU_LIMIT": "8",
+		"CPU_WORKER_CONCURRENCY":    "2", // 4 parallel Vina jobs thrash 8 threads
+	}
+	for k, v := range want {
+		if updates[k] != v {
+			t.Errorf("%s: got %q, want %q (notes: %v)", k, updates[k], v, notes)
+		}
+	}
+	// Values already within the daemon's capacity must be left exactly alone —
+	// fitting is a clamp, never a re-tune.
+	for _, k := range []string{"WORKER_CPU_CPU_RES", "GATEWAY_CPU_LIMIT", "GATEWAY_CPU_RES", "GPU_LONG_CONCURRENCY"} {
+		if v, ok := updates[k]; ok {
+			t.Errorf("%s was rewritten to %q but already fits", k, v)
+		}
+	}
+}
+
+func TestFitResourceEnvLeavesLargeMachineUntouched(t *testing.T) {
+	cur := map[string]string{
+		"WORKER_CPU_CPU_LIMIT":      "16",
+		"WORKER_GPU_LONG_CPU_LIMIT": "12",
+		"WORKER_CPU_MEM_LIMIT":      "32G",
+		"CPU_WORKER_CONCURRENCY":    "4",
+	}
+	updates, _ := fitResourceEnv(cur, hostResources{CPUs: 32, MemBytes: 128 << 30}, true)
+	if len(updates) != 0 {
+		t.Fatalf("expected no changes on a 32-CPU/128G host, got %v", updates)
+	}
+}
+
+func TestFitResourceEnvKeepsReservationsUnderClampedLimit(t *testing.T) {
+	cur := map[string]string{
+		"WORKER_GPU_LONG_CPU_LIMIT": "12",
+		"WORKER_GPU_LONG_CPU_RES":   "10",
+		"WORKER_QC_CPU_LIMIT":       "2",
+		"WORKER_QC_CPU_RES":         "3", // already inverted in the source file
+	}
+	updates, _ := fitResourceEnv(cur, hostResources{CPUs: 4}, true)
+	if updates["WORKER_GPU_LONG_CPU_LIMIT"] != "4" || updates["WORKER_GPU_LONG_CPU_RES"] != "4" {
+		t.Errorf("reservation not held under its clamped limit: %v", updates)
+	}
+	// A reservation above its own limit is capped by that limit, not by host CPUs.
+	if updates["WORKER_QC_CPU_RES"] != "2" {
+		t.Errorf("WORKER_QC_CPU_RES: got %q, want 2", updates["WORKER_QC_CPU_RES"])
+	}
+}
+
+func TestFitResourceEnvClampsMemoryOnlyWhenDaemonTotalKnown(t *testing.T) {
+	cur := map[string]string{
+		"WORKER_CPU_MEM_LIMIT":      "32G",
+		"WORKER_CPU_MEM_RES":        "8G",
+		"WORKER_GPU_LONG_MEM_LIMIT": "48G",
+		"GATEWAY_MEM_LIMIT":         "2G",
+	}
+	// 16 GB daemon: 10% headroom -> 14G ceiling.
+	updates, _ := fitResourceEnv(cur, hostResources{CPUs: 8, MemBytes: 16 << 30}, true)
+	if updates["WORKER_CPU_MEM_LIMIT"] != "14G" || updates["WORKER_GPU_LONG_MEM_LIMIT"] != "14G" {
+		t.Errorf("memory limits not fitted to a 16G daemon: %v", updates)
+	}
+	if _, ok := updates["GATEWAY_MEM_LIMIT"]; ok {
+		t.Errorf("2G limit should fit a 16G daemon, got %q", updates["GATEWAY_MEM_LIMIT"])
+	}
+	// Unknown total (MemBytes 0 — non-Linux fallback): memory is left alone
+	// rather than guessed at, since an oversized memory limit is not fatal.
+	unknown, _ := fitResourceEnv(cur, hostResources{CPUs: 8}, true)
+	if len(unknown) != 0 {
+		t.Errorf("memory rewritten without a known daemon total: %v", unknown)
+	}
+}
+
+// TestEnsureProductionEnvFitsShippedTemplateToSmallHost is the end-to-end
+// regression for the i7-4770K report: the real template values, an 8-CPU
+// daemon, and the requirement that nothing in the written file can be rejected.
+func TestEnsureProductionEnvFitsShippedTemplateToSmallHost(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources {
+		return hostResources{CPUs: 8, MemBytes: 16 << 30}
+	}
+
+	template := strings.Join([]string{
+		"VERSION=v2026.06.21",
+		"POSTGRES_PASSWORD=CHANGE_ME",
+		"WORKER_CPU_CPU_LIMIT=16",
+		"WORKER_CPU_MEM_LIMIT=32G",
+		"WORKER_CPU_CPU_RES=4",
+		"WORKER_GPU_LONG_CPU_LIMIT=12",
+		"WORKER_GPU_LONG_MEM_LIMIT=48G",
+		"WORKER_QC_CPU_LIMIT=8",
+		"DOCKING_CPU_LIMIT=4",
+		"CPU_WORKER_CONCURRENCY=4",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(template), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.ensureProductionEnv(); err != nil {
+		t.Fatalf("ensureProductionEnv failed: %v", err)
+	}
+
+	written, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := parseEnvFile(string(written))
+	for k, v := range env {
+		if !strings.HasSuffix(k, "_CPU_LIMIT") && !strings.HasSuffix(k, "_CPU_RES") {
+			continue
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			t.Fatalf("%s=%q is not a number", k, v)
+		}
+		if f > 8 {
+			t.Errorf("%s=%s exceeds the daemon's 8 CPUs — docker would reject the container", k, v)
+		}
+	}
+	if env["DOCKING_CPU_LIMIT"] != "4" {
+		t.Errorf("DOCKING_CPU_LIMIT should be untouched, got %q", env["DOCKING_CPU_LIMIT"])
+	}
+
+	// Idempotent: a second start must not drift the already-fitted values.
+	before := string(written)
+	if err := app.ensureProductionEnv(); err != nil {
+		t.Fatalf("second ensureProductionEnv failed: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != before {
+		t.Errorf("resource fitting is not idempotent:\nbefore:\n%s\nafter:\n%s", before, string(after))
+	}
+}
+
+func TestParseBytesAndFormatBytesEnvRoundTrip(t *testing.T) {
+	cases := map[string]int64{
+		"32G":   32 << 30,
+		"512M":  512 << 20,
+		"2048k": 2048 << 10,
+		"4GB":   4 << 30,
+	}
+	for in, want := range cases {
+		got, ok := parseBytes(in)
+		if !ok || got != want {
+			t.Errorf("parseBytes(%q) = %d, %v; want %d", in, got, ok, want)
+		}
+	}
+	if _, ok := parseBytes("not-a-size"); ok {
+		t.Error("parseBytes accepted a non-size value")
+	}
+	if s := formatBytesEnv(14 << 30); s != "14G" {
+		t.Errorf("formatBytesEnv(14G) = %q", s)
+	}
+	if s := formatBytesEnv(1536 << 20); s != "1536M" {
+		t.Errorf("formatBytesEnv(1.5G) = %q", s)
+	}
+}
+
+// TestFitResourceLimitsPreservesUserChosenConcurrency guards the interaction
+// with the launcher's settings panel: worker pool sizes are re-tuned once, when
+// the machine is first seen, but a value the user later picked in the UI must
+// survive every subsequent start. CPU ceilings have no such escape hatch — they
+// are a hard docker failure — so they keep being clamped.
+func TestFitResourceLimitsPreservesUserChosenConcurrency(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+
+	env := "WORKER_CPU_CPU_LIMIT=16\nCPU_WORKER_CONCURRENCY=4\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte(env), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cur := parseEnvFile(env)
+	if err := app.fitResourceLimits(cur); err != nil {
+		t.Fatal(err)
+	}
+	if cur["CPU_WORKER_CONCURRENCY"] != "2" || cur["WORKER_CPU_CPU_LIMIT"] != "8" {
+		t.Fatalf("first fit did not size the machine: %v", cur)
+	}
+
+	// User raises concurrency back to 4 in the settings panel, and separately an
+	// oversized CPU limit reappears (e.g. hand-edited from an old file).
+	if err := app.SaveUserSettings(UserSettings{CPUWorkerConcurrency: 4, GPUShortConcurrency: 2, GPULongConcurrency: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.setProductionEnvValue("WORKER_CPU_CPU_LIMIT", "16"); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := app.GetEnvContent("prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur = parseEnvFile(content)
+	if err := app.fitResourceLimits(cur); err != nil {
+		t.Fatal(err)
+	}
+	if cur["CPU_WORKER_CONCURRENCY"] != "4" {
+		t.Errorf("user's concurrency choice was overwritten: got %q, want 4", cur["CPU_WORKER_CONCURRENCY"])
+	}
+	if cur["WORKER_CPU_CPU_LIMIT"] != "8" {
+		t.Errorf("unstartable CPU limit was not re-clamped: got %q, want 8", cur["WORKER_CPU_CPU_LIMIT"])
+	}
+}
+
+// --- Port and storage pre-flight (preflight.go) --------------------------
+
+func TestFitPortsMovesOnlyConflictingPorts(t *testing.T) {
+	// 8080 and 3000 are the realistic case: a developer already running
+	// something on the two most commonly used ports.
+	taken := map[int]bool{8080: true, 3000: true}
+	updates, notes := fitPorts(map[string]string{}, func(p int) bool { return !taken[p] })
+
+	if updates["APP_PORT"] != "8081" {
+		t.Errorf("APP_PORT: got %q, want 8081 (notes: %v)", updates["APP_PORT"], notes)
+	}
+	if updates["FRONTEND_PORT"] != "3001" {
+		t.Errorf("FRONTEND_PORT: got %q, want 3001", updates["FRONTEND_PORT"])
+	}
+	for _, key := range []string{"GATEWAY_PORT", "FLOWER_PORT", "RABBITMQ_MGMT_PORT"} {
+		if v, ok := updates[key]; ok {
+			t.Errorf("%s was moved to %q but was never in conflict", key, v)
+		}
+	}
+}
+
+func TestFitPortsNeverAssignsTheSamePortTwice(t *testing.T) {
+	// Everything from 8080 up to 8082 taken, and the gateway's own 8000 free:
+	// the app must not be handed a port another service already claimed.
+	updates, _ := fitPorts(
+		map[string]string{"APP_PORT": "8080", "GATEWAY_PORT": "8081"},
+		func(p int) bool { return p != 8080 && p != 8081 },
+	)
+	seen := map[string]bool{}
+	for _, v := range updates {
+		if seen[v] {
+			t.Fatalf("two services assigned port %s: %v", v, updates)
+		}
+		seen[v] = true
+	}
+	if updates["APP_PORT"] == "8081" {
+		t.Errorf("APP_PORT moved onto an occupied port: %v", updates)
+	}
+}
+
+func TestFitPortsLeavesEverythingAloneWhenFree(t *testing.T) {
+	updates, _ := fitPorts(map[string]string{}, func(int) bool { return true })
+	if len(updates) != 0 {
+		t.Fatalf("expected no port changes on a clean host, got %v", updates)
+	}
+}
+
+func TestFitPortsKeepsValueWhenNoFreePortNearby(t *testing.T) {
+	// Nothing is bindable: rather than writing an unverified port, keep the
+	// configured one and let docker report the conflict itself.
+	updates, _ := fitPorts(map[string]string{}, func(int) bool { return false })
+	if len(updates) != 0 {
+		t.Fatalf("expected no rewrites when no port is free, got %v", updates)
+	}
+}
+
+// TestFitPublishedPortsIgnoresPortsHeldByOurOwnStack is the restart case: a
+// running stack holds its own ports, and treating those as conflicts would walk
+// every port up by one on each restart.
+func TestFitPublishedPortsIgnoresOwnHeldPorts(t *testing.T) {
+	ours := map[int]bool{8080: true}
+	free := func(p int) bool {
+		if ours[p] {
+			return true // held by us
+		}
+		return p != 3000
+	}
+	updates, _ := fitPorts(map[string]string{}, free)
+	if _, moved := updates["APP_PORT"]; moved {
+		t.Errorf("APP_PORT moved even though our own container holds it: %v", updates)
+	}
+	if updates["FRONTEND_PORT"] != "3001" {
+		t.Errorf("a genuine conflict was not resolved: %v", updates)
+	}
+}
+
+func TestEnsureProductionEnvDerivesCORSFromAppPort(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+
+	template := "VERSION=v2026.06.21\nAPP_PORT=8081\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(template), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.ensureProductionEnv(); err != nil {
+		t.Fatal(err)
+	}
+	content, err := app.GetEnvContent("prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parseEnvFile(content)["CORS_ORIGINS"]
+	want := "http://localhost:8081,http://127.0.0.1:8081"
+	if got != want {
+		t.Errorf("CORS_ORIGINS did not follow APP_PORT:\n got %q\nwant %q", got, want)
+	}
+	// The Open buttons must point at the same place.
+	if p := app.envPort("APP_PORT", 8080); p != 8081 {
+		t.Errorf("envPort(APP_PORT) = %d, want 8081", p)
+	}
+}
+
+func TestCheckDiskSpaceBlocksOnlyBelowTheMeasuredFloor(t *testing.T) {
+	groupMap := map[string]ServiceGroup{
+		"core": {ID: "core", SizeMB: 5500},
+		"md":   {ID: "md", SizeMB: 4500},
+	}
+	app := NewApp()
+	app.projectPath = t.TempDir()
+
+	// Plenty of space: silent.
+	warning, err := app.checkDiskSpaceWithFree([]string{"core"}, groupMap, nil, 500<<30, "/tmp")
+	if err != nil || warning != "" {
+		t.Errorf("expected silence with 500G free, got warning=%q err=%v", warning, err)
+	}
+
+	// Between the floor and the estimate: warn, never block. The user may know
+	// better than an estimate we have already shown to be shaky.
+	warning, err = app.checkDiskSpaceWithFree([]string{"core", "md"}, groupMap, nil, 20<<30, "/tmp")
+	if err != nil {
+		t.Errorf("20G free must not block a pull: %v", err)
+	}
+	if warning == "" {
+		t.Error("expected a low-space warning at 20G free against a ~30G estimate")
+	}
+
+	// Below the floor: block, because no single image unpacks into this.
+	if _, err = app.checkDiskSpaceWithFree([]string{"core"}, groupMap, nil, 3<<30, "/tmp"); err == nil {
+		t.Error("expected a hard error below the 8G floor")
+	}
+
+	// Already-present groups need no new space.
+	present := map[string]bool{"core": true, "md": true}
+	warning, err = app.checkDiskSpaceWithFree([]string{"core", "md"}, groupMap, present, 20<<30, "/tmp")
+	if err != nil || warning != "" {
+		t.Errorf("already-pulled groups should require nothing: warning=%q err=%v", warning, err)
+	}
+}
+
+// TestPortFreeDetectsRealListener checks the predicate the pre-flight actually
+// uses against a real socket, so the pure fitPorts tests are not the only thing
+// standing between a user and "port is already allocated".
+func TestPortFreeDetectsRealListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot bind a local port in this environment: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	if portFree("127.0.0.1", port) {
+		t.Errorf("port %d is bound by this test but reported free", port)
+	}
+	ln.Close()
+	if !portFree("127.0.0.1", port) {
+		t.Errorf("port %d reported busy after the listener closed", port)
 	}
 }
