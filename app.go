@@ -271,7 +271,7 @@ type runtimeBundleManifest struct {
 // on-disk .env.production.template is missing or stale (e.g. an older runtime
 // dir whose template still says CHANGE_ME). Keep in sync with the published
 // core image tag and .env.production.template's VERSION.
-const defaultPinnedImageVersion = "v2026.06.21"
+const defaultPinnedImageVersion = "v2026.08.05"
 
 const licensePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAcKQKljOJr+vNjOKVewo7sDMaguZUqIJVhYZDgDhnUlE=
