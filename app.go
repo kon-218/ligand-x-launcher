@@ -134,6 +134,17 @@ type DistributionStatus struct {
 	NeedsInstall     bool   `json:"needsInstall"`
 	RuntimeBundleURL string `json:"runtimeBundleUrl"`
 	Message          string `json:"message"`
+	InstalledVersion string `json:"installedVersion"`
+}
+
+// RuntimeUpdateStatus answers "is there a newer release than what is installed".
+// Separate from DistributionStatus because it costs a GitHub API call, and the
+// distribution status is read on every dashboard refresh.
+type RuntimeUpdateStatus struct {
+	InstalledVersion string `json:"installedVersion"`
+	LatestVersion    string `json:"latestVersion"`
+	UpdateAvailable  bool   `json:"updateAvailable"`
+	Message          string `json:"message"`
 }
 
 type LicenseSummary struct {
@@ -648,15 +659,75 @@ func compareReleaseVersions(left, right string) (int, bool) {
 	return 0, true
 }
 
-func enforceRuntimeRollbackPolicy(runtimeDir, candidate string) error {
+// shouldAdvanceVersion decides whether installing releaseTag should re-pin
+// VERSION in .env.production.
+//
+// The old rule only rewrote a broken value (empty/CHANGE_ME/latest), which meant
+// a valid-but-old pin was indistinguishable from a deliberate choice and
+// survived forever — so an existing install could take a new launcher AND a new
+// runtime bundle and still run the previous release's images. Installing a
+// newer runtime is an explicit act by the user, so it advances the pin; a pin
+// that is already ahead of, or equal to, the installed runtime is left alone,
+// and an unparseable one is treated as deliberate.
+func shouldAdvanceVersion(current, releaseTag string) bool {
+	if isEnvPlaceholder(current) || strings.EqualFold(current, "latest") {
+		return true
+	}
+	comparison, comparable := compareReleaseVersions(releaseTag, current)
+	return comparable && comparison > 0
+}
+
+// installedRuntimeVersion reads the release tag recorded when the runtime
+// bundle was installed, or "" when the marker is absent (a pre-marker install,
+// or none at all).
+func installedRuntimeVersion(runtimeDir string) string {
 	data, err := os.ReadFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"))
-	if os.IsNotExist(err) {
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// CheckForRuntimeUpdate reports whether a newer runtime release than the
+// installed one is published, so the UI can prompt. Costs a GitHub API call.
+func (a *App) CheckForRuntimeUpdate() RuntimeUpdateStatus {
+	current := installedRuntimeVersion(a.projectPath)
+	status := RuntimeUpdateStatus{InstalledVersion: current}
+
+	_, latest, err := resolveLatestRuntimeBundleURL()
+	if err != nil {
+		status.Message = "Could not check for updates: " + err.Error()
+		return status
+	}
+	status.LatestVersion = latest
+
+	if current == "" {
+		// No marker: an older install that predates version tracking. Offer the
+		// update rather than guessing — reinstalling the current release is
+		// harmless, and staying silent strands them.
+		status.UpdateAvailable = true
+		status.Message = "Update to " + latest + " is available."
+		return status
+	}
+	comparison, comparable := compareReleaseVersions(latest, current)
+	if !comparable {
+		status.Message = "Installed runtime " + current + " cannot be compared to " + latest + "."
+		return status
+	}
+	if comparison > 0 {
+		status.UpdateAvailable = true
+		status.Message = "Update available: " + current + " → " + latest + "."
+		return status
+	}
+	status.Message = "Runtime is up to date (" + current + ")."
+	return status
+}
+
+func enforceRuntimeRollbackPolicy(runtimeDir, candidate string) error {
+	current := installedRuntimeVersion(runtimeDir)
+	if current == "" {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	current := strings.TrimSpace(string(data))
 	if comparison, comparable := compareReleaseVersions(candidate, current); !comparable || comparison < 0 {
 		return fmt.Errorf("runtime downgrade rejected: installed=%s candidate=%s", current, candidate)
 	}
@@ -678,6 +749,7 @@ func (a *App) GetDistributionStatus() DistributionStatus {
 		Installed:        installed,
 		Bundled:          bundled,
 		NeedsInstall:     !installed,
+		InstalledVersion: installedRuntimeVersion(a.projectPath),
 		RuntimeBundleURL: a.runtimeBundleURL(),
 	}
 	if installed {
@@ -775,8 +847,8 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 	if releaseTag != "" {
 		content, readErr := a.GetEnvContent("prod")
 		if readErr == nil {
-			parsed := parseEnvFile(content)
-			if isEnvPlaceholder(parsed["VERSION"]) || strings.EqualFold(strings.TrimSpace(parsed["VERSION"]), "latest") {
+			current := strings.TrimSpace(parseEnvFile(content)["VERSION"])
+			if shouldAdvanceVersion(current, releaseTag) {
 				if setErr := a.setProductionEnvValue("VERSION", releaseTag); setErr == nil {
 					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Pinned VERSION=%s in .env.production", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 				}

@@ -136,6 +136,23 @@ async function preflight(onReady) {
     return;
   }
 
+  try {
+    const upd = await App().CheckForRuntimeUpdate();
+    if (upd && upd.updateAvailable) {
+      gate({
+        icon: "⬆️", title: "Update available",
+        msg: upd.message || ("A newer Ligand-X runtime (" + upd.latestVersion + ") is available."),
+        action: { label: "Update now", fn: () => installRuntime(onReady) },
+        secondary: { label: "Not now", fn: () => onReady() },
+      });
+      return;
+    }
+  } catch (e) {
+    // Update checking is best-effort: offline or a rate-limited API must not
+    // stop someone launching the runtime they already have installed.
+    console.warn("update check failed", e);
+  }
+
   onReady();
 }
 
@@ -166,6 +183,15 @@ function gate(opts) {
   } else {
     btn.hidden = true;
     btn.onclick = null;
+  }
+  const secondary = el("gateSecondary");
+  if (opts.secondary) {
+    secondary.hidden = false;
+    secondary.textContent = opts.secondary.label;
+    secondary.onclick = opts.secondary.fn;
+  } else {
+    secondary.hidden = true;
+    secondary.onclick = null;
   }
   el("gateLog").hidden = !opts.log;
 }

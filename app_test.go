@@ -1729,3 +1729,58 @@ func TestEnsureProductionEnvSeedsProVersionForUpgradingInstalls(t *testing.T) {
 		}
 	})
 }
+
+// TestShouldAdvanceVersionMovesStalePinsForward is the fix for the case that
+// made the whole v2026.08.05 release inert for existing users: their
+// .env.production held VERSION=v2026.06.21, a valid pin, so the old
+// "only rewrite broken values" rule preserved it through both
+// ensureProductionEnv and a full runtime-bundle install. They would take the
+// new launcher and the new bundle and still run the previous images.
+func TestShouldAdvanceVersionMovesStalePinsForward(t *testing.T) {
+	cases := []struct {
+		name    string
+		current string
+		release string
+		want    bool
+		why     string
+	}{
+		{"the reported case", "v2026.06.21", "v2026.08.05", true, "stale pin must advance"},
+		{"equal", "v2026.08.05", "v2026.08.05", false, "nothing to do"},
+		{"pin ahead of runtime", "v2026.09.01", "v2026.08.05", false, "never downgrade"},
+		{"empty", "", "v2026.08.05", true, "no pin at all"},
+		{"placeholder", "CHANGE_ME", "v2026.08.05", true, "broken pin"},
+		{"latest", "latest", "v2026.08.05", true, "mutable pin is rejected elsewhere"},
+		{"unparseable current", "sha-abc1234", "v2026.08.05", false, "digest pins are deliberate"},
+		{"unparseable release", "v2026.06.21", "nightly", false, "refuse to move onto a non-release"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldAdvanceVersion(tc.current, tc.release); got != tc.want {
+				t.Errorf("shouldAdvanceVersion(%q, %q) = %v, want %v — %s",
+					tc.current, tc.release, got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+func TestInstalledRuntimeVersionReadsMarker(t *testing.T) {
+	dir := t.TempDir()
+	if v := installedRuntimeVersion(dir); v != "" {
+		t.Errorf("expected empty for a dir with no marker, got %q", v)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".ligandx-runtime-version"), []byte("v2026.08.05\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if v := installedRuntimeVersion(dir); v != "v2026.08.05" {
+		t.Errorf("got %q, want v2026.08.05 (trailing newline must be trimmed)", v)
+	}
+	// GetDistributionStatus surfaces it so the UI can show what is installed.
+	app := NewApp()
+	app.projectPath = dir
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte("services: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.GetDistributionStatus().InstalledVersion; got != "v2026.08.05" {
+		t.Errorf("DistributionStatus.InstalledVersion = %q", got)
+	}
+}
