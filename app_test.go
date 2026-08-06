@@ -1309,8 +1309,10 @@ func TestFitResourceEnvClampsOversizedCPULimitsToDaemonCPUs(t *testing.T) {
 	updates, notes := fitResourceEnv(cur, hostResources{CPUs: 8}, true)
 
 	want := map[string]string{
-		"WORKER_CPU_CPU_LIMIT":      "8",
-		"WORKER_GPU_LONG_CPU_LIMIT": "8",
+		// The workers are held under a soft ceiling of floor(8*0.75), so one
+		// container cannot claim every thread (see workerCPUHeadroom).
+		"WORKER_CPU_CPU_LIMIT":      "6",
+		"WORKER_GPU_LONG_CPU_LIMIT": "6",
 		"CPU_WORKER_CONCURRENCY":    "2", // 4 parallel Vina jobs thrash 8 threads
 	}
 	for k, v := range want {
@@ -1324,6 +1326,51 @@ func TestFitResourceEnvClampsOversizedCPULimitsToDaemonCPUs(t *testing.T) {
 		if v, ok := updates[k]; ok {
 			t.Errorf("%s was rewritten to %q but already fits", k, v)
 		}
+	}
+}
+
+func TestFitResourceEnvLeavesHeadroomForTheWorkerLimits(t *testing.T) {
+	// Clamping a worker to exactly host.CPUs is legal — docker's check is `>` —
+	// but it hands one container every thread on the machine, so the UI, the
+	// gateway and the user's desktop all contend with a batch docking run. The
+	// workers get a soft ceiling; everything else keeps the hard one.
+	cur := map[string]string{
+		"WORKER_CPU_CPU_LIMIT":      "16",
+		"WORKER_GPU_LONG_CPU_LIMIT": "12",
+		"DOCKING_CPU_LIMIT":         "8", // not a worker: hard ceiling only
+	}
+	updates, notes := fitResourceEnv(cur, hostResources{CPUs: 8}, true)
+	if updates["WORKER_CPU_CPU_LIMIT"] != "6" {
+		t.Errorf("WORKER_CPU_CPU_LIMIT = %q, want 6 (floor(8*0.75)); notes: %v", updates["WORKER_CPU_CPU_LIMIT"], notes)
+	}
+	if updates["WORKER_GPU_LONG_CPU_LIMIT"] != "6" {
+		t.Errorf("WORKER_GPU_LONG_CPU_LIMIT = %q, want 6", updates["WORKER_GPU_LONG_CPU_LIMIT"])
+	}
+	if v, ok := updates["DOCKING_CPU_LIMIT"]; ok {
+		t.Errorf("DOCKING_CPU_LIMIT is not a worker and fits the daemon's 8 CPUs, but was rewritten to %q", v)
+	}
+
+	// The soft ceiling must never round down to zero on a tiny machine: a
+	// `cpus: 0` limit is rejected just as hard as an oversized one.
+	tiny, _ := fitResourceEnv(map[string]string{"WORKER_CPU_CPU_LIMIT": "4"}, hostResources{CPUs: 1}, true)
+	if tiny["WORKER_CPU_CPU_LIMIT"] != "1" {
+		t.Errorf("on a 1-CPU host WORKER_CPU_CPU_LIMIT = %q, want 1", tiny["WORKER_CPU_CPU_LIMIT"])
+	}
+}
+
+func TestFitResourceEnvTunesGPULongConcurrency(t *testing.T) {
+	// GPU_LONG_CONCURRENCY ships in the template but was the only pool size
+	// never fitted, so a hand-raised value stayed raised on a small machine.
+	cur := map[string]string{"GPU_LONG_CONCURRENCY": "4"}
+	updates, _ := fitResourceEnv(cur, hostResources{CPUs: 8}, true)
+	if updates["GPU_LONG_CONCURRENCY"] != "1" {
+		t.Errorf("GPU_LONG_CONCURRENCY = %q, want 1 on an 8-CPU host", updates["GPU_LONG_CONCURRENCY"])
+	}
+	// Pool sizes are only re-tuned on the first fit for this hardware —
+	// afterwards the value is the user's own choice from the settings panel.
+	later, _ := fitResourceEnv(cur, hostResources{CPUs: 8}, false)
+	if _, ok := later["GPU_LONG_CONCURRENCY"]; ok {
+		t.Errorf("a deliberate GPU_LONG_CONCURRENCY was undone on a repeat start: %v", later)
 	}
 }
 
@@ -1347,8 +1394,10 @@ func TestFitResourceEnvKeepsReservationsUnderClampedLimit(t *testing.T) {
 		"WORKER_QC_CPU_LIMIT":       "2",
 		"WORKER_QC_CPU_RES":         "3", // already inverted in the source file
 	}
+	// 4 CPUs: the worker soft ceiling is floor(4*0.75) = 3, and the reservation
+	// must follow its own clamped limit down rather than stopping at host.CPUs.
 	updates, _ := fitResourceEnv(cur, hostResources{CPUs: 4}, true)
-	if updates["WORKER_GPU_LONG_CPU_LIMIT"] != "4" || updates["WORKER_GPU_LONG_CPU_RES"] != "4" {
+	if updates["WORKER_GPU_LONG_CPU_LIMIT"] != "3" || updates["WORKER_GPU_LONG_CPU_RES"] != "3" {
 		t.Errorf("reservation not held under its clamped limit: %v", updates)
 	}
 	// A reservation above its own limit is capped by that limit, not by host CPUs.
@@ -1445,6 +1494,848 @@ func TestEnsureProductionEnvFitsShippedTemplateToSmallHost(t *testing.T) {
 	}
 }
 
+// --- Duplicate keys in .env.production ------------------------------------
+//
+// The launcher reads env files last-wins (parseEnvFile, and docker compose's
+// own dotenv parser, both assign sequentially) but historically wrote them
+// first-only (`break` / `delete(pending, key)` after the first match). A user
+// who inserts a WORKER_* override *above* the template's original line
+// therefore sees compose keep using the original — and, worse, defeats the
+// resource fitting: it reads 16 (last-wins), decides to write 8, and puts the 8
+// on the dead first line. The 16 survives and the container is still rejected.
+//
+// This is the second half of the i7-4770K report: the user edited the file by
+// hand *and* took the release containing the clamp, and neither took effect.
+
+// countEnvDefinitions counts live (uncommented) definitions of key, i.e. the
+// ones compose's dotenv parser would actually assign from.
+func countEnvDefinitions(content, key string) int {
+	n := 0
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if i := strings.Index(line, "="); i > 0 && strings.TrimSpace(line[:i]) == key {
+			n++
+		}
+	}
+	return n
+}
+
+func TestSetEnvFileValuesRewritesTheDefinitionComposeReads(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	envPath := filepath.Join(tmpDir, ".env.production")
+	if err := os.WriteFile(envPath, []byte(strings.Join([]string{
+		"WORKER_CPU_CPU_LIMIT=6", // the user's hand edit, inserted above
+		"APP_PORT=8080",
+		"WORKER_CPU_CPU_LIMIT=16", // the template's original — what compose reads
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.setProductionEnvValues(map[string]string{"WORKER_CPU_CPU_LIMIT": "8"}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]; got != "8" {
+		t.Errorf("effective WORKER_CPU_CPU_LIMIT = %q, want 8 — the write landed on a line compose ignores:\n%s", got, data)
+	}
+	if n := countEnvDefinitions(string(data), "WORKER_CPU_CPU_LIMIT"); n != 1 {
+		t.Errorf("expected exactly one live definition afterwards, got %d:\n%s", n, data)
+	}
+	if got := parseEnvFile(string(data))["APP_PORT"]; got != "8080" {
+		t.Errorf("unrelated key was disturbed: APP_PORT = %q", got)
+	}
+}
+
+func TestSetEnvFileValuesMatchesKeysWithSurroundingSpaces(t *testing.T) {
+	// "VERSION = v2026.01.01" is an ordinary hand edit that compose accepts.
+	// Matching on the literal "KEY=" prefix misses it and appends a second
+	// definition — the launcher manufacturing the very duplicate that breaks the
+	// next fit. Exercised through both writers, since only one of them trimmed.
+	for _, name := range []string{"single", "batch"} {
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			app := NewApp()
+			app.projectPath = tmpDir
+			envPath := filepath.Join(tmpDir, ".env.production")
+			if err := os.WriteFile(envPath, []byte("VERSION = v2026.01.01\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var err error
+			if name == "single" {
+				err = app.setProductionEnvValue("VERSION", "v2026.08.05")
+			} else {
+				err = app.setProductionEnvValues(map[string]string{"VERSION": "v2026.08.05"})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			data, err := os.ReadFile(envPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := countEnvDefinitions(string(data), "VERSION"); n != 1 {
+				t.Errorf("spaced key was not matched, duplicate appended (%d definitions):\n%s", n, data)
+			}
+			if got := parseEnvFile(string(data))["VERSION"]; got != "v2026.08.05" {
+				t.Errorf("effective VERSION = %q, want v2026.08.05", got)
+			}
+		})
+	}
+}
+
+func TestSetEnvFileValueSingleKeyHonoursLastWins(t *testing.T) {
+	// setEnvFileValue is the single-key path (secrets, VERSION, CORS_ORIGINS).
+	// It must obey the same rule as the batch form, or the launcher self-heals
+	// VERSION and POSTGRES_PASSWORD onto lines compose ignores too.
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	envPath := filepath.Join(tmpDir, ".env.production")
+	if err := os.WriteFile(envPath, []byte("VERSION=latest\nAPP_PORT=8080\nVERSION=v2026.01.01\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.setProductionEnvValue("VERSION", "v2026.08.05"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parseEnvFile(string(data))["VERSION"]; got != "v2026.08.05" {
+		t.Errorf("effective VERSION = %q, want v2026.08.05:\n%s", got, data)
+	}
+	if n := countEnvDefinitions(string(data), "VERSION"); n != 1 {
+		t.Errorf("expected one live VERSION definition, got %d:\n%s", n, data)
+	}
+}
+
+func TestDuplicateEnvKeysNamesEveryRedefinedKey(t *testing.T) {
+	// A duplicate is a user-visible foot-gun for every key the launcher touches,
+	// not just CPU limits, so it is worth naming in the log at start.
+	content := strings.Join([]string{
+		"# comment",
+		"VERSION=latest",
+		"APP_PORT=8080",
+		"VERSION=v2026.08.05",
+		"WORKER_CPU_CPU_LIMIT = 6",
+		"WORKER_CPU_CPU_LIMIT=16",
+		"#VERSION=commented-out-does-not-count",
+	}, "\n")
+	got := duplicateEnvKeys(content)
+	want := []string{"VERSION", "WORKER_CPU_CPU_LIMIT"}
+	if len(got) != len(want) {
+		t.Fatalf("duplicateEnvKeys = %v, want %v", got, want)
+	}
+	for i, k := range want {
+		if got[i] != k {
+			t.Errorf("duplicateEnvKeys[%d] = %q, want %q", i, got[i], k)
+		}
+	}
+	if dups := duplicateEnvKeys("A=1\nB=2\n"); len(dups) != 0 {
+		t.Errorf("clean file reported duplicates: %v", dups)
+	}
+}
+
+func TestEnsureProductionEnvWarnsAboutDuplicateKeys(t *testing.T) {
+	// A duplicate silently discards whichever definition came first. The user
+	// cannot see that in an editor, so the launcher has to say it out loud —
+	// otherwise "I edited the file and nothing changed" has no explanation.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"),
+		[]byte("VERSION=v2026.08.05\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte(strings.Join([]string{
+		"VERSION=v2026.08.05",
+		"WORKER_CPU_CPU_LIMIT=6",
+		"WORKER_CPU_CPU_LIMIT=16",
+	}, "\n")), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.ensureProductionEnv(); err != nil {
+		t.Fatalf("ensureProductionEnv failed: %v", err)
+	}
+
+	logged, err := os.ReadFile(app.composeLogPath())
+	if err != nil {
+		t.Fatalf("no launcher log written: %v", err)
+	}
+	if !strings.Contains(string(logged), "WORKER_CPU_CPU_LIMIT") ||
+		!strings.Contains(strings.ToLower(string(logged)), "more than once") {
+		t.Errorf("duplicate key not reported in the log:\n%s", logged)
+	}
+}
+
+// TestEnsureProductionEnvClampsTheEffectiveDuplicateLimit is the end-to-end
+// form: the fitting must clamp the value compose actually resolves, not the
+// first line that happens to mention the key.
+func TestEnsureProductionEnvClampsTheEffectiveDuplicateLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"),
+		[]byte("VERSION=v2026.08.05\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{"VERSION=v2026.08.05", "WORKER_CPU_CPU_LIMIT=6"}
+	for i := 0; i < 30; i++ {
+		lines = append(lines, fmt.Sprintf("FILLER_%d=x", i))
+	}
+	lines = append(lines, "WORKER_CPU_CPU_LIMIT=16") // the line compose reads
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"),
+		[]byte(strings.Join(lines, "\n")), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.ensureProductionEnv(); err != nil {
+		t.Fatalf("ensureProductionEnv failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]
+	v, err := strconv.ParseFloat(got, 64)
+	if err != nil {
+		t.Fatalf("WORKER_CPU_CPU_LIMIT=%q is not a number", got)
+	}
+	if v > 8 {
+		t.Errorf("effective WORKER_CPU_CPU_LIMIT = %s, exceeds the daemon's 8 CPUs — docker would still reject the container:\n%s", got, data)
+	}
+	if n := countEnvDefinitions(string(data), "WORKER_CPU_CPU_LIMIT"); n != 1 {
+		t.Errorf("expected one live definition after fitting, got %d", n)
+	}
+}
+
+// --- Validating the model Docker actually receives -------------------------
+//
+// fitResourceEnv can only see keys that are present in .env.production. It is
+// blind to a limit that comes from a compose inline default
+// (`${WORKER_REINVENT_CPU_LIMIT:-4}`, a key the template never defines), to one
+// injected through the shell environment (composeEnv appends to os.Environ, and
+// compose gives shell env precedence over --env-file), and to a user who edited
+// a different file than the one compose reads. `docker compose config` resolves
+// all of those, and is the only authoritative view of what the daemon will be
+// asked to create.
+
+func TestComposeConfigArgsReusesTheGlobalFlagsOfTheUpCommand(t *testing.T) {
+	// The resolved model depends on --env-file and every -f overlay, so a
+	// validation run that omits them would validate a different project.
+	up := []string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml",
+		"-f", "docker-compose.gpu.yml", "up", "-d", "--pull=never", "worker-cpu"}
+	got := composeConfigArgs(up)
+	want := []string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml",
+		"-f", "docker-compose.gpu.yml", "config", "--format", "json"}
+	if len(got) != len(want) {
+		t.Fatalf("composeConfigArgs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("composeConfigArgs = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestOverCPUServicesReadsTheResolvedModel(t *testing.T) {
+	// compose renders cpus as a string in some versions and a bare number in
+	// others; both have to be understood or the check silently passes everything.
+	const configJSON = `{
+	  "services": {
+	    "worker-cpu":      {"deploy": {"resources": {"limits": {"cpus": "16", "memory": "32G"}}}},
+	    "worker-reinvent": {"deploy": {"resources": {"limits": {"cpus": 12}}}},
+	    "gateway":         {"deploy": {"resources": {"limits": {"cpus": "2"}}}},
+	    "redis":           {"image": "redis:7"}
+	  }
+	}`
+	got, err := overCPUServices([]byte(configJSON), 8)
+	if err != nil {
+		t.Fatalf("overCPUServices: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d violations, want 2: %+v", len(got), got)
+	}
+	// Sorted by service name so the message is stable across runs.
+	if got[0].Service != "worker-cpu" || got[0].CPUs != 16 {
+		t.Errorf("first violation = %+v, want worker-cpu at 16", got[0])
+	}
+	if got[1].Service != "worker-reinvent" || got[1].CPUs != 12 {
+		t.Errorf("second violation = %+v, want worker-reinvent at 12", got[1])
+	}
+	// A limit equal to the daemon's count is accepted by docker (the check is
+	// `>`), so it must not be reported as a violation.
+	edge, err := overCPUServices([]byte(`{"services":{"a":{"deploy":{"resources":{"limits":{"cpus":"8"}}}}}}`), 8)
+	if err != nil || len(edge) != 0 {
+		t.Errorf("cpus == daemon CPUs was reported as a violation: %+v (%v)", edge, err)
+	}
+}
+
+func TestComposeCPULimitKeysMapsServicesToTheirBackingEnvKey(t *testing.T) {
+	// Knowing which key backs a service's limit is what turns "worker-cpu wants
+	// 16 CPUs" into a value the launcher can actually clamp.
+	data, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := composeCPULimitKeys(string(data))
+	for service, want := range map[string]string{
+		"worker-cpu":       "WORKER_CPU_CPU_LIMIT",
+		"worker-gpu-long":  "WORKER_GPU_LONG_CPU_LIMIT",
+		"worker-gpu-short": "WORKER_GPU_SHORT_CPU_LIMIT",
+		"worker-qc":        "WORKER_QC_CPU_LIMIT",
+		"gateway":          "GATEWAY_CPU_LIMIT",
+	} {
+		if keys[service] != want {
+			t.Errorf("%s -> %q, want %q", service, keys[service], want)
+		}
+	}
+}
+
+func TestVerifyFittedModelClampsALimitThatIsNotInTheEnvFile(t *testing.T) {
+	// The case fitResourceEnv structurally cannot catch: worker-reinvent's limit
+	// comes from the compose inline default, so no *_CPU_LIMIT key for it exists
+	// in .env.production and the fitting never looks at it.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"),
+		[]byte("WORKER_CPU_CPU_LIMIT=6\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte(strings.Join([]string{
+		"services:",
+		"  worker-reinvent:",
+		"    deploy:",
+		"      resources:",
+		"        limits:",
+		"          cpus: ${WORKER_REINVENT_CPU_LIMIT:-12}",
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app.composeConfigFn = func(args []string) ([]byte, error) {
+		return []byte(`{"services":{"worker-reinvent":{"deploy":{"resources":{"limits":{"cpus":"12"}}}}}}`), nil
+	}
+
+	if err := app.verifyFittedModel([]string{"compose", "--env-file", ".env.production", "up", "-d"}); err != nil {
+		t.Fatalf("verifyFittedModel should clamp a backable key, not fail: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parseEnvFile(string(data))["WORKER_REINVENT_CPU_LIMIT"]; got != "6" {
+		t.Errorf("WORKER_REINVENT_CPU_LIMIT = %q, want 6 — the inline default was never brought under the ceiling", got)
+	}
+}
+
+func TestVerifyFittedModelUsesTheSameCeilingsAsTheFitting(t *testing.T) {
+	// A non-worker service is bounded only by the daemon's own count; the soft
+	// worker headroom does not apply to it. Clamping it lower here would
+	// contradict fitResourceEnv and throttle the gateway for no reason.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte("VERSION=v1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte(strings.Join([]string{
+		"services:",
+		"  gateway:",
+		"    deploy:",
+		"      resources:",
+		"        limits:",
+		"          cpus: ${GATEWAY_CPU_LIMIT:-12}",
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app.composeConfigFn = func(args []string) ([]byte, error) {
+		return []byte(`{"services":{"gateway":{"deploy":{"resources":{"limits":{"cpus":"12"}}}}}}`), nil
+	}
+
+	if err := app.verifyFittedModel([]string{"compose", "up", "-d"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parseEnvFile(string(data))["GATEWAY_CPU_LIMIT"]; got != "8" {
+		t.Errorf("GATEWAY_CPU_LIMIT = %q, want 8 (the daemon's count, not the worker headroom)", got)
+	}
+}
+
+func TestVerifyFittedModelFailsFastWhenNoKeyBacksTheLimit(t *testing.T) {
+	// A hard-coded `cpus: 16` in the compose file has no env key to clamp.
+	// Failing before `up` beats a half-created stack and an opaque daemon error.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte("VERSION=v1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte(strings.Join([]string{
+		"services:",
+		"  worker-cpu:",
+		"    deploy:",
+		"      resources:",
+		"        limits:",
+		"          cpus: 16",
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app.composeConfigFn = func(args []string) ([]byte, error) {
+		return []byte(`{"services":{"worker-cpu":{"deploy":{"resources":{"limits":{"cpus":"16"}}}}}}`), nil
+	}
+
+	err := app.verifyFittedModel([]string{"compose", "up", "-d"})
+	if err == nil {
+		t.Fatal("expected verifyFittedModel to fail fast on an unclampable limit")
+	}
+	if !strings.Contains(err.Error(), "worker-cpu") || !strings.Contains(err.Error(), "16") {
+		t.Errorf("error must name the service and its resolved value, got: %v", err)
+	}
+}
+
+// TestRunDockerComposeVerifiesTheModelBeforeCreatingAnything guards the wiring,
+// not the check. The check itself is thoroughly tested above, but a refactor
+// that dropped the call site would silently restore the original bug with every
+// unit test still green — and the daemon rejects an oversized `cpus` at
+// container *creation*, so a violation that slips through leaves a half-built
+// stack behind.
+func TestRunDockerComposeVerifiesTheModelBeforeCreatingAnything(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	for name, body := range map[string]string{
+		".env.production.template": "VERSION=v2026.08.05\n",
+		".env.production":          "VERSION=v2026.08.05\n",
+		// No ${VAR} backing the limit, so the violation is unclampable and
+		// verifyFittedModel must refuse rather than clamp.
+		"docker-compose.yml": "services:\n  worker-cpu:\n    deploy:\n      resources:\n        limits:\n          cpus: 16\n",
+	} {
+		if err := os.WriteFile(filepath.Join(tmpDir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app.composeConfigFn = func(args []string) ([]byte, error) {
+		return []byte(`{"services":{"worker-cpu":{"deploy":{"resources":{"limits":{"cpus":"16"}}}}}}`), nil
+	}
+
+	err := app.runDockerCompose(
+		[]string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml", "up", "-d"},
+		"Starting services...")
+	if err == nil {
+		t.Fatal("runDockerCompose started the stack despite an unsatisfiable CPU limit")
+	}
+	// Must be the pre-flight refusal, not whatever `docker` itself said: the
+	// point is that we never got as far as running it.
+	if !strings.Contains(err.Error(), "worker-cpu") {
+		t.Errorf("failure did not come from the pre-flight check: %v", err)
+	}
+}
+
+func TestVerifyFittedModelIsNonFatalWhenComposeConfigFails(t *testing.T) {
+	// Older compose, a daemon that just went away, an overlay we cannot parse:
+	// none of those are a reason to refuse to start. Log and continue.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	app.composeConfigFn = func(args []string) ([]byte, error) {
+		return nil, fmt.Errorf("unknown flag: --format")
+	}
+	if err := app.verifyFittedModel([]string{"compose", "up", "-d"}); err != nil {
+		t.Errorf("a failing `compose config` must not block start: %v", err)
+	}
+}
+
+// --- Translating the daemon's error ----------------------------------------
+//
+// "range of CPUs is from 0.01 to 8.00, as there are only 8 CPUs available"
+// names neither the service, nor the file that set the value, nor where that
+// file lives. The user is left with nothing to act on — which is how the
+// original report went three rounds without converging.
+
+func TestExplainComposeFailureMakesTheCPURangeErrorActionable(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources {
+		return hostResources{CPUs: 8, MemBytes: 16 << 30, FromDaemon: true}
+	}
+	app.composeConfigFn = func(args []string) ([]byte, error) {
+		return []byte(`{"services":{"worker-cpu":{"deploy":{"resources":{"limits":{"cpus":"16"}}}}}}`), nil
+	}
+
+	got := app.explainComposeFailure(
+		"Error response from daemon: range of CPUs is from 0.01 to 8.00, as there are only 8 CPUs available",
+		[]string{"compose", "--env-file", ".env.production", "up", "-d"})
+
+	for _, want := range []string{
+		filepath.Join(tmpDir, ".env.production"), // the exact file compose reads
+		"8 CPUs",                                 // what we actually detected
+		"Docker daemon",                          // and where that number came from
+		"worker-cpu",                             // the offending service
+		"16",                                     // its resolved value
+		"LAST definition",                        // why their edit may have done nothing
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("explanation is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestCPURangeExplanationWarnsAboutHiddenExtensionsOnWindowsOnly(t *testing.T) {
+	// Federico is on Windows, where File Explorer hides known extensions and
+	// Notepad silently appends .txt — so the file he edited may not be the file
+	// compose reads. Irrelevant noise anywhere else.
+	host := hostResources{CPUs: 8, FromDaemon: true}
+	win := cpuRangeExplanation(host, `C:\Users\f\AppData\Roaming\ligandx-launcher\runtime\.env.production`, nil, nil, "windows")
+	if !strings.Contains(win, ".env.production.txt") {
+		t.Errorf("Windows explanation omits the hidden-extension trap:\n%s", win)
+	}
+	nix := cpuRangeExplanation(host, "/home/f/.config/ligandx-launcher/runtime/.env.production", nil, nil, "linux")
+	if strings.Contains(nix, ".env.production.txt") {
+		t.Errorf("Windows-only advice leaked onto linux:\n%s", nix)
+	}
+}
+
+// --- The file the user actually edited -------------------------------------
+//
+// Windows File Explorer hides known extensions, and Notepad appends .txt when
+// "Save as type" is left on Text Documents. The result is a
+// `.env.production.txt` sitting next to the real file, both displayed as
+// ".env.production" — so the user edits one and compose reads the other, and
+// every value they change appears to be ignored. Advice about this is cheap;
+// actually detecting it is cheaper still and removes the guesswork.
+
+func TestStrayProductionEnvFilesFindsTheNotepadCopy(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		".env.production",          // the real one
+		".env.production.template", // ships in the bundle, not a mistake
+		".env.production.txt",      // Notepad
+		".env.production.bak",      // a hand-made backup, also not read
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("VERSION=v1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := strayProductionEnvFiles(dir)
+	want := []string{".env.production.bak", ".env.production.txt"}
+	if len(got) != len(want) {
+		t.Fatalf("strayProductionEnvFiles = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("strayProductionEnvFiles = %v, want %v", got, want)
+		}
+	}
+	// A clean directory must stay quiet, or the warning becomes noise people
+	// learn to ignore.
+	clean := t.TempDir()
+	if err := os.WriteFile(filepath.Join(clean, ".env.production"), []byte("VERSION=v1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := strayProductionEnvFiles(clean); len(got) != 0 {
+		t.Errorf("clean directory reported strays: %v", got)
+	}
+}
+
+func TestEnsureProductionEnvWarnsAboutAStrayEditedCopy(t *testing.T) {
+	// Reported at start, not only after a failure: the stray file explains a
+	// whole class of "I changed it and nothing happened", not just CPU limits.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte("VERSION=v1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte("VERSION=v1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.txt"), []byte("WORKER_CPU_CPU_LIMIT=6\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.ensureProductionEnv(); err != nil {
+		t.Fatal(err)
+	}
+	logged, err := os.ReadFile(app.composeLogPath())
+	if err != nil {
+		t.Fatalf("nothing was logged: %v", err)
+	}
+	if !strings.Contains(string(logged), ".env.production.txt") {
+		t.Errorf("stray file not reported at start:\n%s", logged)
+	}
+}
+
+func TestCPURangeExplanationNamesAStrayFileWhenOneExists(t *testing.T) {
+	host := hostResources{CPUs: 8, FromDaemon: true}
+	got := cpuRangeExplanation(host, "/x/.env.production", nil, []string{".env.production.txt"}, "windows")
+	if !strings.Contains(got, ".env.production.txt") {
+		t.Errorf("explanation does not name the stray file:\n%s", got)
+	}
+	// Without a stray file the message must not imply one exists.
+	none := cpuRangeExplanation(host, "/x/.env.production", nil, nil, "linux")
+	if strings.Contains(none, ".env.production.txt") {
+		t.Errorf("a stray file was implied where none exists:\n%s", none)
+	}
+}
+
+func TestExplainComposeFailureStaysSilentOnUnrelatedErrors(t *testing.T) {
+	// Appending a CPU essay to a port-bind or image-pull failure would bury the
+	// real reason, so the matcher has to be specific.
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	if got := app.explainComposeFailure("Error: pull access denied for ghcr.io/kon-218/ligand-x-pro/admet", nil); got != "" {
+		t.Errorf("unrelated failure was annotated: %q", got)
+	}
+}
+
+func TestExplainComposeFailureNotesWhenTheCPUCountIsAGuess(t *testing.T) {
+	// The daemon's count is authoritative; goruntime.NumCPU() is this process's
+	// view and over-estimates on Docker Desktop, where containers run in a VM
+	// with its own allocation. Which one produced the number changes what the
+	// user should check, so the message has to say.
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8, FromDaemon: false} }
+	got := app.explainComposeFailure("range of CPUs is from 0.01 to 8.00", nil)
+	if !strings.Contains(got, "this computer") {
+		t.Errorf("fallback CPU source not disclosed:\n%s", got)
+	}
+	if strings.Contains(got, "from the Docker daemon") {
+		t.Errorf("a fallback count was reported as the daemon's:\n%s", got)
+	}
+}
+
+func TestFitResourceLimitsAlwaysReportsWhatItDetected(t *testing.T) {
+	// Previously this logged only when a value changed, so "did the fix run on
+	// this user's machine?" was unanswerable from a screenshot of the log — and
+	// on a correctly-sized machine the silence looked identical to an old binary
+	// that has no fitting at all.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources {
+		return hostResources{CPUs: 8, MemBytes: 16 << 30, FromDaemon: true}
+	}
+	env := "WORKER_CPU_CPU_LIMIT=4\nLIGANDX_FITTED_CPUS=8\n" // nothing to change
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte(env), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.fitResourceLimits(parseEnvFile(env)); err != nil {
+		t.Fatal(err)
+	}
+	logged, err := os.ReadFile(app.composeLogPath())
+	if err != nil {
+		t.Fatalf("nothing was logged at all: %v", err)
+	}
+	for _, want := range []string{"8 CPUs", "16", "Docker daemon"} {
+		if !strings.Contains(string(logged), want) {
+			t.Errorf("fitting log is missing %q:\n%s", want, logged)
+		}
+	}
+}
+
+// --- The escape hatch ------------------------------------------------------
+//
+// Everything else here is automatic or advisory. A user whose .env.production
+// has been edited into a state they no longer understand still needs one
+// action that puts it back, without hunting for a file under %AppData% and
+// without losing their passwords and pinned VERSION along with it.
+
+func TestResetResourceLimitsRestoresTemplateValuesAndRefits(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"), []byte(strings.Join([]string{
+		"VERSION=v2026.08.05",
+		"WORKER_CPU_CPU_LIMIT=4",
+		"WORKER_GPU_LONG_CPU_LIMIT=4",
+		"CPU_WORKER_CONCURRENCY=2",
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A file edited into a mess: an oversized value, a duplicate, and a secret
+	// plus a pinned VERSION that must survive untouched.
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte(strings.Join([]string{
+		"VERSION=v2026.08.05",
+		"POSTGRES_PASSWORD=keep-me",
+		"WORKER_CPU_CPU_LIMIT=99",
+		"WORKER_GPU_LONG_CPU_LIMIT=64",
+		"WORKER_CPU_CPU_LIMIT=48",
+		"CPU_WORKER_CONCURRENCY=16",
+	}, "\n")), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.ResetResourceLimits(); err != nil {
+		t.Fatalf("ResetResourceLimits failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := parseEnvFile(string(data))
+	if env["WORKER_CPU_CPU_LIMIT"] != "4" || env["WORKER_GPU_LONG_CPU_LIMIT"] != "4" {
+		t.Errorf("resource limits not restored from the template: %v", env)
+	}
+	if env["CPU_WORKER_CONCURRENCY"] != "2" {
+		t.Errorf("CPU_WORKER_CONCURRENCY = %q, want the template's 2", env["CPU_WORKER_CONCURRENCY"])
+	}
+	if n := countEnvDefinitions(string(data), "WORKER_CPU_CPU_LIMIT"); n != 1 {
+		t.Errorf("reset left %d live definitions of WORKER_CPU_CPU_LIMIT", n)
+	}
+	// Secrets and the pinned version are not resource settings and must not be
+	// collateral damage — losing POSTGRES_PASSWORD desyncs the Postgres volume.
+	if env["POSTGRES_PASSWORD"] != "keep-me" {
+		t.Errorf("reset destroyed a secret: POSTGRES_PASSWORD = %q", env["POSTGRES_PASSWORD"])
+	}
+	if env["VERSION"] != "v2026.08.05" {
+		t.Errorf("reset disturbed the pinned VERSION: %q", env["VERSION"])
+	}
+}
+
+func TestResetResourceLimitsFitsATemplateTooBigForThisMachine(t *testing.T) {
+	// Reset must not reintroduce an unstartable value on a small machine: it
+	// restores the template and then re-fits, in that order.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 4} }
+
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production.template"),
+		[]byte("VERSION=v1\nWORKER_CPU_CPU_LIMIT=16\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"),
+		[]byte("VERSION=v1\nWORKER_CPU_CPU_LIMIT=2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.ResetResourceLimits(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]
+	if got != "3" { // floor(4 * 0.75)
+		t.Errorf("WORKER_CPU_CPU_LIMIT = %q, want 3 — reset restored the template without re-fitting", got)
+	}
+}
+
+// --- Shipped template defaults --------------------------------------------
+//
+// The resource fitting lives in the launcher *binary*, but the only artifact
+// that auto-updates is the runtime bundle — and the bundle carries the
+// template. A user on a new bundle and an old binary therefore still gets the
+// template's raw values. So the template itself has to be startable, with no
+// runtime fix-up at all, on the smallest machine we support.
+
+// smallestSupportedCPUs is the machine the shipped defaults must start on
+// unaided. 4 is the floor for a modern desktop and matches the inline
+// `${...:-4}` fallbacks in docker-compose.yml.
+const smallestSupportedCPUs = 4
+
+func TestShippedTemplateStartsOnTheSmallestSupportedMachine(t *testing.T) {
+	data, err := os.ReadFile(".env.production.template")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range parseEnvFile(string(data)) {
+		if !strings.HasSuffix(k, "_CPU_LIMIT") && !strings.HasSuffix(k, "_CPU_RES") {
+			continue
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			t.Errorf("%s=%q is not a number", k, v)
+			continue
+		}
+		if f > smallestSupportedCPUs {
+			t.Errorf("%s=%s exceeds %d CPUs — a user on the new runtime bundle but an "+
+				"older binary gets this value verbatim, and docker refuses to create the container",
+				k, v, smallestSupportedCPUs)
+		}
+	}
+}
+
+// TestTemplatesAgreeOnResourceKeys guards the drift that caused the original
+// report: ligand-x/ and ligand-x-launcher/ each carry a copy of the template,
+// and sync-runtime-topology.sh historically synced only docker-compose.yml, so
+// the two drifted apart silently. They legitimately differ elsewhere (the
+// launcher pins VERSION/PRO_VERSION for the release it ships with), so parity
+// is enforced on the resource and concurrency keys rather than byte-for-byte.
+func TestTemplatesAgreeOnResourceKeys(t *testing.T) {
+	ours, err := os.ReadFile(".env.production.template")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := os.ReadFile("../ligand-x/.env.production.template")
+	if err != nil {
+		t.Skipf("sibling repo not checked out: %v", err)
+	}
+	a, b := parseEnvFile(string(ours)), parseEnvFile(string(theirs))
+	for _, k := range sortedKeys(a) {
+		if !isResourceEnvKey(k) {
+			continue
+		}
+		if a[k] != b[k] {
+			t.Errorf("%s: launcher has %q, ligand-x has %q — the two templates have drifted", k, a[k], b[k])
+		}
+	}
+	for _, k := range sortedKeys(b) {
+		if isResourceEnvKey(k) {
+			if _, ok := a[k]; !ok {
+				t.Errorf("%s is in ligand-x's template but missing from the launcher's", k)
+			}
+		}
+	}
+}
+
 func TestParseBytesAndFormatBytesEnvRoundTrip(t *testing.T) {
 	cases := map[string]int64{
 		"32G":   32 << 30,
@@ -1489,7 +2380,7 @@ func TestFitResourceLimitsPreservesUserChosenConcurrency(t *testing.T) {
 	if err := app.fitResourceLimits(cur); err != nil {
 		t.Fatal(err)
 	}
-	if cur["CPU_WORKER_CONCURRENCY"] != "2" || cur["WORKER_CPU_CPU_LIMIT"] != "8" {
+	if cur["CPU_WORKER_CONCURRENCY"] != "2" || cur["WORKER_CPU_CPU_LIMIT"] != "6" {
 		t.Fatalf("first fit did not size the machine: %v", cur)
 	}
 
@@ -1513,8 +2404,8 @@ func TestFitResourceLimitsPreservesUserChosenConcurrency(t *testing.T) {
 	if cur["CPU_WORKER_CONCURRENCY"] != "4" {
 		t.Errorf("user's concurrency choice was overwritten: got %q, want 4", cur["CPU_WORKER_CONCURRENCY"])
 	}
-	if cur["WORKER_CPU_CPU_LIMIT"] != "8" {
-		t.Errorf("unstartable CPU limit was not re-clamped: got %q, want 8", cur["WORKER_CPU_CPU_LIMIT"])
+	if cur["WORKER_CPU_CPU_LIMIT"] != "6" {
+		t.Errorf("unstartable CPU limit was not re-clamped: got %q, want 6", cur["WORKER_CPU_CPU_LIMIT"])
 	}
 }
 

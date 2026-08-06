@@ -349,6 +349,23 @@ select.input option {
   font-size: 12.5px; color: var(--ok); text-align: center; margin-top: 10px;
 }
 
+/* ---------- Uninstall modal ---------- */
+.uninstall-opt {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text-muted); margin-bottom: 8px;
+}
+.uninstall-opt input { accent-color: var(--accent); }
+.uninstall-steps { display: flex; flex-direction: column; gap: 8px; }
+.uninstall-step {
+  display: flex; gap: 8px; align-items: flex-start;
+  font-size: 13px; color: var(--text-muted); line-height: 1.45;
+}
+.uninstall-step strong { color: var(--text); font-weight: 600; }
+.uninstall-step-icon { flex: none; width: 14px; text-align: center; }
+.uninstall-step[data-status="done"] .uninstall-step-icon { color: var(--ok); }
+.uninstall-step[data-status="skipped"] .uninstall-step-icon { color: var(--text-faint); }
+.uninstall-step[data-status="failed"] .uninstall-step-icon { color: var(--danger); }
+
 /* ---------- Change-password form (inside user modal) ---------- */
 .change-password-form {
   margin-top: 12px; padding-top: 12px;

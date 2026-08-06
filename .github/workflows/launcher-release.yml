@@ -12,6 +12,9 @@ on:
       public_ref:
         description: 'Exact ligand-x public tag or commit containing the canonical runtime topology.'
         required: true
+      pro_version:
+        description: 'Pro image tag to pin (defaults to DEFAULT_PRO_VERSION; Pro ships on its own cadence).'
+        required: false
 
 permissions:
   contents: write
@@ -22,6 +25,10 @@ env:
   GO_VERSION: '1.25'
   # Pin the Wails CLI to the version in go.mod to avoid CLI/library drift.
   WAILS_VERSION: "v2.11.0"
+  # Pro images are built and published independently of the core release, so a
+  # core-only release must pin the last Pro tag that actually exists rather than
+  # letting compose fall back to this release's VERSION. Bump when Pro ships.
+  DEFAULT_PRO_VERSION: "v2026.06.21"
   RUNTIME_BUNDLE_PUBLIC_KEY_B64: ${{ vars.LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 }}
 
 concurrency:
@@ -344,6 +351,7 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_PUBLIC_REF: ${{ inputs.public_ref }}
+          INPUT_PRO_VERSION: ${{ inputs.pro_version }}
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
@@ -366,8 +374,15 @@ jobs:
             echo "::error::public_ref must be a full commit SHA or immutable v-prefixed release tag: ${public_ref}"
             exit 64
           fi
+          pro_version="${INPUT_PRO_VERSION:-}"
+          pro_version="${pro_version:-${DEFAULT_PRO_VERSION}}"
+          if [[ "${pro_version}" == *latest* ]] || [[ ! "${pro_version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::PRO_VERSION must be an immutable v-prefixed release tag, not latest: ${pro_version}"
+            exit 64
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "public_ref=${public_ref}" >> "$GITHUB_OUTPUT"
+          echo "pro_version=${pro_version}" >> "$GITHUB_OUTPUT"
           echo "tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "title=Ligand-X Public Launcher ${version}" >> "$GITHUB_OUTPUT"
 
@@ -404,6 +419,13 @@ jobs:
       - name: Build and validate exact canonical runtime bundle
         env:
           VERSION: ${{ steps.runtime.outputs.version }}
+          # Pro images ship on their own cadence, and the canonical template
+          # leaves PRO_VERSION commented out ("follow VERSION"). Without an
+          # explicit pin here a core-only release resolves Pro images to its own
+          # tag, which was never built — so licensed installs fail to pull.
+          # This used to depend on whoever ran the build having PRO_VERSION
+          # exported; pinning it in the workflow makes the release reproducible.
+          PRO_VERSION: ${{ steps.runtime.outputs.pro_version }}
           LIGANDX_PUBLIC_REPO: ${{ github.workspace }}/.canonical/ligand-x
         run: bash scripts/build-runtime-bundle.sh artifacts/runtime
 

@@ -307,6 +307,11 @@ type App struct {
 	hostRes           hostResources
 	hostResFromDaemon bool
 	hostResMux        sync.Mutex
+
+	// composeConfigFn overrides `docker compose config` for verifyFittedModel:
+	// nil in production, set by tests so the resolved-model check can be
+	// exercised without a running daemon.
+	composeConfigFn func(args []string) ([]byte, error)
 }
 
 func NewApp() *App {
@@ -408,6 +413,32 @@ func (a *App) findProjectPath() (string, bool) {
 	}
 
 	return firstComposeProject(searchPaths, false)
+}
+
+// foreignRuntimeProject reports whether an already-discovered compose project is
+// one the launcher must leave alone — a developer source checkout, or a runtime
+// shipped alongside the executable — as opposed to the managed runtime directory
+// under os.UserConfigDir(), which the launcher installs into and may replace.
+//
+// An empty found means nothing was discovered, which is not foreign: there is
+// simply nothing there yet.
+func foreignRuntimeProject(found, runtimeDir string) bool {
+	if found == "" {
+		return false
+	}
+	foundAbs, err := filepath.Abs(found)
+	if err != nil {
+		return true
+	}
+	runtimeAbs, err := filepath.Abs(runtimeDir)
+	if err != nil {
+		return true
+	}
+	foundAbs, runtimeAbs = filepath.Clean(foundAbs), filepath.Clean(runtimeAbs)
+	if goruntime.GOOS == "windows" {
+		return !strings.EqualFold(foundAbs, runtimeAbs)
+	}
+	return foundAbs != runtimeAbs
 }
 
 func developerSourceCandidates() []string {
@@ -761,13 +792,20 @@ func (a *App) GetDistributionStatus() DistributionStatus {
 }
 
 func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
-	if _, ok := a.findProjectPath(); ok {
-		return a.GetDistributionStatus(), nil
-	}
-
 	runtimeDir, err := a.defaultRuntimeDir()
 	if err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("could not determine runtime directory: %w", err)
+	}
+	// Only a compose project we do not own is a reason not to install. The
+	// managed runtime directory is ours, and overwriting it is the entire point
+	// of the "Update now" prompt: a user carrying a runtime from an earlier
+	// release keeps its docker-compose.yml until this call replaces it, and
+	// skipping here reported success while leaving them on the broken one.
+	// Re-extraction is safe: the bundle contains no .env.production, so
+	// generated secrets and user edits survive, and the download is still gated
+	// by signature verification and enforceRuntimeRollbackPolicy.
+	if found, ok := a.findProjectPath(); ok && foreignRuntimeProject(found, runtimeDir) {
+		return a.GetDistributionStatus(), nil
 	}
 	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to create runtime directory: %w", err)
@@ -1850,16 +1888,9 @@ func (a *App) StopServices() error {
 	// Identify which compose projects are ours (a project that owns at least one
 	// known Ligand-X service), then tear down *all* containers in those projects
 	// — including extras like celery-beat that aren't in the service set.
-	ligandProjects := make(map[string]bool)
-	for _, c := range containers {
-		proj := c.Labels["com.docker.compose.project"]
-		if proj == "" || !isLigandxProject(proj) {
-			continue
-		}
-		if ligandxServiceSet[c.Labels["com.docker.compose.service"]] {
-			ligandProjects[proj] = true
-		}
-	}
+	// Shared with Uninstall (see uninstall.go): the two must agree on what counts
+	// as our stack, or uninstall would leave behind exactly what stop tears down.
+	ligandProjects := ligandxComposeProjects(containers)
 
 	if len(ligandProjects) == 0 {
 		emit("No running services found")
@@ -1971,25 +2002,16 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	composePath := filepath.Join(a.projectPath, "docker-compose.yml")
 	if _, err := os.Stat(composePath); os.IsNotExist(err) {
 		errMsg := fmt.Sprintf("docker-compose.yml not found in %s. Please select the correct project folder.", a.projectPath)
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-			Service:   "launcher",
-			Message:   errMsg,
-			Timestamp: time.Now().Format("15:04:05"),
-		})
+		a.emitAndLog("launcher", errMsg)
 		return fmt.Errorf("%s", errMsg)
 	}
 
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-		Service:   "launcher",
-		Message:   message,
-		Timestamp: time.Now().Format("15:04:05"),
-	})
-
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-		Service:   "launcher",
-		Message:   fmt.Sprintf("Working directory: %s", a.projectPath),
-		Timestamp: time.Now().Format("15:04:05"),
-	})
+	// emitAndLog rather than a bare EventsEmit: it guards against a nil ctx
+	// (before Wails startup, and under test, where wails' EventsEmit calls
+	// logger.Fatal and takes the process with it) and persists the line to the
+	// on-disk log, which is what makes a user's failure report readable.
+	a.emitAndLog("launcher", message)
+	a.emitAndLog("launcher", fmt.Sprintf("Working directory: %s", a.projectPath))
 
 	// Record exactly what we are about to run. Previously only the working
 	// directory was logged, so a reproduction by hand (or reading the on-disk
@@ -2000,6 +2022,13 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	a.emitAndLog("launcher", a.composeContextLine())
 
 	if isProductionUpCommand(args) {
+		// Check what compose actually resolves before anything is created.
+		// Must precede prepareProductionInfra: that already runs an `up` for the
+		// stateful services, and the daemon rejects an oversized `cpus` at
+		// container *creation*, so a violation there leaves a half-built stack.
+		if err := a.verifyFittedModel(args); err != nil {
+			return err
+		}
 		if err := a.prepareProductionInfra(args); err != nil {
 			return err
 		}
@@ -2064,7 +2093,11 @@ func (a *App) runDockerCompose(args []string, message string) error {
 		// victim, not the cause).
 		a.captureComposePs(args)
 		if reason := strings.TrimSpace(tail.String()); reason != "" {
-			return fmt.Errorf("docker compose failed: %v\n--- last docker output ---\n%s", waitErr, reason)
+			// Translate the daemon's own wording into something actionable
+			// where we can (see explainComposeFailure); "" when we cannot, so
+			// an unrelated failure is not buried under advice about CPUs.
+			return fmt.Errorf("docker compose failed: %v\n--- last docker output ---\n%s%s",
+				waitErr, reason, a.explainComposeFailure(reason, args))
 		}
 		return fmt.Errorf("docker compose failed: %v", waitErr)
 	}
@@ -2649,31 +2682,32 @@ func (a *App) setProductionEnvValue(key, value string) error {
 	return a.setEnvFileValue(".env.production", key, value)
 }
 
+// setEnvFileValue is the single-key form of setEnvFileValues. It delegates
+// rather than duplicating the last-wins rule: two implementations of that rule
+// drifted apart once already (setEnvFileValue matched `KEY=` literally, so a
+// hand-edited `KEY = value` was missed and a second definition appended).
 func (a *App) setEnvFileValue(fileName, key, value string) error {
-	envPath := filepath.Join(a.projectPath, fileName)
-	data, _ := os.ReadFile(envPath)
-	lines := strings.Split(string(data), "\n")
-	prefix := key + "="
-	updated := false
-	for i, l := range lines {
-		if strings.HasPrefix(l, prefix) {
-			lines[i] = prefix + value
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		lines = append(lines, prefix+value)
-	}
-	return writePrivateFile(envPath, []byte(strings.Join(lines, "\n")))
+	return a.setEnvFileValues(fileName, map[string]string{key: value})
 }
 
 func (a *App) setProductionEnvValues(values map[string]string) error {
 	return a.setEnvFileValues(".env.production", values)
 }
 
-// setEnvFileValues is the batch form of setEnvFileValue: one read/write for the
-// whole set, so rewriting ~20 resource keys doesn't rewrite the file 20 times.
+// supersededEnvComment marks an earlier duplicate definition the launcher has
+// retired. The line is commented rather than deleted so a user who added an
+// override can see where it went, and why it was not the one taking effect.
+const supersededEnvComment = "# [ligand-x] superseded — the definition below is the one Docker Compose reads: "
+
+// setEnvFileValues writes KEY=VALUE for each entry, in one read/write pass so
+// rewriting ~20 resource keys doesn't rewrite the file 20 times.
+//
+// It writes the *last* definition of a key and retires any earlier ones,
+// because last-wins is what both parseEnvFile and compose's dotenv parser do.
+// Writing the first occurrence instead — as this did originally — silently
+// changes a line nobody reads: a user who inserted WORKER_CPU_CPU_LIMIT=6 above
+// the template's =16 saw neither their edit nor the resource fitting take
+// effect, because compose kept resolving the 16 further down the file.
 func (a *App) setEnvFileValues(fileName string, values map[string]string) error {
 	if len(values) == 0 {
 		return nil
@@ -2681,26 +2715,87 @@ func (a *App) setEnvFileValues(fileName string, values map[string]string) error 
 	envPath := filepath.Join(a.projectPath, fileName)
 	data, _ := os.ReadFile(envPath)
 	lines := strings.Split(string(data), "\n")
-	pending := make(map[string]string, len(values))
-	for k, v := range values {
-		pending[k] = v
-	}
+
+	// Pass 1: find the effective (last) definition of each key we're writing.
+	last := make(map[string]int, len(values))
 	for i, l := range lines {
-		eq := strings.Index(l, "=")
-		if eq <= 0 {
+		if key := envKeyOnLine(l); key != "" {
+			if _, ok := values[key]; ok {
+				last[key] = i
+			}
+		}
+	}
+	// Pass 2: write it, and comment out every earlier definition of the same key
+	// so exactly one live definition survives. Leaving them would let the file
+	// keep a value that contradicts the one we just wrote.
+	for i, l := range lines {
+		key := envKeyOnLine(l)
+		if key == "" {
 			continue
 		}
-		key := strings.TrimSpace(l[:eq])
-		if v, ok := pending[key]; ok {
-			lines[i] = key + "=" + v
-			delete(pending, key)
+		j, ok := last[key]
+		if !ok {
+			continue
+		}
+		if i == j {
+			lines[i] = key + "=" + values[key]
+		} else {
+			lines[i] = supersededEnvComment + strings.TrimSpace(l)
 		}
 	}
 	// Append anything the file didn't already declare, in a stable order.
-	for _, k := range sortedKeys(pending) {
-		lines = append(lines, k+"="+pending[k])
+	for _, k := range sortedKeys(values) {
+		if _, ok := last[k]; !ok {
+			lines = append(lines, k+"="+values[k])
+		}
 	}
 	return writePrivateFile(envPath, []byte(strings.Join(lines, "\n")))
+}
+
+// productionEnvPath is the absolute path of the file compose reads through
+// --env-file. Worth naming in full in any message about it: on Windows it sits
+// under %AppData% where a user is unlikely to look, and "the .env.production
+// you edited" is only actionable if they know which one that is.
+func (a *App) productionEnvPath() string {
+	return filepath.Join(a.projectPath, ".env.production")
+}
+
+// envKeyOnLine returns the key a line defines, or "" for blanks, comments and
+// non-assignments. It mirrors parseEnvFile and compose's dotenv parser: the key
+// is whatever precedes the first '=', trimmed, so `KEY = value` defines KEY
+// exactly as `KEY=value` does.
+func envKeyOnLine(line string) string {
+	t := strings.TrimSpace(line)
+	if t == "" || strings.HasPrefix(t, "#") {
+		return ""
+	}
+	i := strings.Index(t, "=")
+	if i <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(t[:i])
+}
+
+// duplicateEnvKeys returns, sorted, every key with more than one live
+// definition. A duplicate is invisible in an editor but decisive at runtime —
+// compose takes the last one — so an override inserted above the original
+// silently does nothing. Worth naming in the log for every key, not just the
+// resource limits: it applies equally to VERSION and POSTGRES_PASSWORD.
+func duplicateEnvKeys(content string) []string {
+	counts := map[string]int{}
+	for _, line := range strings.Split(content, "\n") {
+		if key := envKeyOnLine(line); key != "" {
+			counts[key]++
+		}
+	}
+	var dups []string
+	for k, n := range counts {
+		if n > 1 {
+			dups = append(dups, k)
+		}
+	}
+	slices.Sort(dups)
+	return dups
 }
 
 // parseEnvFile parses KEY=VALUE lines (ignoring comments/blanks) into a map.
@@ -2734,6 +2829,27 @@ func (a *App) ensureProductionEnv() error {
 		return err
 	}
 	cur := parseEnvFile(content)
+
+	// A key defined twice is invisible in an editor but decisive at runtime:
+	// compose resolves the last one, so an override inserted above the original
+	// does nothing. Say so before anything else, because it is the explanation
+	// for "I edited .env.production and it made no difference". The writes below
+	// collapse duplicates as they touch each key, but only for keys they touch.
+	// Same class of problem as a duplicate key, and the same symptom: a file the
+	// user edited that Docker never reads. Reported at start rather than only
+	// after a failure, because it explains far more than oversized CPU limits.
+	if stray := strayProductionEnvFiles(a.projectPath); len(stray) > 0 {
+		a.emitAndLog("launcher", fmt.Sprintf(
+			"Warning: found %s next to %s. Docker reads ONLY .env.production — if you edited one of "+
+				"those by mistake (Windows File Explorer hides file extensions), your changes are not being applied.",
+			strings.Join(stray, ", "), a.productionEnvPath()))
+	}
+
+	if dups := duplicateEnvKeys(content); len(dups) > 0 {
+		a.emitAndLog("launcher", fmt.Sprintf(
+			"Warning: %s defines these keys more than once, and only the last definition of each takes effect: %s",
+			a.productionEnvPath(), strings.Join(dups, ", ")))
+	}
 
 	// setIfPlaceholder writes only when the existing value is empty/CHANGE_ME,
 	// and keeps cur in sync so derived URLs can reference fresh secrets.

@@ -200,6 +200,30 @@
           </div>
         </div>
 
+        <div class="settings-section">
+          <h3 class="settings-section-title">Troubleshooting</h3>
+          <div class="field">
+            <label>Reset resource limits</label>
+            <p class="field-hint">Restores the CPU and memory limits to the shipped defaults and re-fits them to this
+              computer. Use this if services fail to start after editing the configuration by hand. Your password,
+              version and other settings are not affected.</p>
+            <button id="resetResources" class="btn btn-secondary">Reset to defaults</button>
+            <div id="resetResourcesMsg" class="settings-saved" hidden>Resource limits reset.</div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3 class="settings-section-title">Uninstall</h3>
+          <div class="field">
+            <label>Remove Ligand-X from this computer</label>
+            <p class="field-hint">Stops and deletes every Ligand-X container, network, downloaded image and stored
+              result, then removes the runtime files and the launcher itself — leaving this computer as it was before
+              you installed. Shared images such as PostgreSQL and Redis are left alone in case other software uses
+              them. This cannot be undone.</p>
+            <button id="openUninstall" class="btn btn-danger">Uninstall Ligand-X…</button>
+          </div>
+        </div>
+
         <div id="settingsError" class="inline-error"></div>
         <div class="actions">
           <button id="settingsSave" class="btn btn-primary btn-block">Save changes</button>
@@ -241,6 +265,36 @@
     <div id="licenseModalError" class="inline-error" style="margin-top:0;margin-bottom:8px"></div>
     <div class="license-modal-footer">
       <button id="licenseModalImport" class="btn btn-ghost btn-block">Import license file…</button>
+    </div>
+  </dialog>
+
+  <!-- UNINSTALL MODAL -->
+  <dialog id="uninstallModal" class="license-modal" tabindex="-1">
+    <div class="license-modal-header">
+      <span class="license-modal-title">Uninstall Ligand-X</span>
+      <button id="uninstallModalClose" class="modal-close" aria-label="Close">✕</button>
+    </div>
+    <div class="license-modal-body">
+      <div id="uninstallPrompt">
+        <p class="field-hint" style="margin-bottom:14px">This removes Ligand-X and everything it stores. Your
+          docking results, MD trajectories and job history will be permanently deleted.</p>
+        <label class="uninstall-opt"><input type="checkbox" id="uninstallKeepData"> Keep my results and database</label>
+        <label class="uninstall-opt"><input type="checkbox" id="uninstallKeepImages"> Keep downloaded images (saves re-downloading later)</label>
+        <label class="uninstall-opt"><input type="checkbox" id="uninstallKeepLauncher"> Keep the launcher application</label>
+        <div class="field" style="margin-top:14px">
+          <label for="uninstallConfirm">Type <strong>UNINSTALL</strong> to confirm</label>
+          <input id="uninstallConfirm" class="input" autocomplete="off" spellcheck="false" placeholder="UNINSTALL">
+        </div>
+        <div id="uninstallError" class="inline-error"></div>
+      </div>
+      <div id="uninstallResult" hidden>
+        <div id="uninstallSteps" class="uninstall-steps"></div>
+        <div id="uninstallManual" class="field-hint"></div>
+      </div>
+    </div>
+    <div class="license-modal-footer">
+      <button id="uninstallGo" class="btn btn-danger btn-block" disabled>Uninstall</button>
+      <button id="uninstallQuit" class="btn btn-primary btn-block" hidden>Quit</button>
     </div>
   </dialog>
 

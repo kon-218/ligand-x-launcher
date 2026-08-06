@@ -850,12 +850,98 @@ function wireEvents() {
   el("openSettings").onclick = enterSettings;
   el("settingsBackTop").onclick = () => enterRunning("idle");
   el("settingsSave").onclick = saveSettings;
+  el("resetResources").onclick = resetResourceLimits;
+  el("openUninstall").onclick = openUninstallModal;
+  el("uninstallModalClose").onclick = () => el("uninstallModal").close();
+  // Typing the phrase is the only thing that arms the button, mirroring the
+  // check the Go side enforces independently.
+  el("uninstallConfirm").oninput = () => {
+    el("uninstallGo").disabled = el("uninstallConfirm").value.trim() !== "UNINSTALL";
+  };
+  el("uninstallGo").onclick = runUninstall;
+  el("uninstallQuit").onclick = () => { try { window.runtime.Quit(); } catch (e) {} };
   el("browseOrca").onclick = async () => {
     try {
       const p = await App().BrowseForFolder("Select ORCA Installation Folder");
       if (p) el("orcaPath").value = p;
     } catch (e) { /* cancelled */ }
   };
+}
+
+// ---------- troubleshooting ----------
+async function resetResourceLimits() {
+  const btn = el("resetResources");
+  el("settingsError").textContent = "";
+  el("resetResourcesMsg").hidden = true;
+  btn.disabled = true;
+  try {
+    const summary = await App().ResetResourceLimits();
+    el("resetResourcesMsg").textContent = summary || "Resource limits reset.";
+    el("resetResourcesMsg").hidden = false;
+  } catch (e) {
+    el("settingsError").textContent = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- uninstall ----------
+function openUninstallModal() {
+  el("uninstallPrompt").hidden = false;
+  el("uninstallResult").hidden = true;
+  el("uninstallError").textContent = "";
+  el("uninstallConfirm").value = "";
+  el("uninstallGo").hidden = false;
+  el("uninstallGo").disabled = true;
+  el("uninstallGo").textContent = "Uninstall";
+  el("uninstallQuit").hidden = true;
+  for (const id of ["uninstallKeepData", "uninstallKeepImages", "uninstallKeepLauncher"]) {
+    el(id).checked = false;
+  }
+  el("uninstallModal").showModal();
+}
+
+async function runUninstall() {
+  const btn = el("uninstallGo");
+  el("uninstallError").textContent = "";
+  btn.disabled = true;
+  btn.textContent = "Uninstalling…";
+  el("uninstallModalClose").hidden = true;
+
+  try {
+    const report = await App().Uninstall({
+      confirm: el("uninstallConfirm").value.trim(),
+      keepData: el("uninstallKeepData").checked,
+      keepImages: el("uninstallKeepImages").checked,
+      keepLauncher: el("uninstallKeepLauncher").checked,
+    });
+    renderUninstallReport(report);
+  } catch (e) {
+    el("uninstallError").textContent = String(e).replace(/^Error:\s*/, "");
+    btn.disabled = false;
+    btn.textContent = "Uninstall";
+    el("uninstallModalClose").hidden = false;
+  }
+}
+
+function renderUninstallReport(report) {
+  const icons = { done: "✓", skipped: "–", failed: "✕" };
+  const steps = (report && report.steps) || [];
+  el("uninstallSteps").innerHTML = steps.map((s) =>
+    `<div class="uninstall-step" data-status="${esc(s.status)}">` +
+    `<span class="uninstall-step-icon">${icons[s.status] || "•"}</span>` +
+    `<span><strong>${esc(s.name)}</strong> — ${esc(s.detail)}</span></div>`).join("");
+
+  const manual = (report && report.manualSteps) || [];
+  el("uninstallManual").innerHTML = manual.length
+    ? "<p style='margin-top:14px'>Left for you to finish:</p><ul>" +
+      manual.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>"
+    : "";
+
+  el("uninstallPrompt").hidden = true;
+  el("uninstallResult").hidden = false;
+  el("uninstallGo").hidden = true;
+  el("uninstallQuit").hidden = false;
 }
 
 function esc(s) {
