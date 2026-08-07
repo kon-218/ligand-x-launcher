@@ -419,12 +419,15 @@ jobs:
           echo "tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "title=Ligand-X Public Launcher ${version}" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout pinned canonical public runtime
+      - name: Checkout pinned canonical runtime source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: kon-218/ligand-x
           ref: ${{ steps.runtime.outputs.public_ref }}
           path: .canonical/ligand-x
+          # ligand-x is a private source repo (only its built images are
+          # public), so the default same-repo GITHUB_TOKEN can't read it.
+          token: ${{ secrets.LIGANDX_SOURCE_READ_PAT }}
 
       - name: Install pinned topology-renderer dependency
         run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
