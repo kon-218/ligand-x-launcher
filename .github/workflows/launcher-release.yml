@@ -130,6 +130,8 @@ jobs:
     env:
       WINDOWS_SIGNING_CERT_PFX_B64: ${{ secrets.LIGANDX_WINDOWS_SIGNING_CERT_PFX_B64 }}
       WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.LIGANDX_WINDOWS_SIGNING_CERT_PASSWORD }}
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -186,12 +188,15 @@ jobs:
           Move-Item $exe.FullName "build/bin/ligandx-windows-amd64.exe" -Force
 
       - name: Authenticode-sign and verify Windows launcher
+        id: sign
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PFX_B64) -or
               [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
-            throw "Windows signing certificate and password secrets are required"
+            Write-Host "::warning::LIGANDX_WINDOWS_SIGNING_CERT_PFX_B64/PASSWORD not set - shipping an unsigned binary (SmartScreen will warn)"
+            "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
           }
           $pfx = Join-Path $env:RUNNER_TEMP "ligandx-windows-signing.pfx"
           try {
@@ -203,6 +208,7 @@ jobs:
           } finally {
             Remove-Item $pfx -Force -ErrorAction SilentlyContinue
           }
+          "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -224,6 +230,9 @@ jobs:
       MACOS_NOTARY_KEY_P8_B64: ${{ secrets.LIGANDX_MACOS_NOTARY_KEY_P8_B64 }}
       MACOS_NOTARY_KEY_ID: ${{ secrets.LIGANDX_MACOS_NOTARY_KEY_ID }}
       MACOS_NOTARY_ISSUER_ID: ${{ secrets.LIGANDX_MACOS_NOTARY_ISSUER_ID }}
+    outputs:
+      signed: ${{ steps.codesign.outputs.signed }}
+      notarized: ${{ steps.notarize.outputs.notarized }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -254,11 +263,19 @@ jobs:
           fi
 
       - name: Code-sign and verify macOS app
+        id: codesign
         run: |
           set -euo pipefail
-          : "${MACOS_SIGNING_CERT_P12_B64:?macOS signing certificate secret is required}"
-          : "${MACOS_SIGNING_CERT_PASSWORD:?macOS signing certificate password is required}"
-          : "${MACOS_SIGNING_IDENTITY:?macOS signing identity is required}"
+          if [ -z "${MACOS_SIGNING_CERT_P12_B64:-}" ] || [ -z "${MACOS_SIGNING_CERT_PASSWORD:-}" ] || [ -z "${MACOS_SIGNING_IDENTITY:-}" ]; then
+            echo "::warning::LIGANDX_MACOS_SIGNING_CERT_P12_B64/PASSWORD/IDENTITY not set - shipping an ad-hoc signed app (Gatekeeper will warn, not notarized)"
+            # Apple Silicon refuses to run an entirely unsigned binary, so
+            # ad-hoc sign ("-") rather than skip; this is not a Developer ID
+            # signature and carries none of its trust guarantees.
+            codesign --force --deep --sign - build/bin/ligandx.app
+            codesign --verify --deep --strict --verbose=2 build/bin/ligandx.app
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           keychain="${RUNNER_TEMP}/ligandx-signing.keychain-db"
           certificate="${RUNNER_TEMP}/ligandx-signing.p12"
           keychain_password="$(openssl rand -hex 24)"
@@ -276,6 +293,7 @@ jobs:
           security list-keychains -d user -s "${keychain}"
           codesign --force --deep --options runtime --timestamp --sign "${MACOS_SIGNING_IDENTITY}" build/bin/ligandx.app
           codesign --verify --deep --strict --verbose=2 build/bin/ligandx.app
+          echo "signed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create DMG
         run: |
@@ -314,11 +332,14 @@ jobs:
             }
 
       - name: Notarize and staple macOS disk image
+        id: notarize
         run: |
           set -euo pipefail
-          : "${MACOS_NOTARY_KEY_P8_B64:?macOS notarization key secret is required}"
-          : "${MACOS_NOTARY_KEY_ID:?macOS notarization key ID is required}"
-          : "${MACOS_NOTARY_ISSUER_ID:?macOS notarization issuer ID is required}"
+          if [ -z "${MACOS_NOTARY_KEY_P8_B64:-}" ] || [ -z "${MACOS_NOTARY_KEY_ID:-}" ] || [ -z "${MACOS_NOTARY_ISSUER_ID:-}" ]; then
+            echo "::warning::LIGANDX_MACOS_NOTARY_KEY_P8_B64/KEY_ID/ISSUER_ID not set - shipping an un-notarized DMG (Gatekeeper will block until the user right-click > Open)"
+            echo "notarized=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           notary_key="${RUNNER_TEMP}/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
           cleanup_notary() { rm -f "${notary_key}"; }
           trap cleanup_notary EXIT
@@ -326,6 +347,7 @@ jobs:
           xcrun notarytool submit ligandx-darwin-universal.dmg --key "${notary_key}" --key-id "${MACOS_NOTARY_KEY_ID}" --issuer "${MACOS_NOTARY_ISSUER_ID}" --wait
           xcrun stapler staple ligandx-darwin-universal.dmg
           xcrun stapler validate ligandx-darwin-universal.dmg
+          echo "notarized=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -528,10 +550,10 @@ jobs:
 
             | Platform | File | Installation |
             |----------|------|--------------|
-            | **Windows** (64-bit) | `ligandx-windows-amd64.exe` | Portable Authenticode-signed binary — double-click to run (no install). No admin required. |
+            | **Windows** (64-bit) | `ligandx-windows-amd64.exe` | Portable ${{ needs.build-windows.outputs.signed == 'true' && 'Authenticode-signed' || '**unsigned**' }} binary — double-click to run (no install). No admin required.${{ needs.build-windows.outputs.signed == 'true' && '' || ' SmartScreen will warn: **More info → Run anyway**.' }} |
             | **Runtime Bundle** | `ligand-x-runtime.zip` | Downloaded only after its signed manifest is verified |
             | **Signed checksums** | `ligand-x-runtime-manifest.json` + `.sig` | Ed25519-authenticated hashes for every release artifact |
-            | **macOS** (Intel + Apple Silicon) | `ligandx-darwin-universal.dmg` | Developer ID-signed, notarized, and stapled. Open DMG, drag to Applications. |
+            | **macOS** (Intel + Apple Silicon) | `ligandx-darwin-universal.dmg` | ${{ needs.build-macos-universal.outputs.notarized == 'true' && 'Developer ID-signed, notarized, and stapled' || '**ad-hoc signed, not notarized**' }}. Open DMG, drag to Applications. |
             | **Linux** (64-bit) | `ligandx-linux-amd64.AppImage` | `chmod +x`, double-click to run |
 
             ### Requirements
