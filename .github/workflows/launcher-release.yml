@@ -255,9 +255,20 @@ jobs:
           WAILS_BIN="$(go env GOPATH)/bin/wails"
           : "${RUNTIME_BUNDLE_PUBLIC_KEY_B64:?Repository variable LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 is required}"
           "$WAILS_BIN" build -platform darwin/universal -tags public -ldflags "-X main.runtimeBundlePublicKeyB64=${RUNTIME_BUNDLE_PUBLIC_KEY_B64}" -o ligandx
+          # Wails names the .app bundle after wails.json's "name"
+          # (ligandx-launcher), not the -o binary name (ligandx) - that flag
+          # only applies to non-bundle platforms. Resolve it by discovery so
+          # this doesn't silently no-op again if the project name changes.
+          app_path="$(find build/bin -maxdepth 1 -name '*.app' -type d | head -1)"
+          if [ -z "${app_path}" ]; then
+            echo "::error::No .app bundle produced by wails build in build/bin"
+            ls -la build/bin
+            exit 1
+          fi
+          echo "app_path=${app_path}" >> "$GITHUB_ENV"
           # Fail loudly if this is the non-production stub (it embeds
           # internal/app/app_default_unix.go, which is //go:build !production).
-          if grep -aqr "app_default_unix.go" build/bin/ligandx.app/Contents/MacOS/; then
+          if grep -aqr "app_default_unix.go" "${app_path}/Contents/MacOS/"; then
             echo "::error::Built binary is the Wails stub (missing production tag)"
             exit 1
           fi
@@ -271,8 +282,8 @@ jobs:
             # Apple Silicon refuses to run an entirely unsigned binary, so
             # ad-hoc sign ("-") rather than skip; this is not a Developer ID
             # signature and carries none of its trust guarantees.
-            codesign --force --deep --sign - build/bin/ligandx.app
-            codesign --verify --deep --strict --verbose=2 build/bin/ligandx.app
+            codesign --force --deep --sign - "${app_path}"
+            codesign --verify --deep --strict --verbose=2 "${app_path}"
             echo "signed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -291,8 +302,8 @@ jobs:
           security import "${certificate}" -k "${keychain}" -P "${MACOS_SIGNING_CERT_PASSWORD}" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain}"
           security list-keychains -d user -s "${keychain}"
-          codesign --force --deep --options runtime --timestamp --sign "${MACOS_SIGNING_IDENTITY}" build/bin/ligandx.app
-          codesign --verify --deep --strict --verbose=2 build/bin/ligandx.app
+          codesign --force --deep --options runtime --timestamp --sign "${MACOS_SIGNING_IDENTITY}" "${app_path}"
+          codesign --verify --deep --strict --verbose=2 "${app_path}"
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create DMG
