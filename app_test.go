@@ -664,9 +664,16 @@ func TestCheckGPU(t *testing.T) {
 // either is rotated alone, every signed license silently fails verification
 // at one verifier or the other.
 func TestEmbeddedPublicKeyMatchesPemFile(t *testing.T) {
-	pemPath := filepath.Join("..", "ligand-x", "lib", "licensing", "public_key.pem")
+	publicRoot := os.Getenv("LIGANDX_PUBLIC_ROOT")
+	if publicRoot == "" {
+		publicRoot = filepath.Join("..", "ligand-x")
+	}
+	pemPath := filepath.Join(publicRoot, "lib", "licensing", "public_key.pem")
 	onDisk, err := os.ReadFile(pemPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("cross-repository validation skipped: ligand-x is unavailable; embedded public-key drift was not verified (set LIGANDX_PUBLIC_ROOT to its checkout)")
+		}
 		t.Fatalf("read %s: %v", pemPath, err)
 	}
 	// Compare PEM blocks structurally — trailing whitespace differences in
