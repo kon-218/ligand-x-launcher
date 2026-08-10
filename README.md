@@ -33,7 +33,9 @@ builds are preview and cannot run NVIDIA-accelerated containers locally.
 - CPU/GPU worker-concurrency settings.
 - Optional ORCA host-folder and Boltz MSA credential settings.
 - Resource-limit reset and explicit uninstall flow.
-- Best-effort update notification and signed runtime replacement.
+- Best-effort update notification, signed stable-version selection, and
+  verified runtime replacement. The launcher never accepts an arbitrary image
+  tag from the UI.
 
 The public build intentionally uses the focused `frontend-public/` interface.
 The broader dashboard under `frontend/` is a developer interface and is not a

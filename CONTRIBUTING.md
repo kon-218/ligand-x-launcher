@@ -108,14 +108,16 @@ Cross-platform builds can also be produced with `./scripts/build-all.sh` (output
 
 ## Releases (CI)
 
-The recommended way to build for all platforms is via GitHub Actions
-([`.github/workflows/launcher-release.yml`](.github/workflows/launcher-release.yml)):
+Production releases are initiated only by the protected unified workflow in
+the private `ligand-x-pro` repository. It supplies an immutable product version
+and exact Core, Pro, and launcher SHAs to
+`.github/workflows/launcher-release.yml`. Pushing `main` or a launcher tag does
+not publish or refresh `latest`.
 
-1. Push a tag: `git tag launcher-v1.0.0 && git push origin launcher-v1.0.0`
-2. GitHub Actions builds for Linux, Windows, and macOS (universal).
-3. Artifacts are attached to the GitHub Release.
-
-Pushing to `main` (or running the workflow manually without a version) refreshes the rolling `latest` release. The published assets are:
+The workflow builds Linux, Windows, and macOS artifacts when launcher source
+changed. For a Core-only or Pro-only release it reuses the preceding verified
+launcher binaries and publishes a new signed runtime bundle. The published
+assets are:
 
 | Platform | Asset |
 |----------|-------|
@@ -123,6 +125,7 @@ Pushing to `main` (or running the workflow manually without a version) refreshes
 | macOS (universal) | `ligandx-darwin-universal.dmg` |
 | Linux | `ligandx-linux-amd64.AppImage` |
 | Runtime bundle | `ligand-x-runtime.zip` (downloaded automatically by the launcher on first run) |
+| Stable release index | `ligand-x-release-index.json` + `.sig` (drives version selection) |
 
 > Keep the download links in [README.md](README.md) and on the website in sync with these exact asset names if the workflow output changes.
 

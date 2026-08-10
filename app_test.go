@@ -1142,6 +1142,49 @@ func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey, oldVersion := runtimeBundlePublicKeyB64, launcherVersion
+	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
+	launcherVersion = "v2.0.0"
+	t.Cleanup(func() { runtimeBundlePublicKeyB64, launcherVersion = oldKey, oldVersion })
+	index := runtimeReleaseIndex{
+		Schema:    "ligandx-release-index/1",
+		IssuedAt:  time.Now().UTC().Format(time.RFC3339),
+		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		Releases: []RuntimeRelease{
+			{Version: "v2.1.0", Status: "supported", Recommended: true, MinimumLauncher: "v2.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v2.1.0/ligand-x-runtime.zip", DownloadBytes: 1024},
+			{Version: "v1.9.0", Status: "supported", MinimumLauncher: "v3.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v1.9.0/ligand-x-runtime.zip", DownloadBytes: 1024},
+			{Version: "v1.8.0", Status: "revoked", MinimumLauncher: "v1.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v1.8.0/ligand-x-runtime.zip", DownloadBytes: 1024},
+		},
+	}
+	payload, err := json.Marshal(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload)))
+	verified, err := verifyRuntimeReleaseIndex(payload, signature)
+	if err != nil {
+		t.Fatalf("valid index rejected: %v", err)
+	}
+	if !verified.Releases[0].Compatible {
+		t.Fatalf("recommended release marked incompatible: %+v", verified.Releases[0])
+	}
+	if verified.Releases[1].Compatible || !strings.Contains(verified.Releases[1].Compatibility, "Requires launcher") {
+		t.Fatalf("minimum launcher was not enforced: %+v", verified.Releases[1])
+	}
+	if verified.Releases[2].Compatible || !strings.Contains(verified.Releases[2].Compatibility, "revoked") {
+		t.Fatalf("revoked release remained selectable: %+v", verified.Releases[2])
+	}
+	payload[0] ^= 1
+	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil {
+		t.Fatal("tampered release index was accepted")
+	}
+}
+
 func TestRuntimeRollbackPolicyRejectsOlderVersion(t *testing.T) {
 	runtimeDir := t.TempDir()
 	if err := writePrivateFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"), []byte("v2.1.0\n")); err != nil {
@@ -1152,6 +1195,33 @@ func TestRuntimeRollbackPolicyRejectsOlderVersion(t *testing.T) {
 	}
 	if err := enforceRuntimeRollbackPolicy(runtimeDir, "v2.1.1"); err != nil {
 		t.Fatalf("runtime upgrade was rejected: %v", err)
+	}
+}
+
+func TestRuntimeStageActivationCanRestorePreviousFiles(t *testing.T) {
+	stage, destination, backup := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(stage, "docker-compose.yml"), []byte("new compose"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, ".env.production.template"), []byte("VERSION=v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "docker-compose.yml"), []byte("old compose"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rollback, err := activateRuntimeStage(stage, destination, backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(destination, "docker-compose.yml")); string(data) != "new compose" {
+		t.Fatalf("stage was not activated: %q", data)
+	}
+	rollback()
+	if data, _ := os.ReadFile(filepath.Join(destination, "docker-compose.yml")); string(data) != "old compose" {
+		t.Fatalf("previous runtime was not restored: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(destination, ".env.production.template")); !os.IsNotExist(err) {
+		t.Fatal("new-only staged file survived rollback")
 	}
 }
 

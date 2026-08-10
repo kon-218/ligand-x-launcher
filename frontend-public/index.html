@@ -50,6 +50,7 @@
           <p id="gateMsg" class="gate-msg">Checking your environment.</p>
           <button id="gateAction" class="btn btn-primary" hidden></button>
           <button id="gateSecondary" class="btn btn-ghost" hidden></button>
+          <button id="gateTertiary" class="link-btn" hidden></button>
           <div id="gateLog" class="log-box" hidden></div>
         </div>
       </section>
@@ -211,6 +212,15 @@
         </div>
 
         <div class="settings-section">
+          <h3 class="settings-section-title">Updates</h3>
+          <div class="field">
+            <label>Runtime version</label>
+            <p id="installedRuntimeVersion" class="field-hint">Checking installed version…</p>
+            <button id="chooseRuntimeVersion" class="btn btn-secondary">Choose version…</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
           <h3 class="settings-section-title">Troubleshooting</h3>
           <div class="field">
             <label>Reset resource limits</label>
@@ -243,6 +253,22 @@
 
     </main>
   </div>
+
+  <!-- USER MODAL -->
+  <dialog id="releaseModal" class="license-modal release-modal" tabindex="-1">
+    <div class="license-modal-header">
+      <span class="license-modal-title">Choose Ligand-X version</span>
+      <button id="releaseModalClose" class="modal-close" aria-label="Close">✕</button>
+    </div>
+    <div class="license-modal-body">
+      <p class="field-hint">Only signed, supported stable releases are shown. Images are not downloaded until you confirm.</p>
+      <div id="releaseList" class="release-list"></div>
+      <div id="releaseError" class="inline-error"></div>
+    </div>
+    <div class="license-modal-footer">
+      <button id="releaseInstall" class="btn btn-primary btn-block" disabled>Use selected version</button>
+    </div>
+  </dialog>
 
   <!-- USER MODAL -->
   <dialog id="userModal" class="license-modal" tabindex="-1">

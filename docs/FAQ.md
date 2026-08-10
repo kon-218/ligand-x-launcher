@@ -71,10 +71,19 @@ and Docker/Compose diagnostics for a support case.
 
 ## How do updates work?
 
-The launcher checks the release source on a best-effort basis. **Update now**
-downloads and verifies the new runtime before advancing the local version.
-Network failure or rate limiting should not prevent use of the already-installed
-runtime.
+The launcher checks the release source on a best-effort basis. At startup you
+can choose **Update now**, **Choose version**, or **Not now**. Settings also
+shows the installed version and supported stable history.
+
+The version list is signed. Arbitrary tags, unsigned releases, Preview builds,
+and versions incompatible with the installed launcher are not selectable. A
+chosen runtime is verified before the local image version advances; the service
+selection screen then lets you confirm which images will be pulled. Network
+failure or rate limiting does not prevent use of the installed runtime.
+
+Downgrade is allowed only when the signed release index explicitly declares it
+safe for the installed version. Unknown rollback paths remain disabled to
+protect database and runtime compatibility.
 
 ## How do I back up results?
 
