@@ -572,19 +572,20 @@ jobs:
 
             ### Requirements
 
-            - **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux)
+            - **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux) — [install Docker](https://docs.docker.com/get-docker/)
             - Internet access to download the runtime bundle and selected Docker images
 
             ### Quick Start
 
-            1. Download the appropriate file for your operating system
+            1. Install and start Docker, then download the launcher for your OS
             2. Install/run the launcher:
                - **Windows**: Double-click `ligandx-windows-amd64.exe` (portable, no install)
                - **macOS**: Open DMG, drag app to Applications, launch from Applications
                - **Linux**: Make executable (`chmod +x *.AppImage`), double-click to run
-            3. Complete the first-run setup; the launcher downloads `ligand-x-runtime.zip` automatically
-            4. Select services and click "Install & Start"
-            5. Click "Open App" to access Ligand-X in your browser
+            3. Complete first-run setup (account → license → services); the launcher downloads `ligand-x-runtime.zip` automatically
+            4. Click **Download & continue**, then **Start services**
+            5. Click **Open Ligand-X** and log in with the account you created (default entry: `http://localhost:8080`)
+            6. First-launch docs: https://www.ligand-x.com/docs/first-launch/
 
             ### macOS Gatekeeper Note
 

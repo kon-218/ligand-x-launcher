@@ -25,6 +25,12 @@ const state = {
 };
 
 const ONBOARDING_STEPS = ["login", "license", "services", "pull"];
+const DOCS_FIRST_LAUNCH_URL = "https://www.ligand-x.com/docs/first-launch/";
+const DOCKER_INSTALL_URL = "https://docs.docker.com/get-docker/";
+
+function openExternal(url) {
+  try { App().OpenBrowser(url); } catch (e) { /* best-effort */ }
+}
 
 // ---------- tiny DOM helpers ----------
 const $ = (sel) => document.querySelector(sel);
@@ -111,8 +117,9 @@ async function preflight(onReady) {
   if (!dockerOk) {
     gate({
       icon: "🐳", title: "Docker isn't running",
-      msg: dockerMsg || "Start Docker Desktop (or the Docker engine), then try again.",
+      msg: dockerMsg || "Start Docker Desktop (or the Docker engine), then try again. If Docker is not installed yet, use Install Docker.",
       action: { label: "Try again", fn: () => preflight(onReady) },
+      secondary: { label: "Install Docker", fn: () => openExternal(DOCKER_INSTALL_URL) },
     });
     return;
   }
@@ -472,10 +479,11 @@ async function enterRunning(sub) {
   stopStatusPolling();
 
   if (sub === "idle") {
-    setRunHeader("○", "", "Ready to start", "Your services are installed.");
+    setRunHeader("○", "", "Ready to start", "Click Start services, then Open Ligand-X.");
     el("startBtn").hidden = false;
     el("stopBtn").hidden = true;
     el("openApp").disabled = true;
+    el("runTip").hidden = false;
     renderStatusList([]);
     // Reflect any already-running stack.
     refreshStatus();
@@ -565,11 +573,14 @@ async function refreshStatus() {
     setRunHeader("●", "up", "Ligand-X is running", `${running} of ${total} services up.`);
     el("startBtn").hidden = true;
     el("stopBtn").hidden = false;
+    el("runTip").hidden = false;
   } else if (running > 0) {
     setRunHeader("◐", "starting", "Starting services…", `${running} of ${total} services up.`);
     el("stopBtn").hidden = false;
+    el("runTip").hidden = true;
   } else if (!state.statusTimer) {
     // idle state with nothing running — leave the "ready to start" header.
+    el("runTip").hidden = false;
   }
 }
 
@@ -837,6 +848,8 @@ function wireEvents() {
   el("startBtn").onclick = startFromRunning;
   el("stopBtn").onclick = stopServices;
   el("changeServices").onclick = () => enterServices(true);
+  el("helpBtn").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
+  el("openDocs").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
   el("userBtn").onclick = openUserModal;
   el("userModalClose").onclick = () => el("userModal").close();
   el("userModal").addEventListener("click", (e) => { if (e.target === el("userModal")) el("userModal").close(); });
