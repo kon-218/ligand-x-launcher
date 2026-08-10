@@ -17,5 +17,8 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Check documentation boundary and links
+        run: python3 scripts/check_documentation.py
+
       - name: Run Go tests
         run: go test ./...

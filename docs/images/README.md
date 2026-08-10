@@ -12,7 +12,7 @@ Keep files reasonably small so the README loads fast on GitHub.
 | `logo.png`      | Header logo                    | 120×120 (square, transparent PNG)     | Ligand-X mark, exported from [build/appicon.svg](../../build/appicon.svg)           |
 | `hero.gif`      | Hero animation under the title | ~820px wide, up to about 8 MB, 5 to 8s loop | Download, install, open app flow (launcher window, then the browser opens localhost:3000) |
 | `first-run.png` | Screenshot gallery             | 1280×720 (16:9)                       | First-run setup wizard                                                              |
-| `modules.png`   | Screenshot gallery             | 1280×720 (16:9)                       | Module selection (open-core + Pro)                                                  |
+| `modules.png`   | Screenshot gallery             | 1280×720 (16:9)                       | Module selection (Free core + licensed Pro)                                         |
 | `services.png`  | Screenshot gallery             | 1280×720 (16:9)                       | Service monitoring / container status                                               |
 | `logs.png`      | Screenshot gallery             | 1280×720 (16:9)                       | Diagnostics / real-time logs                                                        |
 
@@ -36,4 +36,3 @@ Keep files reasonably small so the README loads fast on GitHub.
 (for example `gifsicle -O3 --lossy=80`, or an online optimizer) to stay under about 8 MB.
 - Use a consistent theme/window chrome across the four screenshots so the gallery
 looks cohesive.
-

@@ -16,7 +16,7 @@
 # by this Makefile - see .github/workflows/.
 # ============================================================
 
-.PHONY: help setup dev dev-public build build-public build-all runtime-bundle sync-runtime-topology check-runtime-topology pin-release validate-staging test fmt vet deps clean install-wails
+.PHONY: help setup dev dev-public build build-public build-all runtime-bundle sync-runtime-topology check-runtime-topology pin-release validate-staging test verify-docs fmt vet deps clean install-wails
 
 # ============================================================
 # Configuration
@@ -44,6 +44,7 @@ help:
 	@echo "  make fmt              - Format Go sources (go fmt)"
 	@echo "  make vet              - Static checks (go vet)"
 	@echo "  make test             - Run Go tests (go test ./...)"
+	@echo "  make verify-docs      - Check links and reject agent-session artifacts"
 	@echo ""
 	@echo "Build:"
 	@echo "  make build            - Build dev launcher for current platform -> build/bin/ligandx-launcher"
@@ -88,8 +89,11 @@ fmt:
 vet:
 	@go vet ./...
 
-test:
+test: verify-docs
 	@go test ./...
+
+verify-docs:
+	@python3 scripts/check_documentation.py
 
 # ============================================================
 # Build
