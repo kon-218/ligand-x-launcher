@@ -10,7 +10,7 @@ Keep files reasonably small so the README loads fast on GitHub.
 | File            | Used for                       | Recommended size                      | Caption / content                                                                   |
 | --------------- | ------------------------------ | ------------------------------------- | ----------------------------------------------------------------------------------- |
 | `logo.png`      | Header logo                    | 120×120 (square, transparent PNG)     | Ligand-X mark, exported from [build/appicon.svg](../../build/appicon.svg)           |
-| `hero.gif`      | Hero animation under the title | ~820px wide, up to about 8 MB, 5 to 8s loop | Download, install, open app flow (launcher window, then the browser opens localhost:3000) |
+| `hero.gif`      | Hero animation under the title | ~820px wide, up to about 8 MB, 5 to 8s loop | Download, install, open app flow (launcher window, then the browser opens localhost:8080) |
 | `first-run.png` | Screenshot gallery             | 1280×720 (16:9)                       | First-run setup wizard                                                              |
 | `modules.png`   | Screenshot gallery             | 1280×720 (16:9)                       | Module selection (Free core + licensed Pro)                                         |
 | `services.png`  | Screenshot gallery             | 1280×720 (16:9)                       | Service monitoring / container status                                               |

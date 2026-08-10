@@ -32,10 +32,11 @@ public launcher is intentionally unsupported.
 
 ## Which ports are used?
 
-The normal browser endpoints are frontend port 3000 and gateway port 8000. The
-Compose network also uses PostgreSQL 5432, Redis 6379, RabbitMQ 5672, and
-internal service ports. Do not expose database, broker, Redis, or service ports
-to an untrusted network.
+The supported browser entry is the same-origin proxy on `APP_PORT`, default
+8080. Direct frontend port 3000 and gateway port 8000 are loopback-bound
+development/diagnostic endpoints. The Compose network also uses PostgreSQL 5432,
+Redis 6379, RabbitMQ 5672, and internal service ports. Do not expose database,
+broker, Redis, direct frontend/gateway, or service ports to an untrusted network.
 
 ## Why is a module unavailable?
 

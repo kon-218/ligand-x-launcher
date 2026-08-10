@@ -11,15 +11,17 @@ edition; licensed modules use private Pro images.
 ## Install and start
 
 1. Install and start Docker Desktop, or Docker Engine with Compose v2 on Linux.
+   See [Docker's install docs](https://docs.docker.com/get-docker/).
 2. Download the launcher for your platform from
    [Releases](https://github.com/kon-218/ligand-x-launcher/releases).
-3. Open the launcher and complete the local login setup.
+3. Open the launcher and create your local account.
 4. Continue with Free or import a signed Academic/Pro license.
-5. Select modules and choose **Install & Start**.
+5. Select modules, choose **Download & continue**, then **Start services**.
+6. Click **Open Ligand-X** and log in with the account you created.
 
-The app opens at <http://localhost:3000>. Windows and Linux are the qualified
-launcher targets in the current release process. macOS builds are preview and
-cannot run NVIDIA-accelerated containers locally.
+The app opens at <http://localhost:8080> by default (`APP_PORT`). Windows and
+Linux are the qualified launcher targets in the current release process. macOS
+builds are preview and cannot run NVIDIA-accelerated containers locally.
 
 ## Public launcher functionality
 
