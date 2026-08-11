@@ -2752,3 +2752,37 @@ func TestInstalledRuntimeVersionReadsMarker(t *testing.T) {
 		t.Errorf("DistributionStatus.InstalledVersion = %q", got)
 	}
 }
+
+func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(".github", "workflows", "launcher-release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(data)
+	for _, required := range []string{
+		"run-name: Launcher ${{ inputs.version }} from product run ${{ inputs.orchestrator_run_id }}",
+		"orchestrator_run_id:",
+		"promote_latest:",
+		"make_latest: false",
+		`"platform_signing": platform_signing`,
+		`"recommended": recommended`,
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("launcher release workflow is missing %q", required)
+		}
+	}
+	if strings.Contains(workflow, "make_latest: ${{ inputs.channel == 'stable' }}") {
+		t.Fatal("launcher workflow must not promote GitHub latest independently")
+	}
+}
+
+func TestLauncherQualityRunsForMainPushes(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(".github", "workflows", "quality.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(data)
+	if !strings.Contains(workflow, "push:\n    branches: [main]") {
+		t.Fatal("launcher quality workflow must run for commits pushed to main")
+	}
+}

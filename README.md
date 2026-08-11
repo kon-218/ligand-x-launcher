@@ -49,6 +49,12 @@ The launcher verifies the signed manifest, version, size, and bundle digest and
 enforces rollback policy before extraction. Arbitrary `file://` bundle overrides
 are disabled in public builds.
 
+The signed runtime manifest records platform-signing evidence separately from
+artifact hashes. Windows builds may be distributed without Authenticode until a
+Microsoft-trusted certificate is available; release notes disclose that state
+and Windows clean-install qualification remains required. Users should expect a
+SmartScreen warning for an unsigned build.
+
 Installation credentials and worker secrets are generated locally. Pro image
 access uses license-aware, scoped registry credentials. Do not publish
 `.env.production`, license files, registry tokens, or diagnostic output that

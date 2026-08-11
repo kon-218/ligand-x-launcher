@@ -1,4 +1,5 @@
 name: Build & Release Public Launcher
+run-name: Launcher ${{ inputs.version }} from product run ${{ inputs.orchestrator_run_id }}
 
 on:
   workflow_dispatch:
@@ -29,6 +30,13 @@ on:
       rollback_safe_from:
         description: 'Comma-separated installed product versions explicitly qualified for rollback to this release.'
         required: false
+      orchestrator_run_id:
+        description: 'Unique central product-workflow run id used for exact dispatch correlation.'
+        required: true
+      promote_latest:
+        description: 'Mark this version recommended in its signed index; central workflow moves GitHub latest later.'
+        required: true
+        type: boolean
 
 permissions:
   contents: write
@@ -42,8 +50,8 @@ env:
   RUNTIME_BUNDLE_PUBLIC_KEY_B64: ${{ vars.LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 }}
 
 concurrency:
-  group: public-launcher-release-${{ github.ref }}
-  cancel-in-progress: true
+  group: public-launcher-release-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
   # ============================================================
@@ -531,6 +539,11 @@ jobs:
           MINIMUM_LAUNCHER_VERSION: ${{ inputs.reuse_from_version != '' && inputs.reuse_from_version || inputs.version }}
           REBUILT_COMPONENTS: ${{ inputs.rebuilt_components }}
           ROLLBACK_SAFE_FROM: ${{ inputs.rollback_safe_from }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          PROMOTE_LATEST: ${{ inputs.promote_latest }}
+          WINDOWS_AUTHENTICODE_SIGNED: ${{ needs.build-windows.outputs.signed }}
+          MACOS_DEVELOPER_ID_SIGNED: ${{ needs.build-macos-universal.outputs.signed }}
+          MACOS_NOTARIZED: ${{ needs.build-macos-universal.outputs.notarized }}
           SIGNING_PRIVATE_KEY_PEM_B64: ${{ secrets.LIGANDX_RUNTIME_SIGNING_PRIVATE_KEY_PEM_B64 }}
         run: |
           set -euo pipefail
@@ -581,13 +594,32 @@ jobs:
           for name, path in sorted(paths.items()):
               data = path.read_bytes()
               artifacts[name] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+          prior_release = {}
           prior_manifest = artifact_root / "prior-launcher" / "ligand-x-runtime-manifest.json"
           if prior_manifest.is_file():
-              prior_artifacts = json.loads(prior_manifest.read_text(encoding="utf-8")).get("artifacts", {})
+              prior_release = json.loads(prior_manifest.read_text(encoding="utf-8"))
+              prior_artifacts = prior_release.get("artifacts", {})
               reused = required_names - {"ligand-x-runtime.zip"}
               mismatched = sorted(name for name in reused if prior_artifacts.get(name) != artifacts.get(name))
               if mismatched:
                   raise SystemExit(f"reused launcher artifacts do not match the preceding signed manifest: {mismatched}")
+          if prior_manifest.is_file():
+              platform_signing = prior_release.get("platform_signing", {
+                  "windows": {"authenticode": False, "evidence": "legacy-manifest"},
+                  "macos": {"developer_id": False, "notarized": False, "evidence": "legacy-manifest"},
+              })
+          else:
+              platform_signing = {
+                  "windows": {
+                      "authenticode": os.environ.get("WINDOWS_AUTHENTICODE_SIGNED", "").lower() == "true",
+                      "evidence": "workflow-verification",
+                  },
+                  "macos": {
+                      "developer_id": os.environ.get("MACOS_DEVELOPER_ID_SIGNED", "").lower() == "true",
+                      "notarized": os.environ.get("MACOS_NOTARIZED", "").lower() == "true",
+                      "evidence": "workflow-verification",
+                  },
+              }
           release = {
               "schema": "ligandx-runtime-manifest/1",
               "version": os.environ["RELEASE_VERSION"],
@@ -598,6 +630,7 @@ jobs:
               "expires_at": (datetime.now(timezone.utc) + timedelta(days=365)).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
               "git_commit": os.environ["LAUNCHER_SHA"],
               "artifacts": artifacts,
+              "platform_signing": platform_signing,
           }
           output = artifact_root / "runtime" / "ligand-x-runtime-manifest.json"
           output.write_text(json.dumps(release, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -606,12 +639,13 @@ jobs:
           # trusts. Existing releases remain selectable without rebuilding;
           # downgrade permission stays empty until a release explicitly proves
           # database/runtime backward compatibility.
+          recommended = os.environ.get("PROMOTE_LATEST", "false").lower() == "true"
           entries = [{
               "version": os.environ["RELEASE_VERSION"],
               "publishedAt": release["issued_at"],
               "status": "supported",
-              "summary": "Latest stable Ligand-X release",
-              "recommended": True,
+              "summary": "Recommended stable Ligand-X release" if recommended else f"Ligand-X {os.environ['RELEASE_CHANNEL']} release",
+              "recommended": recommended,
               "downloadBytes": artifacts[bundle.name]["size"],
               "rebuiltComponents": [item for item in os.environ.get("REBUILT_COMPONENTS", "").split(",") if item],
               "rollbackSafeFrom": [item for item in os.environ.get("ROLLBACK_SAFE_FROM", "").split(",") if item],
@@ -621,6 +655,8 @@ jobs:
           prior_index = artifact_root / "prior-index" / "ligand-x-release-index.json"
           if prior_index.is_file():
               prior_entries = json.loads(prior_index.read_text(encoding="utf-8")).get("releases", [])
+              for entry in prior_entries:
+                  entry["recommended"] = False
               entries.extend(entry for entry in prior_entries if entry.get("version") != os.environ["RELEASE_VERSION"])
           history = json.loads((artifact_root / "github-releases.json").read_text(encoding="utf-8"))
           known = {entry["version"] for entry in entries}
@@ -686,7 +722,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           draft: false
           prerelease: ${{ inputs.channel != 'stable' }}
-          make_latest: ${{ inputs.channel == 'stable' }}
+          make_latest: false
           overwrite_files: false
           files: |
             artifacts/ligandx-linux-amd64.AppImage/ligandx-linux-amd64.AppImage
@@ -706,10 +742,10 @@ jobs:
 
             | Platform | File | Installation |
             |----------|------|--------------|
-            | **Windows** (64-bit) | `ligandx-windows-amd64.exe` | Portable ${{ needs.build-windows.outputs.signed == 'true' && 'Authenticode-signed' || '**unsigned**' }} binary — double-click to run (no install). No admin required.${{ needs.build-windows.outputs.signed == 'true' && '' || ' SmartScreen will warn: **More info → Run anyway**.' }} |
+            | **Windows** (64-bit) | `ligandx-windows-amd64.exe` | Portable binary — double-click to run (no install). Signing state is recorded in the signed runtime manifest; unsigned builds trigger SmartScreen (**More info → Run anyway**). |
             | **Runtime Bundle** | `ligand-x-runtime.zip` | Downloaded only after its signed manifest is verified |
             | **Signed checksums** | `ligand-x-runtime-manifest.json` + `.sig` | Ed25519-authenticated hashes for every release artifact |
-            | **macOS** (Intel + Apple Silicon) | `ligandx-darwin-universal.dmg` | ${{ needs.build-macos-universal.outputs.notarized == 'true' && 'Developer ID-signed, notarized, and stapled' || '**ad-hoc signed, not notarized**' }}. Open DMG, drag to Applications. |
+            | **macOS** (Intel + Apple Silicon) | `ligandx-darwin-universal.dmg` | Signing and notarization state is recorded in the signed runtime manifest. Open DMG, drag to Applications. |
             | **Linux** (64-bit) | `ligandx-linux-amd64.AppImage` | `chmod +x`, double-click to run |
 
             ### Requirements
