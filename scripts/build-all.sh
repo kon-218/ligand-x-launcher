@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build Ligand-X Launcher for all platforms
-# This script builds native binaries. For full packaging (AppImage, DMG, NSIS),
-# use the GitHub Actions CI/CD workflow instead.
+# This script builds only the raw binaries supported by the current host. The
+# central Pro release workflow dispatches native packaging on GitHub Actions.
 
 set -e
 
@@ -11,9 +11,8 @@ OUTPUT_DIR="dist"
 echo "Building Ligand-X Launcher v${VERSION}"
 echo "======================================="
 echo ""
-echo "Note: This script builds raw binaries only."
-echo "For proper installers (AppImage/DMG/NSIS), push a tag to trigger CI:"
-echo "  git tag launcher-v${VERSION} && git push origin launcher-v${VERSION}"
+echo "Note: This script builds raw binaries only and is not a release publisher."
+echo "Use ligand-x-pro's Unified Product Release workflow for release packaging."
 echo ""
 
 cd "$(dirname "$0")/.."
@@ -105,6 +104,4 @@ echo "======================================="
 echo "Build complete! Binaries in $OUTPUT_DIR/"
 ls -la "$OUTPUT_DIR/"
 echo ""
-echo "For proper installers, use GitHub Actions:"
-echo "  git tag launcher-v${VERSION}"
-echo "  git push origin launcher-v${VERSION}"
+echo "For release packaging, use ligand-x-pro's Unified Product Release workflow."

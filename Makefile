@@ -8,12 +8,12 @@
 #   make setup           - Install Wails build prerequisites
 #   make dev             - Run in dev mode with hot reload
 #   make build           - Build for the current platform
-#   make build-all       - Build native binaries for all platforms
+#   make build-all       - Best-effort raw binaries supported by this host
 #   make test            - Run Go tests
 #   make runtime-bundle  - Build the first-run runtime bundle zip
 #
-# Full installers (AppImage / DMG / NSIS) are produced by CI, not
-# by this Makefile - see .github/workflows/.
+# Packaged AppImage/DMG artifacts and the portable Windows release executable
+# are produced by the centrally-dispatched CI workflow, not this Makefile.
 # ============================================================
 
 .PHONY: help setup dev dev-public build build-public build-all runtime-bundle sync-runtime-topology check-runtime-topology pin-release validate-staging test verify-docs fmt vet deps clean install-wails
@@ -49,7 +49,7 @@ help:
 	@echo "Build:"
 	@echo "  make build            - Build dev launcher for current platform -> build/bin/ligandx-launcher"
 	@echo "  make build-public     - Build public launcher for current platform -> build/bin/ligandx"
-	@echo "  make build-all        - Native binaries for all platforms -> dist/"
+	@echo "  make build-all        - Best-effort raw binaries supported by this host -> dist/"
 	@echo "  make runtime-bundle   - Build and validate canonical ligand-x-runtime.zip -> dist/"
 	@echo "  make sync-runtime-topology - Regenerate launcher Compose snapshot + env template from public canonical"
 	@echo "  make check-runtime-topology - Fail if the Compose snapshot or env template has drifted"
@@ -57,7 +57,7 @@ help:
 	@echo "  make validate-staging - Start pinned prod images and verify all 25 services are healthy"
 	@echo "  make clean            - Remove build/bin, dist, and packaged artifacts"
 	@echo ""
-	@echo "Note: AppImage/DMG/NSIS installers are built in CI, not here."
+	@echo "Note: release packaging is dispatched only by the central Pro release workflow."
 
 # ============================================================
 # Setup
