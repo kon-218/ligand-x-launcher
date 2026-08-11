@@ -1,115 +1,108 @@
-# Frequently asked questions
+# Launcher FAQ
 
-General questions about installing and running Ligand-X with the launcher. For
-build/development questions, see [CONTRIBUTING.md](../CONTRIBUTING.md). For product
-info and downloads, see the [README](../README.md).
+## Which edition should I install?
 
-## Editions & licensing
+- Free requires no license file and provides the core runtime modules.
+- Academic uses a signed academic license and the entitlements it grants.
+- Pro uses a signed commercial license and its listed entitlements.
 
-### Which edition do I need: Free, Academic, or Pro?
+Importing a license later does not require reinstalling the launcher. It may
+require pulling additional private images.
 
+## Do I need a GPU?
 
-| Edition      | You need                         | You get                                                                                                                                                    |
-| ------------ | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Free**     | No license file                  | The full open-core workbench: projects, molecule library, Ketcher editing, Mol* viewing, protein cleaning, pocket finding, docking, MD, and MSA/alignment. |
-| **Academic** | A signed academic license file   | Everything in Free **plus all Pro modules** (QC, ADMET, Boltz-2, ABFE/RBFE, GenAI). Free for qualifying academic use.                                      |
-| **Pro**      | A signed commercial license file | Free plus the paid Pro entitlements listed in your license. Required for commercial use.                                                                   |
+Not for the smallest core topology. An NVIDIA GPU and working NVIDIA container
+runtime are required or strongly recommended for accelerated MD, Boltz-2,
+free-energy, and other GPU worker paths. macOS cannot provide NVIDIA container
+acceleration.
 
+## Where are runtime files stored?
 
-Start with Free. You can import a license later without reinstalling. [Compare Free and Pro](https://www.ligand-x.com/#pro) or [contact us](https://www.ligand-x.com/#contact) for an academic or commercial license.
+The launcher uses the platform user-config directory unless
+`LIGANDX_RUNTIME_DIR` is set in a controlled deployment. Results and databases
+live in Docker volumes/runtime directories, not in the launcher executable.
 
-### How do I import a license?
+## Can the public launcher install an offline local bundle?
 
-Open the launcher and use the license import step in the setup wizard (or the license panel). The file is a signed license; the launcher verifies it before unlocking the corresponding modules.
+No. Public builds reject arbitrary local and `file://` runtime-bundle URLs. They
+download from approved HTTPS release hosts and verify a signed manifest and
+digest. Offline/air-gapped deployment requires a separately controlled build or
+an approved internal distribution process; copying an unsigned ZIP into the
+public launcher is intentionally unsupported.
 
-### Can I use Ligand-X commercially?
+## Which ports are used?
 
-The public repository is licensed **PolyForm Noncommercial**. Commercial use and Pro modules require a Ligand-X Pro license. [Contact us](https://www.ligand-x.com/#contact) for commercial terms.
+The supported browser entry is the same-origin proxy on `APP_PORT`, default
+8080. Direct frontend port 3000 and gateway port 8000 are loopback-bound
+development/diagnostic endpoints. The Compose network also uses PostgreSQL 5432,
+Redis 6379, RabbitMQ 5672, and internal service ports. Do not expose database,
+broker, Redis, direct frontend/gateway, or service ports to an untrusted network.
 
-## Hardware & GPU
+## Why is a module unavailable?
 
-### Do I need a GPU?
+Check all four conditions:
 
-No. The open-core workbench (docking, MD on CPU, structure prep, and so on) runs without a GPU required, only as optional execution platform. A GPU is only required for GPU-accelerated modules such as **Boltz-2** and **ABFE/RBFE**.
+1. The installed runtime version contains the module.
+2. The license grants its entitlement.
+3. Preview/experimental modules are explicitly enabled where required.
+4. The machine satisfies engine/GPU requirements and the image pull succeeded.
 
-### How do I enable GPU acceleration?
+An API or settings field can exist while the corresponding preview capability is
+disabled.
 
-- **Linux:** install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
-- **Windows:** run Docker Desktop with the WSL 2 backend and set up [WSL 2 GPU passthrough](https://docs.nvidia.com/cuda/wsl-user-guide/index.html) + the NVIDIA Container Toolkit for WSL 2.
-- **macOS:** NVIDIA GPU acceleration is not available; GPU-only modules won't run.
+## Why did runtime installation fail?
 
-Only NVIDIA GPUs are supported for accelerated modules.
+Open the install log shown by the launcher. Common causes include Docker not
+running, insufficient disk, network/rate-limit errors, an invalid signature or
+digest, a blocked rollback, or incomplete extraction. The previous installed
+runtime is retained until verified replacement succeeds.
 
-## Installation & networking
+## Why will services not start?
 
-### Can I install offline / behind a firewall?
+- Confirm Docker is running and ports 3000/8000 are free.
+- Confirm selected images finished downloading.
+- Check GPU availability for selected GPU modules.
+- Reduce worker concurrency/resource settings on smaller machines.
+- Use **Reset to defaults** if manual resource edits prevent startup.
 
-The launcher normally downloads `ligand-x-runtime.zip` and the selected Docker images from the internet on first run. For offline or air-gapped installs, point it at a local bundle:
+The public launcher displays installation/start errors but does not ship the
+developer dashboard’s broad log-filter/export controls. Use the emitted setup log
+and Docker/Compose diagnostics for a support case.
 
-```bash
-export LIGANDX_RUNTIME_BUNDLE_URL=file:///path/to/ligand-x-runtime.zip
-```
+## How do updates work?
 
-You'll still need the Docker images available locally (pre-pulled or mirrored in an internal registry).
+The launcher checks the release source on a best-effort basis. At startup you
+can choose **Update now**, **Choose version**, or **Not now**. Settings also
+shows the installed version and supported stable history.
 
-### Which ports does Ligand-X use?
+The version list is signed. Arbitrary tags, unsigned releases, Preview builds,
+and versions incompatible with the installed launcher are not selectable. A
+chosen runtime is verified before the local image version advances; the service
+selection screen then lets you confirm which images will be pulled. Network
+failure or rate limiting does not prevent use of the installed runtime.
 
-Make sure these are free before starting:
+Downgrade is allowed only when the signed release index explicitly declares it
+safe for the installed version. Unknown rollback paths remain disabled to
+protect database and runtime compatibility.
 
+## How do I back up results?
 
-| Port | Service               |
-| ---- | --------------------- |
-| 3000 | Frontend (the app UI) |
-| 8000 | API gateway           |
-| 5432 | PostgreSQL database   |
-| 6379 | Redis                 |
-| 5672 | RabbitMQ              |
+Use the versioned backup command from the installed runtime before uninstalling
+or deleting Docker volumes. A qualified restore uses isolated staging and an
+explicit promotion; do not restore a plain SQL dump into the active database.
 
+## What does uninstall remove?
 
-If a port is in use, stop the conflicting process or the previous Ligand-X stack, then start again.
+The launcher requires explicit confirmation because uninstall can stop and
+remove Ligand-X containers, images, stored results, runtime files, and the
+launcher. Back up required results first. The exact confirmation screen is the
+authority for the current build.
 
-### Where does the launcher store data?
+## Platform warnings
 
-Runtime files are stored in your user config directory by default. To use a custom location, set `LIGANDX_RUNTIME_DIR` before launching. Advanced users can also point the launcher at a source checkout containing `docker-compose.yml` via the folder path in the footer.
+- macOS preview builds may require **Open anyway** because signing/notarization is
+  not yet part of the stable path.
+- Windows preview artifacts may trigger SmartScreen when unsigned.
+- Linux AppImage execution may require FUSE and executable permissions.
 
-## Running & updating
-
-### How do I open the app?
-
-After **Install & Start**, the launcher opens your browser at `[http://localhost:3000](http://localhost:3000)` automatically. You can also click **Open App** in the launcher.
-
-### How do I update to a new version?
-
-Download the latest launcher from [Releases](https://github.com/kon-218/ligand-x-launcher/releases) and replace your existing binary/app. The launcher manages runtime files and image updates on start.
-
-### How do I uninstall?
-
-Stop the stack from the launcher (or with **Clean** to remove Docker resources), then delete the launcher binary/app and the runtime directory. Removing Docker images is optional (`docker image prune` / remove the `ghcr.io/kon-218/ligand-x`* images).
-
-## Troubleshooting
-
-### macOS says the app is from an "unidentified developer"
-
-The app isn't code-signed with an Apple Developer certificate. Right-click the app → **Open** → **Open**, or allow it under System Settings → Privacy & Security → **Open Anyway**.
-
-### Windows SmartScreen warns about the .exe
-
-The binary is unsigned. Click **More info → Run anyway**. No admin rights are required.
-
-### The Linux AppImage won't launch
-
-Ensure FUSE is installed and the file is executable:
-
-```bash
-sudo apt-get install libfuse2   # Ubuntu/Debian
-chmod +x ligandx-linux-amd64.AppImage
-./ligandx-linux-amd64.AppImage
-```
-
-### Services won't start
-
-Check the launcher's logs panel, confirm the [required ports](#which-ports-does-ligand-x-use) are free, and try **Clean** to clear stale Docker resources. Make sure Docker is running (on Linux your user must be in the `docker` group).
-
----
-
-Still stuck? [Contact us](https://www.ligand-x.com/#contact) and include logs from the launcher's **Diagnostics** panel.
+For source builds, see [CONTRIBUTING.md](../CONTRIBUTING.md).

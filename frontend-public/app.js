@@ -22,9 +22,18 @@ const state = {
   statusTimer: null,
   pulling: false,
   proExpanded: false,    // whether the locked-Pro disclosure is open
+  pendingRuntimePull: false,
+  releaseOnDone: null,
+  releaseInstalled: "",
 };
 
 const ONBOARDING_STEPS = ["login", "license", "services", "pull"];
+const DOCS_FIRST_LAUNCH_URL = "https://www.ligand-x.com/docs/first-launch/";
+const DOCKER_INSTALL_URL = "https://docs.docker.com/get-docker/";
+
+function openExternal(url) {
+  try { App().OpenBrowser(url); } catch (e) { /* best-effort */ }
+}
 
 // ---------- tiny DOM helpers ----------
 const $ = (sel) => document.querySelector(sel);
@@ -74,7 +83,10 @@ async function boot() {
       setEdition(state.license && state.license.edition);
     } catch (e) { /* free by default */ }
 
-    if (state.config && state.config.firstRunDone) {
+    if (state.config && state.config.firstRunDone && state.pendingRuntimePull) {
+      state.pendingRuntimePull = false;
+      enterServices(true);
+    } else if (state.config && state.config.firstRunDone) {
       enterRunning("idle");
     } else {
       showScreen("login");
@@ -111,8 +123,9 @@ async function preflight(onReady) {
   if (!dockerOk) {
     gate({
       icon: "🐳", title: "Docker isn't running",
-      msg: dockerMsg || "Start Docker Desktop (or the Docker engine), then try again.",
+      msg: dockerMsg || "Start Docker Desktop (or the Docker engine), then try again. If Docker is not installed yet, use Install Docker.",
       action: { label: "Try again", fn: () => preflight(onReady) },
+      secondary: { label: "Install Docker", fn: () => openExternal(DOCKER_INSTALL_URL) },
     });
     return;
   }
@@ -132,6 +145,7 @@ async function preflight(onReady) {
       icon: "📦", title: "Set up runtime files",
       msg: dist.message || "Ligand-X needs to download its runtime files (~small) before the first launch.",
       action: { label: "Download runtime", fn: () => installRuntime(onReady) },
+      secondary: { label: "Choose version", fn: () => openReleaseSelector(onReady, false) },
     });
     return;
   }
@@ -142,8 +156,9 @@ async function preflight(onReady) {
       gate({
         icon: "⬆️", title: "Update available",
         msg: upd.message || ("A newer Ligand-X runtime (" + upd.latestVersion + ") is available."),
-        action: { label: "Update now", fn: () => installRuntime(onReady) },
-        secondary: { label: "Not now", fn: () => onReady() },
+        action: { label: "Update now", fn: () => installRuntime(onReady, upd.latestVersion, true) },
+        secondary: { label: "Choose version", fn: () => openReleaseSelector(onReady, true) },
+        tertiary: upd.updateRequired ? null : { label: "Not now", fn: () => onReady() },
       });
       return;
     }
@@ -156,16 +171,90 @@ async function preflight(onReady) {
   onReady();
 }
 
-async function installRuntime(onReady) {
+async function installRuntime(onReady, version = "", pullAfter = false) {
   gate({ spinner: true, title: "Downloading runtime…", msg: "This runs once.", log: true });
   clearGateLog();
   try {
-    await App().InstallRuntimeBundle();
+    if (version) await App().InstallRuntimeBundleVersion(version);
+    else await App().InstallRuntimeBundle();
+    state.pendingRuntimePull = pullAfter;
     onReady();
   } catch (e) {
     gate({ icon: "⚠️", title: "Download failed", msg: String(e), log: true,
-      action: { label: "Retry", fn: () => installRuntime(onReady) } });
+      action: { label: "Retry", fn: () => installRuntime(onReady, version, pullAfter) } });
   }
+}
+
+async function openReleaseSelector(onDone, pullAfter = true) {
+  state.releaseOnDone = { fn: onDone, pullAfter };
+  const modal = el("releaseModal");
+  const list = el("releaseList");
+  const install = el("releaseInstall");
+  list.textContent = "Loading signed stable releases…";
+  el("releaseError").textContent = "";
+  install.disabled = true;
+  install.dataset.version = "";
+  modal.showModal();
+  try {
+    try {
+      const distribution = await App().GetDistributionStatus();
+      state.releaseInstalled = distribution.installedVersion || "";
+    } catch (e) { state.releaseInstalled = ""; }
+    const releases = await App().ListRuntimeReleases();
+    list.textContent = "";
+    releases.forEach((release) => {
+      const label = document.createElement("label");
+      label.className = "release-option";
+      label.dataset.compatible = release.compatible ? "true" : "false";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "runtimeRelease";
+      radio.value = release.version;
+      radio.disabled = !release.compatible;
+      radio.onchange = () => {
+        install.dataset.version = release.version;
+        install.dataset.rollback = compareRuntimeVersions(release.version, state.releaseInstalled) < 0 ? "true" : "false";
+        install.disabled = false;
+        install.textContent = release.recommended ? "Update to recommended version" : "Use selected version";
+      };
+      const body = document.createElement("span");
+      body.className = "release-option-body";
+      const title = document.createElement("strong");
+      title.textContent = `${release.version}${release.recommended ? " · Recommended" : ""}`;
+      const summary = document.createElement("span");
+      summary.textContent = release.summary || release.compatibility || "Supported stable release";
+      const meta = document.createElement("small");
+      const size = release.downloadBytes ? ` · runtime ${(release.downloadBytes / 1048576).toFixed(1)} MB` : "";
+      const rebuilt = release.rebuiltComponents && release.rebuiltComponents.length ? ` · ${release.rebuiltComponents.length} rebuilt component${release.rebuiltComponents.length === 1 ? "" : "s"}` : "";
+      meta.textContent = `${release.status || "supported"}${size}${rebuilt}${release.compatible ? "" : " · " + release.compatibility}`;
+      body.append(title, summary, meta);
+      label.append(radio, body);
+      list.appendChild(label);
+    });
+  } catch (e) {
+    list.textContent = "";
+    el("releaseError").textContent = String(e).replace(/^Error:\s*/, "");
+  }
+}
+
+async function installSelectedRelease() {
+  const version = el("releaseInstall").dataset.version;
+  if (!version) return;
+  if (el("releaseInstall").dataset.rollback === "true") {
+    const confirmed = window.confirm("Roll back to " + version + "? Ligand-X will refuse if jobs are active and will create a database and scientific-artifact backup before changing runtime files.");
+    if (!confirmed) return;
+  }
+  const continuation = state.releaseOnDone || { fn: () => enterRunning("idle"), pullAfter: true };
+  el("releaseModal").close();
+  await installRuntime(continuation.fn, version, continuation.pullAfter);
+}
+
+function compareRuntimeVersions(left, right) {
+  const parse = (value) => String(value || "").replace(/^v/, "").split("-")[0].split(".").map(Number);
+  const a = parse(left), b = parse(right);
+  if (a.length !== 3 || b.length !== 3 || a.some(Number.isNaN) || b.some(Number.isNaN)) return 0;
+  for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1; }
+  return 0;
 }
 
 // gate({ spinner?, icon?, title, msg, action?:{label,fn}, log? })
@@ -192,6 +281,15 @@ function gate(opts) {
   } else {
     secondary.hidden = true;
     secondary.onclick = null;
+  }
+  const tertiary = el("gateTertiary");
+  if (opts.tertiary) {
+    tertiary.hidden = false;
+    tertiary.textContent = opts.tertiary.label;
+    tertiary.onclick = opts.tertiary.fn;
+  } else {
+    tertiary.hidden = true;
+    tertiary.onclick = null;
   }
   el("gateLog").hidden = !opts.log;
 }
@@ -472,10 +570,11 @@ async function enterRunning(sub) {
   stopStatusPolling();
 
   if (sub === "idle") {
-    setRunHeader("○", "", "Ready to start", "Your services are installed.");
+    setRunHeader("○", "", "Ready to start", "Click Start services, then Open Ligand-X.");
     el("startBtn").hidden = false;
     el("stopBtn").hidden = true;
     el("openApp").disabled = true;
+    el("runTip").hidden = false;
     renderStatusList([]);
     // Reflect any already-running stack.
     refreshStatus();
@@ -565,11 +664,14 @@ async function refreshStatus() {
     setRunHeader("●", "up", "Ligand-X is running", `${running} of ${total} services up.`);
     el("startBtn").hidden = true;
     el("stopBtn").hidden = false;
+    el("runTip").hidden = false;
   } else if (running > 0) {
     setRunHeader("◐", "starting", "Starting services…", `${running} of ${total} services up.`);
     el("stopBtn").hidden = false;
+    el("runTip").hidden = true;
   } else if (!state.statusTimer) {
     // idle state with nothing running — leave the "ready to start" header.
+    el("runTip").hidden = false;
   }
 }
 
@@ -734,6 +836,12 @@ async function enterSettings() {
   el("settingsError").textContent = "";
   el("settingsSaved").hidden = true;
   await loadSettings();
+  try {
+    const dist = await App().GetDistributionStatus();
+    el("installedRuntimeVersion").textContent = dist.installedVersion ? `Installed: ${dist.installedVersion}` : "No runtime version is recorded.";
+  } catch (e) {
+    el("installedRuntimeVersion").textContent = "Installed version could not be read.";
+  }
   updateSettingsSections();
 }
 
@@ -817,6 +925,9 @@ function appendLog(box, line) {
 
 // ---------- wiring ----------
 function wireEvents() {
+  el("releaseModalClose").onclick = () => el("releaseModal").close();
+  el("releaseModal").addEventListener("click", (e) => { if (e.target === el("releaseModal")) el("releaseModal").close(); });
+  el("releaseInstall").onclick = installSelectedRelease;
   el("editionBadge").onclick = openLicenseModal;
   el("licenseModalClose").onclick = () => el("licenseModal").close();
   el("licenseModal").addEventListener("click", (e) => { if (e.target === el("licenseModal")) el("licenseModal").close(); });
@@ -837,6 +948,8 @@ function wireEvents() {
   el("startBtn").onclick = startFromRunning;
   el("stopBtn").onclick = stopServices;
   el("changeServices").onclick = () => enterServices(true);
+  el("helpBtn").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
+  el("openDocs").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
   el("userBtn").onclick = openUserModal;
   el("userModalClose").onclick = () => el("userModal").close();
   el("userModal").addEventListener("click", (e) => { if (e.target === el("userModal")) el("userModal").close(); });
@@ -850,6 +963,7 @@ function wireEvents() {
   el("openSettings").onclick = enterSettings;
   el("settingsBackTop").onclick = () => enterRunning("idle");
   el("settingsSave").onclick = saveSettings;
+  el("chooseRuntimeVersion").onclick = () => openReleaseSelector(() => enterServices(true), true);
   el("resetResources").onclick = resetResourceLimits;
   el("openUninstall").onclick = openUninstallModal;
   el("uninstallModalClose").onclick = () => el("uninstallModal").close();

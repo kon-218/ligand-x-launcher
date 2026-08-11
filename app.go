@@ -144,7 +144,33 @@ type RuntimeUpdateStatus struct {
 	InstalledVersion string `json:"installedVersion"`
 	LatestVersion    string `json:"latestVersion"`
 	UpdateAvailable  bool   `json:"updateAvailable"`
+	UpdateRequired   bool   `json:"updateRequired"`
 	Message          string `json:"message"`
+}
+
+// RuntimeRelease is a launcher-safe entry from the signed stable release
+// index. The backend re-resolves the selected version from the authenticated
+// index; it never accepts a URL or image tag supplied by the UI.
+type RuntimeRelease struct {
+	Version           string   `json:"version"`
+	PublishedAt       string   `json:"publishedAt"`
+	Status            string   `json:"status"`
+	Summary           string   `json:"summary"`
+	Recommended       bool     `json:"recommended"`
+	Compatible        bool     `json:"compatible"`
+	Compatibility     string   `json:"compatibility"`
+	DownloadBytes     int64    `json:"downloadBytes"`
+	RebuiltComponents []string `json:"rebuiltComponents"`
+	RollbackSafeFrom  []string `json:"rollbackSafeFrom"`
+	MinimumLauncher   string   `json:"minimumLauncherVersion"`
+	BundleURL         string   `json:"bundleUrl"`
+}
+
+type runtimeReleaseIndex struct {
+	Schema    string           `json:"schema"`
+	IssuedAt  string           `json:"issued_at"`
+	ExpiresAt string           `json:"expires_at"`
+	Releases  []RuntimeRelease `json:"releases"`
 }
 
 type LicenseSummary struct {
@@ -252,6 +278,8 @@ const latestReleaseAPIURL = "https://api.github.com/repos/kon-218/ligand-x-launc
 
 const runtimeBundleManifestAssetName = "ligand-x-runtime-manifest.json"
 const runtimeBundleSignatureAssetName = "ligand-x-runtime-manifest.sig"
+const runtimeReleaseIndexAssetName = "ligand-x-release-index.json"
+const runtimeReleaseIndexSignatureAssetName = "ligand-x-release-index.sig"
 const runtimeBundleMaxDownloadBytes int64 = 256 * 1024 * 1024
 const runtimeBundleMaxExpandedBytes uint64 = 1024 * 1024 * 1024
 const runtimeBundleMaxFiles = 128
@@ -259,6 +287,10 @@ const runtimeBundleMaxFiles = 128
 // Injected into public builds with: -ldflags "-X main.runtimeBundlePublicKeyB64=<base64 raw Ed25519 public key>".
 // A public build without a trust root fails closed before downloading a runtime bundle.
 var runtimeBundlePublicKeyB64 string
+
+// Injected by production builds. The fallback matches the last runtime known
+// to older build scripts, while CI always supplies the product release.
+var launcherVersion = defaultPinnedImageVersion
 
 type runtimeReleaseArtifact struct {
 	SHA256 string `json:"sha256"`
@@ -509,10 +541,10 @@ func (a *App) runtimeBundleURL() string {
 // download URL of the runtime bundle asset attached to the latest release.
 // GitHub's /releases/latest/download/<asset> redirect is unreliable on some
 // Windows HTTP clients, so we resolve the concrete asset URL explicitly.
-func resolveLatestRuntimeBundleURL() (string, string, error) {
+func resolveLatestReleaseAssets(wanted ...string) (map[string]string, string, error) {
 	req, err := http.NewRequest(http.MethodGet, latestReleaseAPIURL, nil)
 	if err != nil {
-		return "", "", err
+		return nil, "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "ligand-x-launcher")
@@ -520,11 +552,11 @@ func resolveLatestRuntimeBundleURL() (string, string, error) {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", "", err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("GitHub releases API returned HTTP %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("GitHub releases API returned HTTP %d", resp.StatusCode)
 	}
 
 	var release struct {
@@ -535,15 +567,32 @@ func resolveLatestRuntimeBundleURL() (string, string, error) {
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", "", fmt.Errorf("failed to parse GitHub releases response: %w", err)
+		return nil, "", fmt.Errorf("failed to parse GitHub releases response: %w", err)
 	}
-
+	wantedSet := make(map[string]bool, len(wanted))
+	for _, name := range wanted {
+		wantedSet[name] = true
+	}
+	found := make(map[string]string, len(wanted))
 	for _, asset := range release.Assets {
-		if asset.Name == runtimeBundleAssetName && strings.TrimSpace(asset.BrowserDownloadURL) != "" {
-			return asset.BrowserDownloadURL, strings.TrimSpace(release.TagName), nil
+		if wantedSet[asset.Name] && strings.TrimSpace(asset.BrowserDownloadURL) != "" {
+			found[asset.Name] = asset.BrowserDownloadURL
 		}
 	}
-	return "", "", fmt.Errorf("asset %q not found in latest release %q", runtimeBundleAssetName, release.TagName)
+	for _, name := range wanted {
+		if found[name] == "" {
+			return nil, "", fmt.Errorf("asset %q not found in latest release %q", name, release.TagName)
+		}
+	}
+	return found, strings.TrimSpace(release.TagName), nil
+}
+
+func resolveLatestRuntimeBundleURL() (string, string, error) {
+	assets, tag, err := resolveLatestReleaseAssets(runtimeBundleAssetName)
+	if err != nil {
+		return "", "", err
+	}
+	return assets[runtimeBundleAssetName], tag, nil
 }
 
 func companionRuntimeAssetURL(bundleURL, assetName string) (string, error) {
@@ -630,6 +679,128 @@ func verifyRuntimeBundleManifest(manifestBytes, signatureBytes []byte, expectedT
 		return runtimeBundleManifest{}, fmt.Errorf("invalid runtime manifest source commit")
 	}
 	return manifest, nil
+}
+
+func verifyRuntimeReleaseIndex(indexBytes, signatureBytes []byte) (runtimeReleaseIndex, error) {
+	publicKey, err := decodeRuntimeBundlePublicKey(runtimeBundlePublicKeyB64)
+	if err != nil {
+		return runtimeReleaseIndex{}, fmt.Errorf("runtime release trust root is not configured: %w", err)
+	}
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(signatureBytes)))
+	if err != nil || len(signature) != ed25519.SignatureSize || !ed25519.Verify(publicKey, indexBytes, signature) {
+		return runtimeReleaseIndex{}, fmt.Errorf("release index signature verification failed")
+	}
+	var index runtimeReleaseIndex
+	decoder := json.NewDecoder(bytes.NewReader(indexBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&index); err != nil {
+		return runtimeReleaseIndex{}, fmt.Errorf("invalid release index: %w", err)
+	}
+	if index.Schema != "ligandx-release-index/1" || len(index.Releases) == 0 {
+		return runtimeReleaseIndex{}, fmt.Errorf("unsupported or empty release index")
+	}
+	issuedAt, err := time.Parse(time.RFC3339, index.IssuedAt)
+	if err != nil || issuedAt.After(time.Now().UTC().Add(5*time.Minute)) {
+		return runtimeReleaseIndex{}, fmt.Errorf("invalid release index issuance time")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, index.ExpiresAt)
+	if err != nil || !expiresAt.After(issuedAt) || time.Now().UTC().After(expiresAt) {
+		return runtimeReleaseIndex{}, fmt.Errorf("release index is expired or has invalid expiry")
+	}
+	seen := map[string]bool{}
+	recommended := 0
+	for i := range index.Releases {
+		release := &index.Releases[i]
+		if !isPinnedImageVersion(release.Version) || seen[release.Version] {
+			return runtimeReleaseIndex{}, fmt.Errorf("invalid or duplicate release version")
+		}
+		seen[release.Version] = true
+		if release.Status != "supported" && release.Status != "deprecated" && release.Status != "revoked" {
+			return runtimeReleaseIndex{}, fmt.Errorf("invalid status for release %s", release.Version)
+		}
+		if _, err := approvedRuntimeDownloadURL(release.BundleURL); err != nil {
+			return runtimeReleaseIndex{}, fmt.Errorf("release %s has invalid bundle URL: %w", release.Version, err)
+		}
+		if release.DownloadBytes <= 0 || release.DownloadBytes > runtimeBundleMaxDownloadBytes {
+			return runtimeReleaseIndex{}, fmt.Errorf("release %s has invalid download size", release.Version)
+		}
+		for _, sourceVersion := range release.RollbackSafeFrom {
+			if !isPinnedImageVersion(sourceVersion) {
+				return runtimeReleaseIndex{}, fmt.Errorf("release %s has invalid rollback source", release.Version)
+			}
+		}
+		if release.Recommended {
+			recommended++
+		}
+		compatible := release.Status != "revoked"
+		message := "Compatible"
+		if release.MinimumLauncher != "" {
+			comparison, comparable := compareReleaseVersions(launcherVersion, release.MinimumLauncher)
+			if !comparable || comparison < 0 {
+				compatible = false
+				message = "Requires launcher " + release.MinimumLauncher + " or newer"
+			}
+		}
+		if release.Status == "revoked" {
+			compatible = false
+			message = "This release has been revoked"
+		}
+		release.Compatible = compatible
+		release.Compatibility = message
+	}
+	if recommended != 1 {
+		return runtimeReleaseIndex{}, fmt.Errorf("release index must identify exactly one recommended release")
+	}
+	return index, nil
+}
+
+// ListRuntimeReleases returns authenticated stable release choices. Older
+// servers without an index retain the latest-only behavior; the selected
+// runtime manifest is still signature-verified during installation.
+func (a *App) ListRuntimeReleases() ([]RuntimeRelease, error) {
+	assets, tag, err := resolveLatestReleaseAssets(runtimeReleaseIndexAssetName, runtimeReleaseIndexSignatureAssetName)
+	if err != nil {
+		bundleURL, latest, latestErr := resolveLatestRuntimeBundleURL()
+		if latestErr != nil {
+			return nil, err
+		}
+		version := strings.TrimPrefix(latest, "launcher-")
+		return []RuntimeRelease{{Version: version, Status: "supported", Summary: "Latest stable release", Recommended: true, Compatible: true, Compatibility: "Compatible", BundleURL: bundleURL}}, nil
+	}
+	tempDir, err := os.MkdirTemp("", "ligandx-release-index-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tempDir)
+	indexPath := filepath.Join(tempDir, runtimeReleaseIndexAssetName)
+	signaturePath := filepath.Join(tempDir, runtimeReleaseIndexSignatureAssetName)
+	if err := downloadFileLimited(assets[runtimeReleaseIndexAssetName], indexPath, 2*1024*1024); err != nil {
+		return nil, err
+	}
+	if err := downloadFileLimited(assets[runtimeReleaseIndexSignatureAssetName], signaturePath, 4096); err != nil {
+		return nil, err
+	}
+	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil {
+		return nil, err
+	}
+	signatureBytes, err := os.ReadFile(signaturePath)
+	if err != nil {
+		return nil, err
+	}
+	index, err := verifyRuntimeReleaseIndex(indexBytes, signatureBytes)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(index.Releases, func(left, right RuntimeRelease) int {
+		comparison, comparable := compareReleaseVersions(left.Version, right.Version)
+		if !comparable {
+			return strings.Compare(right.Version, left.Version)
+		}
+		return -comparison
+	})
+	_ = tag
+	return index.Releases, nil
 }
 
 func verifyRuntimeBundleFile(path string, manifest runtimeBundleManifest) error {
@@ -724,13 +895,30 @@ func installedRuntimeVersion(runtimeDir string) string {
 func (a *App) CheckForRuntimeUpdate() RuntimeUpdateStatus {
 	current := installedRuntimeVersion(a.projectPath)
 	status := RuntimeUpdateStatus{InstalledVersion: current}
-
-	_, latest, err := resolveLatestRuntimeBundleURL()
+	releases, err := a.ListRuntimeReleases()
 	if err != nil {
 		status.Message = "Could not check for updates: " + err.Error()
 		return status
 	}
+	latest := ""
+	for _, release := range releases {
+		if release.Version == current && release.Status == "revoked" {
+			status.UpdateAvailable = true
+			status.UpdateRequired = true
+			status.Message = "Installed runtime " + current + " has been revoked and must be replaced."
+		}
+		if release.Recommended {
+			latest = release.Version
+		}
+	}
+	if latest == "" {
+		status.Message = "Signed release index has no recommended compatible release."
+		return status
+	}
 	status.LatestVersion = latest
+	if status.UpdateRequired {
+		return status
+	}
 
 	if current == "" {
 		// No marker: an older install that predates version tracking. Offer the
@@ -792,6 +980,138 @@ func (a *App) GetDistributionStatus() DistributionStatus {
 }
 
 func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
+	return a.installRuntimeBundleSelected("", "", false)
+}
+
+// InstallRuntimeBundleVersion installs a release chosen from the signed stable
+// index. Downgrades are accepted only when that index explicitly permits the
+// installed version as a safe rollback source.
+func (a *App) InstallRuntimeBundleVersion(version string) (DistributionStatus, error) {
+	version = strings.TrimSpace(version)
+	releases, err := a.ListRuntimeReleases()
+	if err != nil {
+		return a.GetDistributionStatus(), err
+	}
+	for _, release := range releases {
+		if release.Version != version {
+			continue
+		}
+		if !release.Compatible || release.Status == "revoked" {
+			return a.GetDistributionStatus(), fmt.Errorf("release %s is not compatible: %s", version, release.Compatibility)
+		}
+		allowRollback := false
+		current := installedRuntimeVersion(a.projectPath)
+		if comparison, comparable := compareReleaseVersions(version, current); current != "" && comparable && comparison < 0 {
+			if !slices.Contains(release.RollbackSafeFrom, current) {
+				return a.GetDistributionStatus(), fmt.Errorf("runtime downgrade rejected: %s is not declared safe from %s", version, current)
+			}
+			allowRollback = true
+			if _, err := a.createPreRollbackBackup(current, version); err != nil {
+				return a.GetDistributionStatus(), fmt.Errorf("rollback backup failed; runtime was not changed: %w", err)
+			}
+		}
+		return a.installRuntimeBundleSelected(release.BundleURL, release.Version, allowRollback)
+	}
+	return a.GetDistributionStatus(), fmt.Errorf("release %q is not present in the signed stable index", version)
+}
+
+func (a *App) rollbackComposeCommand(arguments ...string) *exec.Cmd {
+	args := []string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml"}
+	args = append(args, arguments...)
+	cmd := exec.Command("docker", args...)
+	cmd.Dir = a.projectPath
+	cmd.Env = a.composeEnv()
+	return cmd
+}
+
+// createPreRollbackBackup blocks active work and captures the database plus
+// scientific artifacts before an explicitly authorized downgrade. Failure is
+// fail-closed: no runtime files or version pins have changed at this point.
+func (a *App) createPreRollbackBackup(currentVersion, targetVersion string) (string, error) {
+	query := "SELECT count(*) FROM jobs WHERE status IN ('pending','queued','running','processing','preparing');"
+	countBytes, err := a.rollbackComposeCommand("exec", "-T", "postgres", "psql", "-U", "ligandx", "-d", "ligandx", "-Atc", query).Output()
+	if err != nil {
+		return "", fmt.Errorf("could not verify active jobs (the current stack must be running): %w", err)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(countBytes)))
+	if err != nil {
+		return "", fmt.Errorf("invalid active-job count")
+	}
+	if count > 0 {
+		return "", fmt.Errorf("%d active job(s) must finish or be cancelled first", count)
+	}
+
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	backupDir := filepath.Join(a.projectPath, "backups", "pre-rollback-"+stamp)
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
+		return "", err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(backupDir)
+		}
+	}()
+	writeCommand := func(path string, cmd *exec.Cmd) error {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		cmd.Stdout = file
+		cmd.Stderr = &bytes.Buffer{}
+		runErr := cmd.Run()
+		closeErr := file.Close()
+		if runErr != nil {
+			return runErr
+		}
+		return closeErr
+	}
+	databasePath := filepath.Join(backupDir, "ligandx.dump")
+	if err := writeCommand(databasePath, a.rollbackComposeCommand("exec", "-T", "postgres", "pg_dump", "-U", "ligandx", "-Fc", "ligandx")); err != nil {
+		return "", fmt.Errorf("database dump failed: %w", err)
+	}
+	artifactPath := filepath.Join(backupDir, "scientific-artifacts.tar.gz")
+	if err := writeCommand(artifactPath, a.rollbackComposeCommand("exec", "-T", "gateway", "tar", "-C", "/app/data/scientific_artifacts", "-czf", "-", ".")); err != nil {
+		return "", fmt.Errorf("scientific artifact backup failed: %w", err)
+	}
+	digest := func(path string) (string, error) {
+		file, err := os.Open(path)
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+		hash := sha256.New()
+		if _, err := io.Copy(hash, file); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(hash.Sum(nil)), nil
+	}
+	databaseDigest, err := digest(databasePath)
+	if err != nil {
+		return "", err
+	}
+	artifactDigest, err := digest(artifactPath)
+	if err != nil {
+		return "", err
+	}
+	manifest := map[string]any{
+		"schema": "ligandx-pre-rollback-backup/1", "created_at": time.Now().UTC().Format(time.RFC3339),
+		"from_version": currentVersion, "to_version": targetVersion,
+		"files": map[string]string{"ligandx.dump": databaseDigest, "scientific-artifacts.tar.gz": artifactDigest},
+	}
+	payload, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := writePrivateFile(filepath.Join(backupDir, "manifest.json"), append(payload, '\n')); err != nil {
+		return "", err
+	}
+	ok = true
+	a.emitAndLog("launcher", "Created pre-rollback backup at "+backupDir)
+	return backupDir, nil
+}
+
+func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, allowRollback bool) (DistributionStatus, error) {
 	runtimeDir, err := a.defaultRuntimeDir()
 	if err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("could not determine runtime directory: %w", err)
@@ -810,12 +1130,19 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to create runtime directory: %w", err)
 	}
+	stageRoot, err := os.MkdirTemp("", "ligandx-runtime-stage-")
+	if err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("failed to create runtime staging directory: %w", err)
+	}
+	defer os.RemoveAll(stageRoot)
 
 	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: "Installing Ligand-X runtime files...", Timestamp: time.Now().Format("15:04:05")})
 
-	var bundleURL string
-	var releaseTag string
-	if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
+	bundleURL := strings.TrimSpace(selectedURL)
+	releaseTag := strings.TrimSpace(selectedVersion)
+	if bundleURL != "" {
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
+	} else if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
 		bundleURL = override
 	} else if resolved, tag, resolveErr := resolveLatestRuntimeBundleURL(); resolveErr == nil {
 		bundleURL = resolved
@@ -834,8 +1161,8 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 	if err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to resolve runtime signature URL: %w", err)
 	}
-	manifestPath := filepath.Join(runtimeDir, runtimeBundleManifestAssetName)
-	signaturePath := filepath.Join(runtimeDir, runtimeBundleSignatureAssetName)
+	manifestPath := filepath.Join(stageRoot, runtimeBundleManifestAssetName)
+	signaturePath := filepath.Join(stageRoot, runtimeBundleSignatureAssetName)
 	if err := downloadFileLimited(manifestURL, manifestPath, 64*1024); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to download signed runtime manifest: %w", err)
 	}
@@ -857,13 +1184,15 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 	if err != nil {
 		return a.GetDistributionStatus(), err
 	}
-	if err := enforceRuntimeRollbackPolicy(runtimeDir, manifest.Version); err != nil {
-		return a.GetDistributionStatus(), err
+	if !allowRollback {
+		if err := enforceRuntimeRollbackPolicy(runtimeDir, manifest.Version); err != nil {
+			return a.GetDistributionStatus(), err
+		}
 	}
 	releaseTag = manifest.Version
 
 	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Downloading verified runtime bundle %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
-	zipPath := filepath.Join(runtimeDir, runtimeBundleAssetName)
+	zipPath := filepath.Join(stageRoot, runtimeBundleAssetName)
 	if err := downloadFileLimited(bundleURL, zipPath, manifest.Size); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to download runtime bundle from %s: %w", bundleURL, err)
 	}
@@ -871,12 +1200,35 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 	if err := verifyRuntimeBundleFile(zipPath, manifest); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("runtime bundle verification failed: %w", err)
 	}
-	if err := extractRuntimeBundle(zipPath, runtimeDir); err != nil {
+	extractedDir := filepath.Join(stageRoot, "extracted")
+	if err := os.MkdirAll(extractedDir, 0755); err != nil {
+		return a.GetDistributionStatus(), err
+	}
+	if err := extractRuntimeBundle(zipPath, extractedDir); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to extract runtime bundle: %w", err)
 	}
-	if err := writePrivateFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"), []byte(releaseTag+"\n")); err != nil {
-		return a.GetDistributionStatus(), fmt.Errorf("failed to persist runtime version: %w", err)
+	rollback, err := activateRuntimeStage(extractedDir, runtimeDir, filepath.Join(stageRoot, "backup"))
+	if err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("failed to activate staged runtime: %w", err)
 	}
+	envPath := filepath.Join(runtimeDir, ".env.production")
+	oldEnv, oldEnvErr := os.ReadFile(envPath)
+	oldEnvMode := os.FileMode(0600)
+	if info, statErr := os.Stat(envPath); statErr == nil {
+		oldEnvMode = info.Mode().Perm()
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		rollback()
+		if oldEnvErr == nil {
+			_ = os.WriteFile(envPath, oldEnv, oldEnvMode)
+		} else if os.IsNotExist(oldEnvErr) {
+			_ = os.Remove(envPath)
+		}
+	}()
 
 	a.projectPath = runtimeDir
 	if err := a.ensureProductionEnv(); err != nil {
@@ -886,13 +1238,17 @@ func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
 		content, readErr := a.GetEnvContent("prod")
 		if readErr == nil {
 			current := strings.TrimSpace(parseEnvFile(content)["VERSION"])
-			if shouldAdvanceVersion(current, releaseTag) {
-				if setErr := a.setProductionEnvValue("VERSION", releaseTag); setErr == nil {
-					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Pinned VERSION=%s in .env.production", releaseTag), Timestamp: time.Now().Format("15:04:05")})
+			if allowRollback || shouldAdvanceVersion(current, releaseTag) {
+				if setErr := a.setProductionEnvValues(map[string]string{"VERSION": releaseTag, "PRO_VERSION": releaseTag}); setErr == nil {
+					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Pinned product images to %s in .env.production", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 				}
 			}
 		}
 	}
+	if err := writePrivateFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"), []byte(releaseTag+"\n")); err != nil {
+		return a.GetDistributionStatus(), fmt.Errorf("failed to persist runtime version: %w", err)
+	}
+	committed = true
 	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Runtime installed at %s", runtimeDir), Timestamp: time.Now().Format("15:04:05")})
 	return a.GetDistributionStatus(), nil
 }
@@ -1123,6 +1479,87 @@ func extractRuntimeBundle(zipPath, destDir string) error {
 		if !present {
 			return fmt.Errorf("runtime bundle is missing required file: %s", name)
 		}
+	}
+	return nil
+}
+
+// activateRuntimeStage copies a fully verified/extracted bundle into the
+// managed runtime one file at a time, retaining originals until the caller
+// commits. It never touches .env.production, Docker volumes, or user results.
+func activateRuntimeStage(stageDir, destDir, backupDir string) (func(), error) {
+	type activatedFile struct {
+		target  string
+		backup  string
+		existed bool
+	}
+	activated := []activatedFile{}
+	rollback := func() {
+		for index := len(activated) - 1; index >= 0; index-- {
+			item := activated[index]
+			if item.existed {
+				_ = copyFileAtomic(item.backup, item.target, 0644)
+			} else {
+				_ = os.Remove(item.target)
+			}
+		}
+	}
+	err := filepath.Walk(stageDir, func(source string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(stageDir, source)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destDir, relative)
+		backup := filepath.Join(backupDir, relative)
+		item := activatedFile{target: target, backup: backup}
+		if current, statErr := os.Stat(target); statErr == nil {
+			if current.IsDir() {
+				return fmt.Errorf("runtime file collides with a directory: %s", relative)
+			}
+			item.existed = true
+			if err := copyFileAtomic(target, backup, current.Mode().Perm()); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+		activated = append(activated, item)
+		if err := copyFileAtomic(source, target, info.Mode().Perm()); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		rollback()
+		return func() {}, err
+	}
+	return rollback, nil
+}
+
+func copyFileAtomic(source, target string, mode os.FileMode) error {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return err
+	}
+	temporary := target + ".ligandx-new"
+	if err := os.WriteFile(temporary, data, mode); err != nil {
+		return err
+	}
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(temporary)
+		return err
+	}
+	if err := os.Rename(temporary, target); err != nil {
+		_ = os.Remove(temporary)
+		return err
 	}
 	return nil
 }
