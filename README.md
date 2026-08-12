@@ -1,19 +1,14 @@
-<p align="center">
-  <img src="docs/images/logo.png" alt="Ligand-X" width="96" height="96">
-</p>
-
 # Ligand-X Launcher
 
-**Local drug-discovery workstation — install once, run on your machine.**
+Desktop installer for Ligand-X on Windows, Linux, and macOS. It downloads a signed
+runtime, pulls the images you select, starts the Docker stack, and opens the app
+in your browser.
 
-[Ligand-X Inc.](https://www.ligand-x.com) builds Ligand-X, a computational chemistry
-platform for structure preparation, docking, molecular dynamics, and related
-workflows. The launcher is the supported desktop entry point for Windows, Linux,
-and macOS: it installs a signed runtime, pulls the images you need, starts the
-stack, and opens the app in your browser.
+Core images cover the Free edition. Academic and Pro modules need a signed
+license and private images.
 
 <p align="center">
-  <img src="docs/images/ligand-x-app-ui.png" alt="Ligand-X application UI — protein cleaning with 3D viewer" width="920">
+  <img src="docs/images/ligand-x-app-ui.png" alt="Ligand-X application UI" width="920">
 </p>
 
 <p align="center">
@@ -24,16 +19,20 @@ stack, and opens the app in your browser.
   <a href="docs/FAQ.md">FAQ</a>
 </p>
 
-## What you get
+## Features
 
-- **Free core** — structure tools, docking, MD, and related modules with no license file
-- **Local by default** — data and compute stay on your machine behind Docker
-- **Academic / Pro modules** — import a signed license when you need private capabilities
-- **Guided install** — preflight checks, module selection, download progress, start/stop controls
-- **Verified updates** — signed runtime selection and replacement; the UI never accepts an arbitrary image tag
+- Docker/runtime preflight and verified runtime install
+- Local account setup
+- Signed license import and module selection by entitlement
+- Image download progress with retryable errors
+- Start, stop, and open-app controls
+- CPU/GPU worker concurrency settings
+- Optional ORCA host folder and Boltz MSA credentials
+- Resource-limit reset and uninstall
+- Update notification, signed stable-version selection, and verified runtime replacement (no arbitrary image tags from the UI)
 
-Windows and Linux are the qualified launcher targets. macOS builds are preview and
-cannot run NVIDIA-accelerated containers locally.
+Windows and Linux are the qualified targets. macOS builds are preview and cannot
+run NVIDIA-accelerated containers locally.
 
 ## Install and start
 
@@ -50,38 +49,37 @@ The app opens at <http://localhost:8080> by default (`APP_PORT`).
 ## Requirements
 
 - Docker with Compose v2
-- 16 GB RAM for a small core installation (more for GPU / long-running modules)
+- 16 GB RAM for a small core installation; more for GPU or long-running modules
 - At least 20 GB free disk before selecting scientific images
 - NVIDIA GPU and container runtime for accelerated modules
 - Network access for the initial runtime and images
 
-See the [FAQ](docs/FAQ.md) for platform notes and recovery guidance.
+See the [FAQ](docs/FAQ.md) for platform and recovery guidance.
 
 ## Editions
 
 | Edition | How you start | What it unlocks |
 | ------- | ------------- | --------------- |
 | **Free** | No license file | Core runtime modules |
-| **Academic** | Signed academic license | Entitlements listed in that license |
-| **Pro** | Signed commercial license | Entitlements listed in that license |
+| **Academic** | Signed academic license | Entitlements in that license |
+| **Pro** | Signed commercial license | Entitlements in that license |
 
-Importing a license later does not require reinstalling the launcher; you may need
-to pull additional private images. Commercial use and Pro modules require
-[commercial terms](https://www.ligand-x.com).
+You can import a license later without reinstalling the launcher. You may need to
+pull extra private images. Commercial use and Pro modules need commercial terms
+([website](https://www.ligand-x.com)).
 
 ## Security
 
-Public builds download runtime bundles only from allowlisted HTTPS hosts and verify
-signature, version, size, and digest before install. Credentials are generated
-locally; Pro registry access is scoped to your license.
+Public builds only accept runtime bundles from allowlisted HTTPS hosts. The
+launcher checks the signed manifest, version, size, and digest before install.
+Credentials are generated locally; Pro registry access follows your license.
 
-Details, Windows signing status, and operational hygiene:
-[Runtime security](docs/security.md).
+More detail (including Windows signing status): [Runtime security](docs/security.md).
 
 ## Building and contributing
 
-The launcher is a Go + [Wails](https://wails.io/) v2 desktop app. Public release
-builds compile with the `public` build tag and embed `frontend-public/`.
+Go + [Wails](https://wails.io/) v2. Public release builds use the `public` build
+tag and embed `frontend-public/`.
 
 ```bash
 go test ./...
@@ -90,9 +88,8 @@ make build-public
 make check-runtime-topology
 ```
 
-Contributor setup, platform build notes, and topology sync rules live in
-[CONTRIBUTING.md](CONTRIBUTING.md). The broader dashboard under `frontend/` is a
-developer surface and is not shipped in public releases.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and topology sync. The
+`frontend/` dashboard is a developer UI and is not shipped in public releases.
 
 ## Documentation
 
@@ -104,6 +101,5 @@ developer surface and is not shipped in public releases.
 
 ## License
 
-The launcher is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
-Commercial use and licensed Pro modules require commercial terms from
-[Ligand-X Inc.](https://www.ligand-x.com).
+Distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+Commercial use and licensed Pro modules require commercial terms.
