@@ -2460,6 +2460,15 @@ func (a *App) runDockerCompose(args []string, message string) error {
 		return fmt.Errorf("%s", errMsg)
 	}
 
+	// A managed runtime intentionally keeps a stable Compose project name so
+	// upgrades retain stateful volumes. When a newer runtime removes or renames
+	// a service, containers from the previous model otherwise survive forever
+	// (and can keep exposing an obsolete Pro/Preview service). This flag removes
+	// only containers labeled as services of this same Compose project that are
+	// absent from the current model; it does not remove unrelated containers or
+	// unselected services that still exist in the model.
+	args = composeUpWithRemoveOrphans(args)
+
 	// emitAndLog rather than a bare EventsEmit: it guards against a nil ctx
 	// (before Wails startup, and under test, where wails' EventsEmit calls
 	// logger.Fatal and takes the process with it) and persists the line to the
@@ -2520,7 +2529,7 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	// retry once before giving up, so a single Start click self-heals instead
 	// of silently leaving frontend/proxy un-started.
 	if waitErr != nil && isProductionUpCommand(args) {
-		a.reconcileProductionCredentials()
+		_ = a.reconcileProductionCredentials()
 		retryCmd := exec.Command("docker", args...)
 		retryCmd.Dir = cmd.Dir
 		retryCmd.Env = cmd.Env
@@ -2537,7 +2546,7 @@ func (a *App) runDockerCompose(args []string, message string) error {
 			tail = retryTail // report the final attempt's output
 		}
 	} else if isProductionUpCommand(args) {
-		a.reconcileProductionCredentials()
+		_ = a.reconcileProductionCredentials()
 	}
 
 	if waitErr != nil {
@@ -2565,6 +2574,23 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	return nil
 }
 
+func composeUpWithRemoveOrphans(args []string) []string {
+	for _, arg := range args {
+		if arg == "--remove-orphans" {
+			return args
+		}
+	}
+	for i, arg := range args {
+		if arg != "up" {
+			continue
+		}
+		result := append([]string{}, args[:i+1]...)
+		result = append(result, "--remove-orphans")
+		return append(result, args[i+1:]...)
+	}
+	return args
+}
+
 // prepareProductionInfra starts stateful dependencies first and reconciles their
 // stored credentials before stateless app/worker containers are created. Docker
 // images pick up .env.production immediately, but Postgres/RabbitMQ keep the
@@ -2588,7 +2614,9 @@ func (a *App) prepareProductionInfra(upArgs []string) error {
 		return fmt.Errorf("failed to prepare production dependencies: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 
-	a.reconcileProductionCredentials()
+	if err := a.reconcileProductionCredentials(); err != nil {
+		return fmt.Errorf("failed to reconcile production credentials: %w", err)
+	}
 	return nil
 }
 
@@ -2607,7 +2635,11 @@ func productionInfraUpArgs(upArgs []string) []string {
 		return nil
 	}
 	args := append([]string{}, upArgs[:upIndex]...)
-	args = append(args, "up", "-d")
+	// `docker compose up -d` returns as soon as containers are running, before
+	// RabbitMQ is necessarily ready to accept rabbitmqctl commands. Waiting for
+	// the declared health checks prevents credential rotation from racing broker
+	// startup on both fresh installs and upgrades that retain named volumes.
+	args = append(args, "up", "-d", "--wait", "--wait-timeout", "120")
 	if hasPullNever {
 		args = append(args, "--pull=never")
 	}
@@ -2723,17 +2755,19 @@ func isProductionUpCommand(args []string) bool {
 // that don't require knowing the previous password: Postgres via the
 // trust-authenticated local socket, RabbitMQ via rabbitmqctl, which changes a
 // user's password without needing the old one.
-func (a *App) reconcileProductionCredentials() {
+func (a *App) reconcileProductionCredentials() error {
 	content, err := a.GetEnvContent("prod")
 	if err != nil {
-		return
+		return err
 	}
 	cur := parseEnvFile(content)
+	var failures []string
 
 	if pgUser, pgPass := cur["POSTGRES_USER"], cur["POSTGRES_PASSWORD"]; pgUser != "" && pgPass != "" && isContainerRunning("ligandx-postgres") {
 		sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s';", pgUser, strings.ReplaceAll(pgPass, "'", "''"))
 		cmd := exec.Command("docker", "exec", "ligandx-postgres", "psql", "-U", pgUser, "-d", pgUser, "-c", sql)
 		if out, err := cmd.CombinedOutput(); err != nil {
+			failures = append(failures, fmt.Sprintf("postgres: %v: %s", err, strings.TrimSpace(string(out))))
 			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Credential reconciliation (postgres) failed: %v: %s", err, strings.TrimSpace(string(out))),
@@ -2744,6 +2778,7 @@ func (a *App) reconcileProductionCredentials() {
 
 	if rmqUser, rmqPass := cur["RABBITMQ_USER"], cur["RABBITMQ_PASSWORD"]; rmqUser != "" && rmqPass != "" && isContainerRunning("ligandx-rabbitmq") {
 		if err := reconcileRabbitMQUser("ligandx-rabbitmq", rmqUser, rmqPass); err != nil {
+			failures = append(failures, fmt.Sprintf("rabbitmq: %v", err))
 			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Credential reconciliation (rabbitmq) failed: %v", err),
@@ -2751,6 +2786,10 @@ func (a *App) reconcileProductionCredentials() {
 			})
 		}
 	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func reconcileRabbitMQUser(containerName, username, password string) error {
@@ -3964,6 +4003,7 @@ func (a *App) requirePinnedProductionVersion() (string, error) {
 
 func coreServiceImages(version string) []string {
 	images := []string{
+		"alpine:3.21",
 		imageRef("ghcr.io/kon-218/ligand-x/gateway", version),
 		imageRef("ghcr.io/kon-218/ligand-x/frontend", version),
 		"nginx:1.27-alpine",
@@ -4020,7 +4060,7 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Services:    []string{"md", "worker-gpu-short"},
 			Images: []string{
 				imageRef("ghcr.io/kon-218/ligand-x/md", version),
-				imageRef("ghcr.io/kon-218/ligand-x/worker-gpu-short", version),
+				imageRef(proPrefix+"/worker-gpu-short", version),
 			},
 			SizeMB:    4500,
 			Required:  false,
