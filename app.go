@@ -4449,19 +4449,19 @@ func (s LicenseSummary) HasEntitlement(entitlement string) bool {
 	return false
 }
 
-func (a *App) registryCredentialsFromLicense() (registryCredentials, bool) {
-	data, err := os.ReadFile(a.licensePath())
-	if err != nil {
+func registryCredentialsFromLicenseData(data, publicKeyPEM []byte) (registryCredentials, bool) {
+	status, err := verifyLicenseDataWithPublicKey(data, publicKeyPEM)
+	if err != nil || !status.Valid {
 		return registryCredentials{}, false
 	}
+
 	var bundle licenseBundle
 	if err := json.Unmarshal(data, &bundle); err != nil {
 		return registryCredentials{}, false
 	}
 	// Bridge registry credentials embedded in the license are an offline /
-	// airgap fallback. They MUST be opt-in via an explicit signed claim so
-	// that misconfiguration cannot silently leak long-lived tokens to anyone
-	// who exfiltrates the license file.
+	// airgap fallback. They MUST be opt-in via an explicit signed claim and
+	// are accepted only after the complete certificate verifies above.
 	if mode := stringValue(bundle.Payload["registry_mode"]); mode != "bridge" {
 		return registryCredentials{}, false
 	}
@@ -4470,11 +4470,22 @@ func (a *App) registryCredentialsFromLicense() (registryCredentials, bool) {
 		return registryCredentials{}, false
 	}
 	creds := registryCredentials{
-		Host:     stringValue(registry["host"]),
-		Username: stringValue(registry["username"]),
-		Token:    stringValue(registry["token"]),
+		Host:     strings.ToLower(strings.TrimSpace(stringValue(registry["host"]))),
+		Username: strings.TrimSpace(stringValue(registry["username"])),
+		Token:    strings.TrimSpace(stringValue(registry["token"])),
 	}
-	return creds, creds.Host != "" && creds.Username != "" && creds.Token != ""
+	if creds.Host != "ghcr.io" || creds.Username == "" || creds.Token == "" {
+		return registryCredentials{}, false
+	}
+	return creds, true
+}
+
+func (a *App) registryCredentialsFromLicense() (registryCredentials, bool) {
+	data, err := os.ReadFile(a.licensePath())
+	if err != nil {
+		return registryCredentials{}, false
+	}
+	return registryCredentialsFromLicenseData(data, []byte(licensePublicKeyPEM))
 }
 
 func needsProRegistryAuth(groupIDs []string, groupMap map[string]ServiceGroup) bool {
@@ -4625,7 +4636,14 @@ func stringValueOrDefault(value, fallback string) string {
 	return value
 }
 
-func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[string]ServiceGroup) (registryCredentials, bool, error) {
+type bridgeCredentialLoader func() (registryCredentials, bool)
+
+func (a *App) registryCredentialsForProImagesForBuild(
+	groupIDs []string,
+	groupMap map[string]ServiceGroup,
+	publicBuild bool,
+	loadBridge bridgeCredentialLoader,
+) (registryCredentials, bool, error) {
 	if !needsProRegistryAuth(groupIDs, groupMap) {
 		return registryCredentials{}, false, nil
 	}
@@ -4634,20 +4652,23 @@ func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[st
 		return creds, configured && err == nil, err
 	}
 
-	if isPublicBuild {
-		return registryCredentials{}, false, fmt.Errorf("public launcher requires the short-lived registry token broker")
+	if creds, ok := loadBridge(); ok {
+		return creds, true, nil
 	}
 
-	creds, ok := a.registryCredentialsFromLicense()
-	if !ok {
-		return registryCredentials{}, false, fmt.Errorf("Pro image pull requires LIGANDX_REGISTRY_TOKEN_URL/LIGANDX_VENDOR_ACCESS_TOKEN or bridge registry credentials in the license")
+	if publicBuild {
+		return registryCredentials{}, false, fmt.Errorf("public launcher requires the short-lived registry token broker or signed bridge credentials")
 	}
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-		Service:   "launcher",
-		Message:   "Warning: using bridge registry credentials embedded in the license. Configure LIGANDX_REGISTRY_TOKEN_URL for production token-broker auth.",
-		Timestamp: time.Now().Format("15:04:05"),
-	})
-	return creds, true, nil
+	return registryCredentials{}, false, fmt.Errorf("Pro image pull requires LIGANDX_REGISTRY_TOKEN_URL/LIGANDX_VENDOR_ACCESS_TOKEN or signed bridge credentials in the license")
+}
+
+func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[string]ServiceGroup) (registryCredentials, bool, error) {
+	return a.registryCredentialsForProImagesForBuild(
+		groupIDs,
+		groupMap,
+		isPublicBuild,
+		a.registryCredentialsFromLicense,
+	)
 }
 
 func encodeRegistryAuth(creds registryCredentials) (string, error) {
