@@ -747,6 +747,26 @@ func TestProRegistryCredentialsRequireBrokerOrBridge(t *testing.T) {
 	}
 }
 
+func TestRegistryAuthIncludesPrivateImageInFreeGroup(t *testing.T) {
+	privateWorker := "ghcr.io/kon-218/ligand-x-pro/worker-gpu-short:v-test"
+	groups := map[string]ServiceGroup{
+		"md": {
+			ID:                 "md",
+			Edition:            "free",
+			Images:             []string{"ghcr.io/kon-218/ligand-x/md:v-test", privateWorker},
+			RegistryAuthImages: []string{privateWorker},
+		},
+	}
+	if !needsProRegistryAuth([]string{"md"}, groups) {
+		t.Fatal("a private image selected by a Free group must still request registry credentials")
+	}
+	repositories := selectedProRepositories([]string{"md"}, groups)
+	want := "ghcr.io/kon-218/ligand-x-pro/worker-gpu-short"
+	if len(repositories) != 1 || repositories[0] != want {
+		t.Fatalf("selectedProRepositories() = %v, want [%s]", repositories, want)
+	}
+}
+
 func TestEncodeRegistryAuth(t *testing.T) {
 	encoded, err := encodeRegistryAuth(registryCredentials{
 		Host:     "ghcr.io",

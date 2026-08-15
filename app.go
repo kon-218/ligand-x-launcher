@@ -101,18 +101,19 @@ type PullProgress struct {
 }
 
 type ServiceGroup struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Services    []string `json:"services"`
-	Images      []string `json:"images"`
-	SizeMB      int      `json:"sizeMb"`
-	Required    bool     `json:"required"`
-	DefaultOn   bool     `json:"defaultOn"`
-	Edition     string   `json:"edition"`
-	Entitlement string   `json:"entitlement"`
-	Licensed    bool     `json:"licensed"`
-	Locked      bool     `json:"locked"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	Description        string   `json:"description"`
+	Services           []string `json:"services"`
+	Images             []string `json:"images"`
+	RegistryAuthImages []string `json:"-"`
+	SizeMB             int      `json:"sizeMb"`
+	Required           bool     `json:"required"`
+	DefaultOn          bool     `json:"defaultOn"`
+	Edition            string   `json:"edition"`
+	Entitlement        string   `json:"entitlement"`
+	Licensed           bool     `json:"licensed"`
+	Locked             bool     `json:"locked"`
 }
 
 type LauncherConfig struct {
@@ -4062,11 +4063,12 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 				imageRef("ghcr.io/kon-218/ligand-x/md", version),
 				imageRef(proPrefix+"/worker-gpu-short", version),
 			},
-			SizeMB:    4500,
-			Required:  false,
-			DefaultOn: true,
-			Edition:   "free",
-			Licensed:  true,
+			RegistryAuthImages: []string{imageRef(proPrefix+"/worker-gpu-short", version)},
+			SizeMB:             4500,
+			Required:           false,
+			DefaultOn:          true,
+			Edition:            "free",
+			Licensed:           true,
 		},
 		{
 			ID:          "admet",
@@ -4547,7 +4549,7 @@ func (a *App) registryCredentialsFromLicense() (registryCredentials, bool) {
 
 func needsProRegistryAuth(groupIDs []string, groupMap map[string]ServiceGroup) bool {
 	for _, groupID := range groupIDs {
-		if group, ok := groupMap[groupID]; ok && group.Edition == "pro" {
+		if group, ok := groupMap[groupID]; ok && (group.Edition == "pro" || len(group.RegistryAuthImages) > 0) {
 			return true
 		}
 	}
@@ -4559,10 +4561,14 @@ func selectedProRepositories(groupIDs []string, groupMap map[string]ServiceGroup
 	var repos []string
 	for _, groupID := range groupIDs {
 		group, ok := groupMap[groupID]
-		if !ok || group.Edition != "pro" {
+		if !ok {
 			continue
 		}
-		for _, image := range group.Images {
+		images := group.RegistryAuthImages
+		if group.Edition == "pro" {
+			images = group.Images
+		}
+		for _, image := range images {
 			repo := image
 			if at := strings.Index(repo, "@"); at >= 0 {
 				repo = repo[:at]
@@ -5109,7 +5115,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 				ctx, cancel := context.WithCancel(a.ctx)
 
 				imageAuth := ""
-				if group.Edition == "pro" {
+				if group.Edition == "pro" || slices.Contains(group.RegistryAuthImages, image) {
 					imageAuth = registryAuth
 				}
 				if err := a.verifyImageSignature(image); err != nil {
