@@ -1130,6 +1130,14 @@ func signRuntimeManifestForTest(t *testing.T, bundle []byte, version string, exp
 		Artifacts: map[string]runtimeReleaseArtifact{
 			runtimeBundleAssetName: {SHA256: fmt.Sprintf("%x", digest), Size: int64(len(bundle))},
 		},
+		PlatformSigning: runtimePlatformSigning{
+			Windows: runtimeWindowsSigning{Authenticode: false, Evidence: "workflow-verification"},
+			MacOS: runtimeMacOSSigning{
+				DeveloperID: false,
+				Notarized:   false,
+				Evidence:    "workflow-verification",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1144,6 +1152,10 @@ func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 	manifest, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v1.2.3")
 	if err != nil {
 		t.Fatalf("valid manifest rejected: %v", err)
+	}
+	if manifest.PlatformSigning.Windows.Evidence != "workflow-verification" ||
+		manifest.PlatformSigning.MacOS.Evidence != "workflow-verification" {
+		t.Fatalf("platform-signing evidence was not decoded: %+v", manifest.PlatformSigning)
 	}
 
 	if _, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v9.9.9"); err == nil {

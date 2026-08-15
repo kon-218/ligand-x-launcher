@@ -297,16 +297,33 @@ type runtimeReleaseArtifact struct {
 	Size   int64  `json:"size"`
 }
 
+type runtimeWindowsSigning struct {
+	Authenticode bool   `json:"authenticode"`
+	Evidence     string `json:"evidence"`
+}
+
+type runtimeMacOSSigning struct {
+	DeveloperID bool   `json:"developer_id"`
+	Notarized   bool   `json:"notarized"`
+	Evidence    string `json:"evidence"`
+}
+
+type runtimePlatformSigning struct {
+	Windows runtimeWindowsSigning `json:"windows"`
+	MacOS   runtimeMacOSSigning   `json:"macos"`
+}
+
 type runtimeBundleManifest struct {
-	Schema    string                            `json:"schema"`
-	Version   string                            `json:"version"`
-	Asset     string                            `json:"asset"`
-	SHA256    string                            `json:"sha256"`
-	Size      int64                             `json:"size"`
-	IssuedAt  string                            `json:"issued_at"`
-	ExpiresAt string                            `json:"expires_at"`
-	GitCommit string                            `json:"git_commit"`
-	Artifacts map[string]runtimeReleaseArtifact `json:"artifacts,omitempty"`
+	Schema          string                            `json:"schema"`
+	Version         string                            `json:"version"`
+	Asset           string                            `json:"asset"`
+	SHA256          string                            `json:"sha256"`
+	Size            int64                             `json:"size"`
+	IssuedAt        string                            `json:"issued_at"`
+	ExpiresAt       string                            `json:"expires_at"`
+	GitCommit       string                            `json:"git_commit"`
+	Artifacts       map[string]runtimeReleaseArtifact `json:"artifacts,omitempty"`
+	PlatformSigning runtimePlatformSigning            `json:"platform_signing,omitempty"`
 }
 
 // defaultPinnedImageVersion is the image tag this launcher build was published
