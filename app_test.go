@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"strconv"
 	"strings"
@@ -141,6 +142,114 @@ func TestGetServiceGroups(t *testing.T) {
 		if !found {
 			t.Errorf("core service %q has no matching image in coreServiceImages(): %v", svc, core.Images)
 		}
+	}
+}
+
+func TestCorePullListIncludesEveryFixedComposeImage(t *testing.T) {
+	compose, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := make(map[string]bool)
+	for _, image := range coreServiceImages("v-test") {
+		listed[image] = true
+	}
+
+	// Variable image references belong to optional product groups and are
+	// checked elsewhere. Literal references are runtime/infra dependencies that
+	// `up --pull=never` cannot recover when the launcher forgets to pre-pull
+	// them. Both scientific init containers, for example, use alpine:3.21.
+	imageLine := regexp.MustCompile(`(?m)^\s+image:\s+([^\s#]+)\s*$`)
+	for _, match := range imageLine.FindAllStringSubmatch(string(compose), -1) {
+		image := match[1]
+		if strings.Contains(image, "${") {
+			continue
+		}
+		if !listed[image] {
+			t.Errorf("fixed Compose image %q is absent from the Core pull list", image)
+		}
+	}
+}
+
+func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
+	const version = "v-test"
+	const proPrefix = "ghcr.io/kon-218/ligand-x-pro"
+	runtimeDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(runtimeDir, ".env.production"),
+		[]byte("VERSION="+version+"\nPRO_VERSION="+version+"\nLIGANDX_PRO_IMAGE_PREFIX="+proPrefix+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.projectPath = runtimeDir
+
+	compose, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceLine := regexp.MustCompile(`^  ([a-zA-Z0-9_-]+):\s*$`)
+	imageLine := regexp.MustCompile(`^    image:\s+([^\s#]+)\s*$`)
+	serviceImages := make(map[string]string)
+	service := ""
+	for _, line := range strings.Split(string(compose), "\n") {
+		if match := serviceLine.FindStringSubmatch(line); match != nil {
+			service = match[1]
+			continue
+		}
+		if service == "" {
+			continue
+		}
+		if match := imageLine.FindStringSubmatch(line); match != nil {
+			serviceImages[service] = match[1]
+		}
+	}
+
+	resolve := func(raw string) string {
+		if strings.Contains(raw, "LIGANDX_PRO_IMAGE_PREFIX") {
+			remainder := raw[strings.LastIndex(raw, "}/")+2:]
+			name := strings.SplitN(remainder, ":", 2)[0]
+			return imageRef(proPrefix+"/"+name, version)
+		}
+		if strings.Contains(raw, "${VERSION:-latest}") {
+			return strings.ReplaceAll(raw, "${VERSION:-latest}", version)
+		}
+		return raw
+	}
+
+	for _, group := range app.GetServiceGroups() {
+		listed := make(map[string]bool)
+		for _, image := range group.Images {
+			listed[image] = true
+		}
+		for _, service := range group.Services {
+			raw, ok := serviceImages[service]
+			if !ok {
+				t.Errorf("selected service %q in group %q has no Compose image", service, group.ID)
+				continue
+			}
+			expected := resolve(raw)
+			if !listed[expected] {
+				t.Errorf("group %q starts service %q as %q but does not pull that image: %v", group.ID, service, expected, group.Images)
+			}
+		}
+	}
+}
+
+func TestComposeUpAlwaysRemovesOnlyProjectOrphans(t *testing.T) {
+	input := []string{"compose", "--env-file", ".env.production", "up", "-d", "--pull=never", "gateway"}
+	want := []string{"compose", "--env-file", ".env.production", "up", "--remove-orphans", "-d", "--pull=never", "gateway"}
+	got := composeUpWithRemoveOrphans(input)
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("composeUpWithRemoveOrphans() = %v, want %v", got, want)
+	}
+	if again := composeUpWithRemoveOrphans(got); strings.Join(again, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("orphan flag insertion is not idempotent: %v", again)
+	}
+	nonUp := []string{"compose", "ps", "--all"}
+	if got := composeUpWithRemoveOrphans(nonUp); strings.Join(got, "\x00") != strings.Join(nonUp, "\x00") {
+		t.Fatalf("non-up command changed: %v", got)
 	}
 }
 
@@ -1028,7 +1137,7 @@ func TestProductionInfraUpArgsPreservesGlobalFlags(t *testing.T) {
 	want := []string{
 		"compose", "--env-file", ".env.production",
 		"-f", "docker-compose.yml", "-f", "docker-compose.gpu.yml",
-		"up", "-d", "--pull=never", "postgres", "redis", "rabbitmq",
+		"up", "-d", "--wait", "--wait-timeout", "120", "--pull=never", "postgres", "redis", "rabbitmq",
 	}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("productionInfraUpArgs() = %v, want %v", got, want)
