@@ -352,6 +352,9 @@ func TestSaveLocalAccountWorksWithProductionBundleOnly(t *testing.T) {
 }
 
 func TestFindProjectPathPrefersSourceCheckoutForDevBuild(t *testing.T) {
+	if isPublicBuild {
+		t.Skip("source checkout discovery is disabled in public builds")
+	}
 	tmpDir := t.TempDir()
 	launcherDir := filepath.Join(tmpDir, "ligand-x-launcher")
 	sourceDir := filepath.Join(tmpDir, "ligand-x")
@@ -630,8 +633,8 @@ func TestProRegistryCredentialsRequireBrokerOrBridge(t *testing.T) {
 	if ok {
 		t.Fatal("Expected no registry credentials")
 	}
-	if !strings.Contains(err.Error(), "LIGANDX_REGISTRY_TOKEN_URL") {
-		t.Fatalf("Expected broker guidance in error, got %v", err)
+	if !strings.Contains(err.Error(), "signed bridge") {
+		t.Fatalf("Expected signed bridge guidance in error, got %v", err)
 	}
 }
 
@@ -913,48 +916,88 @@ func TestValidateUnlockedServicesBlocksLockedGroup(t *testing.T) {
 	}
 }
 
-func TestRegistryCredentialsFromLicenseRequiresBridgeMode(t *testing.T) {
-	app := NewApp()
-	app.projectPath = t.TempDir()
-	licDir := filepath.Join(app.projectPath, "data", "license")
-	if err := os.MkdirAll(licDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	writeBundle := func(payload map[string]interface{}) {
-		bundle := map[string]interface{}{
-			"schema":    "ligandx-license/1",
-			"algorithm": "Ed25519",
-			"payload":   payload,
-			"signature": base64.StdEncoding.EncodeToString([]byte("ignored-by-this-helper")),
-		}
-		raw, _ := json.Marshal(bundle)
-		if err := os.WriteFile(app.licensePath(), raw, 0600); err != nil {
-			t.Fatalf("write license: %v", err)
-		}
-	}
-
-	// Without registry_mode=bridge, embedded creds must be ignored.
-	writeBundle(map[string]interface{}{
-		"edition": "pro",
-		"registry": map[string]interface{}{
-			"host": "ghcr.io", "username": "oauth2", "token": "tok",
-		},
-	})
-	if _, ok := app.registryCredentialsFromLicense(); ok {
-		t.Fatal("expected creds to be ignored without registry_mode=bridge")
-	}
-
-	// With registry_mode=bridge, accept them.
-	writeBundle(map[string]interface{}{
-		"edition":       "pro",
+func TestRegistryCredentialsFromLicenseRequiresValidSignedBridgeMode(t *testing.T) {
+	validPayload := map[string]interface{}{
+		"edition":       "academic",
+		"license_id":    "LX-BRIDGE-TEST",
+		"expires_at":    time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
 		"registry_mode": "bridge",
 		"registry": map[string]interface{}{
-			"host": "ghcr.io", "username": "oauth2", "token": "tok",
+			"host": "ghcr.io", "username": "reader", "token": "tok",
 		},
-	})
-	if _, ok := app.registryCredentialsFromLicense(); !ok {
-		t.Fatal("expected creds to be accepted under registry_mode=bridge")
+	}
+	bundle, pub := signTestLicense(t, validPayload)
+	creds, ok := registryCredentialsFromLicenseData(bundle, pub)
+	if !ok {
+		t.Fatal("expected valid signed bridge credentials to be accepted")
+	}
+	if creds.Host != "ghcr.io" || creds.Username != "reader" || creds.Token != "tok" {
+		t.Fatalf("unexpected bridge credentials: %+v", creds)
+	}
+
+	withoutMode := map[string]interface{}{}
+	for key, value := range validPayload {
+		withoutMode[key] = value
+	}
+	delete(withoutMode, "registry_mode")
+	bundle, pub = signTestLicense(t, withoutMode)
+	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
+		t.Fatal("expected credentials without registry_mode=bridge to be ignored")
+	}
+
+	bundle, pub = signTestLicense(t, validPayload)
+	tampered := bytes.Replace(bundle, []byte(`"tok"`), []byte(`"other"`), 1)
+	if _, ok := registryCredentialsFromLicenseData(tampered, pub); ok {
+		t.Fatal("expected tampered bridge credentials to be rejected")
+	}
+
+	expiredPayload := map[string]interface{}{}
+	for key, value := range validPayload {
+		expiredPayload[key] = value
+	}
+	expiredPayload["expires_at"] = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	bundle, pub = signTestLicense(t, expiredPayload)
+	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
+		t.Fatal("expected expired bridge credentials to be rejected")
+	}
+
+	wrongHostPayload := map[string]interface{}{}
+	for key, value := range validPayload {
+		wrongHostPayload[key] = value
+	}
+	wrongHostPayload["registry"] = map[string]interface{}{
+		"host": "example.com", "username": "reader", "token": "tok",
+	}
+	bundle, pub = signTestLicense(t, wrongHostPayload)
+	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
+		t.Fatal("expected non-GHCR bridge credentials to be rejected")
+	}
+}
+
+func TestPublicBuildAcceptsSignedBridgeCredentials(t *testing.T) {
+	t.Setenv("LIGANDX_REGISTRY_TOKEN_URL", "")
+	t.Setenv("LIGANDX_VENDOR_ACCESS_TOKEN", "")
+
+	app := NewApp()
+	groups := app.GetServiceGroups()
+	groupMap := make(map[string]ServiceGroup)
+	for _, group := range groups {
+		groupMap[group.ID] = group
+	}
+	want := registryCredentials{Host: "ghcr.io", Username: "reader", Token: "tok"}
+	loader := func() (registryCredentials, bool) { return want, true }
+
+	got, ok, err := app.registryCredentialsForProImagesForBuild(
+		[]string{"admet"},
+		groupMap,
+		true,
+		loader,
+	)
+	if err != nil {
+		t.Fatalf("public build rejected signed bridge credentials: %v", err)
+	}
+	if !ok || got != want {
+		t.Fatalf("public build returned (%+v, %v), want (%+v, true)", got, ok, want)
 	}
 }
 
