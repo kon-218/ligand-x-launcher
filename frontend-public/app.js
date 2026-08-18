@@ -580,6 +580,7 @@ async function enterRunning(sub) {
   if (sub === "idle") {
     setRunHeader("○", "", "Ready to start", "Click Start services, then Open Ligand-X.");
     el("startBtn").hidden = false;
+    el("restartBtn").hidden = true;
     el("stopBtn").hidden = true;
     el("openApp").disabled = true;
     el("runTip").hidden = false;
@@ -591,6 +592,7 @@ async function enterRunning(sub) {
 
   // "starting": services were just (or are being) started.
   el("startBtn").hidden = true;
+  el("restartBtn").hidden = false;
   el("stopBtn").hidden = false;
   setRunHeader("◐", "starting", "Starting services…", "This can take a minute on first run.");
   startStatusPolling();
@@ -604,6 +606,7 @@ async function startFromRunning() {
   await preflight(async () => {
     showScreen("running");
     el("startBtn").hidden = true;
+    el("restartBtn").hidden = false;
     el("stopBtn").hidden = false;
     el("runError").textContent = "";
     setRunHeader("◐", "starting", "Starting services…", "This can take a minute.");
@@ -621,6 +624,7 @@ function handleStartError(msg, groupIds) {
   const clean = msg.replace(/^Error:\s*/, "");
   el("runError").textContent = clean;
   setRunHeader("○", "", "Couldn't start", "");
+  el("restartBtn").hidden = true;
   el("stopBtn").hidden = true;
   // Missing images? Offer a re-download.
   if (/pull|not found|no such image|manifest/i.test(clean)) {
@@ -673,10 +677,12 @@ async function refreshStatus() {
   if (running > 0 && running >= total && total > 0) {
     setRunHeader("●", "up", "Ligand-X is running", `${running} of ${total} services up.`);
     el("startBtn").hidden = true;
+    el("restartBtn").hidden = false;
     el("stopBtn").hidden = false;
     el("runTip").hidden = false;
   } else if (running > 0) {
     setRunHeader("◐", "starting", "Starting services…", `${running} of ${total} services up.`);
+    el("restartBtn").hidden = false;
     el("stopBtn").hidden = false;
     el("runTip").hidden = true;
   } else if (!state.statusTimer) {
@@ -721,6 +727,23 @@ async function stopServices() {
     return;
   }
   enterRunning("idle");
+}
+
+async function restartServices() {
+  const groupIds = selectedFallback();
+  if (groupIds.includes("qc") && !(await ensureOrcaForQC())) return;
+
+  el("restartBtn").disabled = true;
+  el("runError").textContent = "";
+  setRunHeader("◐", "starting", "Restarting services…", "This can take a minute.");
+  try {
+    await App().RestartServiceGroups(groupIds);
+  } catch (e) {
+    el("runError").textContent = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    el("restartBtn").disabled = false;
+  }
+  startStatusPolling();
 }
 
 // ---------- user modal ----------
@@ -853,6 +876,32 @@ async function enterSettings() {
     el("installedRuntimeVersion").textContent = "Installed version could not be read.";
   }
   updateSettingsSections();
+  loadEnvEditor();
+}
+
+async function loadEnvEditor() {
+  el("envEditorError").textContent = "";
+  el("envEditorSaved").hidden = true;
+  try {
+    el("envEditor").value = await App().GetEnvContent("prod");
+  } catch (e) {
+    el("envEditorError").textContent = String(e).replace(/^Error:\s*/, "");
+  }
+}
+
+async function saveEnvEditor() {
+  el("envEditorError").textContent = "";
+  el("envEditorSaved").hidden = true;
+  const btn = el("envEditorSave");
+  btn.disabled = true;
+  try {
+    await App().SaveEnvContent("prod", el("envEditor").value);
+    el("envEditorSaved").hidden = false;
+  } catch (e) {
+    el("envEditorError").textContent = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function loadSettings() {
@@ -1039,7 +1088,10 @@ function wireEvents() {
 
   el("openApp").onclick = () => { try { App().OpenFrontend(); } catch (e) {} };
   el("startBtn").onclick = startFromRunning;
+  el("restartBtn").onclick = restartServices;
   el("stopBtn").onclick = stopServices;
+  el("envEditorReload").onclick = loadEnvEditor;
+  el("envEditorSave").onclick = saveEnvEditor;
   el("changeServices").onclick = () => enterServices(true);
   el("helpBtn").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
   el("openDocs").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);

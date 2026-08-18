@@ -135,6 +135,7 @@
         <div class="actions actions-stack" style="margin-top:18px">
           <button id="openApp" class="btn btn-primary btn-lg btn-block" disabled>Open Ligand-X</button>
           <button id="startBtn" class="btn btn-primary btn-lg btn-block" hidden>Start services</button>
+          <button id="restartBtn" class="btn btn-secondary btn-block" hidden>Restart</button>
           <button id="stopBtn" class="btn btn-danger btn-block" hidden>Stop</button>
         </div>
         <p id="runTip" class="note">After Open Ligand-X, log in with the account you created.</p>
@@ -229,6 +230,23 @@
               version and other settings are not affected.</p>
             <button id="resetResources" class="btn btn-secondary">Reset to defaults</button>
             <div id="resetResourcesMsg" class="settings-saved" hidden>Resource limits reset.</div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3 class="settings-section-title">Advanced</h3>
+          <div class="field">
+            <label for="envEditor">Environment file (.env.production)</label>
+            <p class="field-hint">Direct access to the configuration file docker compose reads. Only edit this if
+              you know what you're changing — an invalid value can stop every service from starting. Changes take
+              effect the next time services start or restart.</p>
+            <textarea id="envEditor" class="input env-editor" spellcheck="false" rows="12"></textarea>
+            <div id="envEditorError" class="inline-error"></div>
+            <div class="actions" style="margin-top:10px">
+              <button id="envEditorReload" class="btn btn-ghost" type="button">Reload</button>
+              <button id="envEditorSave" class="btn btn-secondary" type="button">Save env file</button>
+            </div>
+            <div id="envEditorSaved" class="settings-saved" hidden>Saved. Restart services to apply.</div>
           </div>
         </div>
 
