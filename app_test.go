@@ -791,6 +791,125 @@ func TestCheckGPU(t *testing.T) {
 	_ = app.CheckGPU()
 }
 
+func writeFakeOrcaInstall(t *testing.T, dir string) {
+	t.Helper()
+	name := "orca"
+	if goruntime.GOOS == "windows" {
+		name = "orca.exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("fake-orca"), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateOrcaHostPathRejectsEmpty(t *testing.T) {
+	if err := validateOrcaHostPath(""); err == nil {
+		t.Fatal("expected error for empty path")
+	}
+	if err := validateOrcaHostPath("   "); err == nil {
+		t.Fatal("expected error for whitespace path")
+	}
+}
+
+func TestValidateOrcaHostPathRejectsMissingDir(t *testing.T) {
+	if err := validateOrcaHostPath(filepath.Join(t.TempDir(), "no-such-orca")); err == nil {
+		t.Fatal("expected error for missing directory")
+	}
+}
+
+func TestValidateOrcaHostPathRejectsDirWithoutBinary(t *testing.T) {
+	if err := validateOrcaHostPath(t.TempDir()); err == nil {
+		t.Fatal("expected error when folder has no orca binary")
+	}
+}
+
+func TestValidateOrcaHostPathRejectsFileNotDir(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOrcaHostPath(f); err == nil {
+		t.Fatal("expected error when path is a file")
+	}
+}
+
+func TestValidateOrcaHostPathAcceptsFolderWithBinary(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeOrcaInstall(t, dir)
+	if err := validateOrcaHostPath(dir); err != nil {
+		t.Fatalf("expected valid install: %v", err)
+	}
+}
+
+func TestCheckOrcaForServicesSkipsWhenQCNotSelected(t *testing.T) {
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	if err := app.checkOrcaForServices([]string{"gateway", "frontend", "md"}); err != nil {
+		t.Fatalf("non-QC services should not require ORCA: %v", err)
+	}
+}
+
+func TestCheckOrcaForServicesFailsWhenMissing(t *testing.T) {
+	tmp := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmp
+	if err := os.WriteFile(filepath.Join(tmp, ".env.production"), []byte("ORCA_HOST_PATH=/definitely/not/orca\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.checkOrcaForServices([]string{"qc", "worker-qc"}); err == nil {
+		t.Fatal("expected error when QC is selected without a valid ORCA path")
+	}
+}
+
+func TestCheckOrcaForServicesAcceptsValidPath(t *testing.T) {
+	tmp := t.TempDir()
+	install := filepath.Join(tmp, "orca-install")
+	if err := os.Mkdir(install, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeOrcaInstall(t, install)
+	app := NewApp()
+	app.projectPath = tmp
+	content := "ORCA_HOST_PATH=" + install + "\n"
+	if err := os.WriteFile(filepath.Join(tmp, ".env.production"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.checkOrcaForServices([]string{"qc"}); err != nil {
+		t.Fatalf("valid ORCA path should allow QC start: %v", err)
+	}
+}
+
+func TestSetOrcaHostPathPersists(t *testing.T) {
+	tmp := t.TempDir()
+	install := filepath.Join(tmp, "orca-install")
+	if err := os.Mkdir(install, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeOrcaInstall(t, install)
+	app := NewApp()
+	app.projectPath = tmp
+	if err := app.SetOrcaHostPath(install); err != nil {
+		t.Fatal(err)
+	}
+	if !app.OrcaHostPathReady() {
+		t.Fatal("OrcaHostPathReady should be true after SetOrcaHostPath")
+	}
+	if got := app.currentOrcaHostPath(); got != install {
+		t.Fatalf("ORCA_HOST_PATH=%q, want %q", got, install)
+	}
+}
+
+func TestSetOrcaHostPathRejectsInvalid(t *testing.T) {
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	if err := app.SetOrcaHostPath(t.TempDir()); err == nil {
+		t.Fatal("expected error for folder without orca binary")
+	}
+	if app.OrcaHostPathReady() {
+		t.Fatal("invalid path must not mark ORCA as ready")
+	}
+}
+
 // TestEmbeddedPublicKeyMatchesPemFile prevents drift between the launcher's
 // compiled-in public key and the canonical PEM under lib/licensing/. If
 // either is rotated alone, every signed license silently fails verification
@@ -1366,6 +1485,57 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 	payload[0] ^= 1
 	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil {
 		t.Fatal("tampered release index was accepted")
+	}
+}
+
+func TestSignedReleaseIndexRequiresExactlyOneRecommended(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := runtimeBundlePublicKeyB64
+	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
+	t.Cleanup(func() { runtimeBundlePublicKeyB64 = oldKey })
+
+	sign := func(index runtimeReleaseIndex) ([]byte, []byte) {
+		t.Helper()
+		payload, err := json.Marshal(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload, []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload)))
+	}
+	base := func(recommended ...bool) runtimeReleaseIndex {
+		releases := make([]RuntimeRelease, len(recommended))
+		for i, rec := range recommended {
+			releases[i] = RuntimeRelease{
+				Version:         fmt.Sprintf("v2.1.%d", i),
+				Status:          "supported",
+				Recommended:     rec,
+				MinimumLauncher: "v2.0.0",
+				BundleURL:       fmt.Sprintf("https://github.com/kon-218/ligand-x-launcher/releases/download/v2.1.%d/ligand-x-runtime.zip", i),
+				DownloadBytes:   1024,
+			}
+		}
+		return runtimeReleaseIndex{
+			Schema:    "ligandx-release-index/1",
+			IssuedAt:  time.Now().UTC().Format(time.RFC3339),
+			ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+			Releases:  releases,
+		}
+	}
+
+	payload, signature := sign(base(false, false))
+	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil || !strings.Contains(err.Error(), "exactly one recommended release") {
+		t.Fatalf("zero recommended releases should be rejected, got %v", err)
+	}
+	payload, signature = sign(base(true, true))
+	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil || !strings.Contains(err.Error(), "exactly one recommended release") {
+		t.Fatalf("two recommended releases should be rejected, got %v", err)
+	}
+	payload, signature = sign(base(true, false))
+	if _, err := verifyRuntimeReleaseIndex(payload, signature); err != nil {
+		t.Fatalf("single recommended release was rejected: %v", err)
 	}
 }
 
@@ -2950,6 +3120,10 @@ func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
 		"make_latest: false",
 		`"platform_signing": platform_signing`,
 		`"recommended": recommended`,
+		"if recommended:",
+		`raise SystemExit("release index must identify exactly one recommended release")`,
+		"Enforce GitHub prerelease and latest policy",
+		"-F prerelease=true",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("launcher release workflow is missing %q", required)

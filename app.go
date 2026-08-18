@@ -2140,10 +2140,7 @@ func (a *App) StartServices(mode string) error {
 			args = append(args, a.gpuComposeArgs()...)
 			args = append(args, "up", "-d", "--pull=never")
 		case "core":
-			coreServices := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "flower"}
-			if !isPublicBuild {
-				coreServices = append(coreServices, "pocket-finder")
-			}
+			coreServices := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "flower", "pocket-finder"}
 			args = append(a.devComposeArgs(), append([]string{"up", "-d", "--pull=never"}, coreServices...)...)
 		case "docking":
 			args = append(a.devComposeArgs(), "up", "-d", "--pull=never", "postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "ketcher", "docking", "worker-cpu")
@@ -2177,6 +2174,9 @@ func (a *App) StartServices(mode string) error {
 		}
 
 		if err := a.checkGPUForServices(services); err != nil {
+			return err
+		}
+		if err := a.checkOrcaForServices(services); err != nil {
 			return err
 		}
 
@@ -2243,6 +2243,9 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 	if err := a.checkGPUForServices(services); err != nil {
 		return err
 	}
+	if err := a.checkOrcaForServices(services); err != nil {
+		return err
+	}
 
 	var args []string
 	if env == "prod" {
@@ -2268,6 +2271,9 @@ func (a *App) StartServicesCustom(env string, services []string) error {
 	}
 
 	if err := a.validateUnlockedServices(services); err != nil {
+		return err
+	}
+	if err := a.checkOrcaForServices(services); err != nil {
 		return err
 	}
 
@@ -2415,6 +2421,10 @@ func (a *App) RestartServiceGroups(groupIDs []string) error {
 		services = append(services, svc)
 	}
 
+	if err := a.checkOrcaForServices(services); err != nil {
+		return err
+	}
+
 	args := append(a.devComposeArgs(), "up", "-d", "--pull=never")
 	args = append(args, services...)
 	return a.runDockerCompose(args, fmt.Sprintf("Restarting %d services...", len(services)))
@@ -2422,6 +2432,9 @@ func (a *App) RestartServiceGroups(groupIDs []string) error {
 
 func (a *App) RestartServicesCustom(services []string) error {
 	if err := a.validateUnlockedServices(services); err != nil {
+		return err
+	}
+	if err := a.checkOrcaForServices(services); err != nil {
 		return err
 	}
 	args := append(a.devComposeArgs(), "up", "-d", "--pull=never")
@@ -3517,6 +3530,37 @@ func (a *App) SaveUserSettings(s UserSettings) error {
 	return nil
 }
 
+// ValidateOrcaHostPath reports whether path is a folder that contains an ORCA
+// executable. The UI calls this after Browse and before confirming the dialog.
+func (a *App) ValidateOrcaHostPath(path string) error {
+	return validateOrcaHostPath(path)
+}
+
+// OrcaHostPathReady is true when .env.production already points at a real
+// ORCA install. The template default /opt/orca does not count unless that
+// folder actually contains the binary.
+func (a *App) OrcaHostPathReady() bool {
+	return validateOrcaHostPath(a.currentOrcaHostPath()) == nil
+}
+
+// SetOrcaHostPath validates path and writes ORCA_HOST_PATH without touching
+// the rest of user settings.
+func (a *App) SetOrcaHostPath(path string) error {
+	if err := validateOrcaHostPath(path); err != nil {
+		return err
+	}
+	return a.setProductionEnvValue("ORCA_HOST_PATH", strings.TrimSpace(path))
+}
+
+func (a *App) currentOrcaHostPath() string {
+	envPath := filepath.Join(a.projectPath, ".env.production")
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parseEnvFile(string(data))["ORCA_HOST_PATH"])
+}
+
 // canWriteDir checks whether a directory can be created and written to.
 func canWriteDir(dir string) bool {
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -3947,18 +3991,11 @@ func (a *App) getConfigPath() (string, error) {
 }
 
 func coreServicesDescription() string {
-	if isPublicBuild {
-		return "Essential services: Proxy, Gateway, Frontend, Structure, and supporting infrastructure"
-	}
 	return "Essential services: Proxy, Gateway, Frontend, Structure, Pocket Finder (fpocket / DeepPocket / etc.), and supporting infrastructure"
 }
 
 func coreServiceNames() []string {
-	services := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "alignment", "ketcher", "msa", "worker-cpu", "flower"}
-	if !isPublicBuild {
-		services = append(services, "pocket-finder")
-	}
-	return services
+	return []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "alignment", "ketcher", "msa", "worker-cpu", "flower", "pocket-finder"}
 }
 
 func imageRef(repository, tag string) string {
@@ -4008,6 +4045,7 @@ func coreServiceImages(version string) []string {
 		imageRef("ghcr.io/kon-218/ligand-x/gateway", version),
 		imageRef("ghcr.io/kon-218/ligand-x/frontend", version),
 		"nginx:1.27-alpine",
+		imageRef("ghcr.io/kon-218/ligand-x/pocket-finder", version),
 		imageRef("ghcr.io/kon-218/ligand-x/structure", version),
 		imageRef("ghcr.io/kon-218/ligand-x/alignment", version),
 		imageRef("ghcr.io/kon-218/ligand-x/ketcher", version),
@@ -4017,9 +4055,6 @@ func coreServiceImages(version string) []string {
 		"postgres:16-alpine",
 		"rabbitmq:3.13-management-alpine",
 		"mher/flower:2.0",
-	}
-	if !isPublicBuild {
-		images = append(images[:3], append([]string{imageRef("ghcr.io/kon-218/ligand-x/pocket-finder", version)}, images[3:]...)...)
 	}
 	return images
 }
@@ -4832,6 +4867,66 @@ func (a *App) CheckGPU() bool {
 	cmd := exec.CommandContext(ctx, "nvidia-smi")
 	err := cmd.Run()
 	return err == nil
+}
+
+func servicesNeedOrca(services []string) bool {
+	for _, svc := range services {
+		if svc == "qc" || svc == "worker-qc" {
+			return true
+		}
+	}
+	return false
+}
+
+// checkOrcaForServices returns an error if QC is about to start without a
+// host folder that actually contains the ORCA binary. Docker would otherwise
+// create an empty mount at the missing path and QC jobs would fail later.
+func (a *App) checkOrcaForServices(services []string) error {
+	if !servicesNeedOrca(services) {
+		return nil
+	}
+	path := a.currentOrcaHostPath()
+	if err := validateOrcaHostPath(path); err != nil {
+		return fmt.Errorf(
+			"Quantum Chemistry needs a local ORCA installation. "+
+				"Choose the folder that contains the ORCA executable before starting: %v",
+			err,
+		)
+	}
+	return nil
+}
+
+// validateOrcaHostPath requires a directory that contains the ORCA binary
+// (orca on Unix, orca.exe on Windows). The template default /opt/orca is
+// not treated as configured unless that folder is a real install.
+func validateOrcaHostPath(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("choose the folder that contains the ORCA executable")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("ORCA folder not found: %s", path)
+		}
+		return fmt.Errorf("cannot read ORCA folder %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("ORCA path is not a folder: %s", path)
+	}
+
+	names := []string{"orca"}
+	if goruntime.GOOS == "windows" {
+		names = []string{"orca.exe"}
+	}
+	for _, name := range names {
+		bin := filepath.Join(path, name)
+		st, err := os.Stat(bin)
+		if err == nil && st.Mode().IsRegular() {
+			return nil
+		}
+	}
+	return fmt.Errorf("no ORCA executable found in %s (expected %s)", path, strings.Join(names, " or "))
 }
 
 // canonicalImageRef normalizes a tag reference for exact comparisons.
