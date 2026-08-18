@@ -1,22 +1,32 @@
-# GPU overlay — opt-in NVIDIA device reservations.
+# GPU overlay — opt-in NVIDIA device injection via CDI.
 #
-# The base docker-compose.yml is CPU-safe: it carries NO GPU device reservations,
+# The base docker-compose.yml is CPU-safe: it carries NO GPU devices,
 # so `docker compose up` works on hosts without the NVIDIA container runtime.
 # Core GPU services (md, worker-gpu-short) fall back to the OpenMM CPU platform.
 #
-# Layer this file ON TOP of the base to reserve GPUs where one is available:
+# Layer this file ON TOP of the base to attach GPUs where one is available:
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Uses CDI (Container Device Interface) rather than the legacy `driver: nvidia`
+# reservation. CDI injects the GPU through the OCI spec, so the device cgroup
+# rules are tracked by systemd and survive `systemctl daemon-reload`. The legacy
+# hook path silently loses GPU access on any daemon-reload (NVML "Unknown Error"
+# → CUDA_ERROR_NO_DEVICE → CPU fallback). Needs a CDI spec naming this GPU under
+# one of Docker's default CDI spec directories (`docker info | grep -A2 "CDI spec
+# directories"` — typically /etc/cdi and /run/cdi). On a current
+# nvidia-container-toolkit install (>=1.17-ish) this is already automatic: the
+# packaged `nvidia-cdi-refresh.path`/`.service` systemd units regenerate
+# /run/cdi/nvidia.yaml on driver/toolkit install or upgrade — check
+# `systemctl status nvidia-cdi-refresh.path` before assuming manual setup is
+# needed. Only run `sudo nvidia-ctk cdi generate` by hand if `docker info` shows
+# no `nvidia.com/gpu=...` device and that systemd unit doesn't exist/isn't
+# enabled (older toolkit versions, or a host that never installed it).
 #
 # The launcher applies it automatically when it detects an NVIDIA GPU. Keep this
 # file in lockstep with the public ligand-x/ copy.
 x-gpu-reservation: &gpu-reservation
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: all
-            capabilities: [gpu]
+  devices:
+    - "nvidia.com/gpu=all"
 
 services:
   # Core GPU services (graceful CPU fallback when this overlay is absent)
@@ -34,5 +44,11 @@ services:
     <<: *gpu-reservation
   worker-gpu-long:
     <<: *gpu-reservation
-  worker-kinetics:
-    <<: *gpu-reservation
+  # worker-kinetics is intentionally NOT listed here: it's a preview/experimental
+  # service (see FORBIDDEN_SERVICES in ligand-x/scripts/validate_runtime_bundle.py)
+  # that the stable runtime's rendered docker-compose.yml never defines. Compose
+  # merges an override for an undefined service into a stub with no image/build
+  # context and refuses to run ("invalid compose project"), so referencing it
+  # here would break every stable-channel `up`, not just kinetics itself. Add it
+  # back only once kinetics graduates into the stable service set, or give it
+  # its own dev-only overlay that never ships in the runtime bundle.

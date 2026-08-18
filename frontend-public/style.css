@@ -122,6 +122,10 @@ select.input option {
   background: var(--surface-2);
   color: var(--text);
 }
+.env-editor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px; line-height: 1.5; resize: vertical; min-height: 160px;
+}
 
 /* ---------- Buttons ---------- */
 .btn {
@@ -296,6 +300,7 @@ select.input option {
 .license-modal-body { padding: 14px 16px; }
 .license-modal-footer { padding: 0 16px 14px; }
 .release-modal { width: 460px; }
+.orca-modal { width: 420px; }
 .release-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; max-height: 330px; overflow-y: auto; }
 .release-option {
   display: flex; gap: 10px; align-items: flex-start; padding: 11px;

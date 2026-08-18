@@ -25,6 +25,7 @@ const state = {
   pendingRuntimePull: false,
   releaseOnDone: null,
   releaseInstalled: "",
+  _orcaPrompt: null,     // { resolve, confirmed } while the ORCA dialog is open
 };
 
 const ONBOARDING_STEPS = ["login", "license", "services", "pull"];
@@ -414,9 +415,14 @@ function svcCard(g) {
     </div>`;
 
   if (!g.locked && !g.required) {
-    item.onclick = () => {
-      if (state.selected.has(g.id)) state.selected.delete(g.id);
-      else state.selected.add(g.id);
+    item.onclick = async () => {
+      if (state.selected.has(g.id)) {
+        state.selected.delete(g.id);
+        renderServices();
+        return;
+      }
+      if (g.id === "qc" && !(await ensureOrcaForQC())) return;
+      state.selected.add(g.id);
       renderServices();
     };
   } else if (g.locked) {
@@ -464,6 +470,8 @@ function selectedGroupIds() {
 // If everything is already downloaded we skip the pull screen entirely — this
 // is what makes "Change services" cheap when nothing new was added.
 async function confirmServices() {
+  if (selectedGroupIds().includes("qc") && !(await ensureOrcaForQC())) return;
+
   const ids = selectedGroupIds();
   const btn = el("svcNext");
 
@@ -572,6 +580,7 @@ async function enterRunning(sub) {
   if (sub === "idle") {
     setRunHeader("○", "", "Ready to start", "Click Start services, then Open Ligand-X.");
     el("startBtn").hidden = false;
+    el("restartBtn").hidden = true;
     el("stopBtn").hidden = true;
     el("openApp").disabled = true;
     el("runTip").hidden = false;
@@ -583,17 +592,21 @@ async function enterRunning(sub) {
 
   // "starting": services were just (or are being) started.
   el("startBtn").hidden = true;
+  el("restartBtn").hidden = false;
   el("stopBtn").hidden = false;
   setRunHeader("◐", "starting", "Starting services…", "This can take a minute on first run.");
   startStatusPolling();
 }
 
 async function startFromRunning() {
+  const groupIds = (state.config && state.config.selectedGroups && state.config.selectedGroups.length)
+    ? state.config.selectedGroups : ["core"];
+  if (groupIds.includes("qc") && !(await ensureOrcaForQC())) return;
+
   await preflight(async () => {
     showScreen("running");
-    const groupIds = (state.config && state.config.selectedGroups && state.config.selectedGroups.length)
-      ? state.config.selectedGroups : ["core"];
     el("startBtn").hidden = true;
+    el("restartBtn").hidden = false;
     el("stopBtn").hidden = false;
     el("runError").textContent = "";
     setRunHeader("◐", "starting", "Starting services…", "This can take a minute.");
@@ -611,6 +624,7 @@ function handleStartError(msg, groupIds) {
   const clean = msg.replace(/^Error:\s*/, "");
   el("runError").textContent = clean;
   setRunHeader("○", "", "Couldn't start", "");
+  el("restartBtn").hidden = true;
   el("stopBtn").hidden = true;
   // Missing images? Offer a re-download.
   if (/pull|not found|no such image|manifest/i.test(clean)) {
@@ -663,10 +677,12 @@ async function refreshStatus() {
   if (running > 0 && running >= total && total > 0) {
     setRunHeader("●", "up", "Ligand-X is running", `${running} of ${total} services up.`);
     el("startBtn").hidden = true;
+    el("restartBtn").hidden = false;
     el("stopBtn").hidden = false;
     el("runTip").hidden = false;
   } else if (running > 0) {
     setRunHeader("◐", "starting", "Starting services…", `${running} of ${total} services up.`);
+    el("restartBtn").hidden = false;
     el("stopBtn").hidden = false;
     el("runTip").hidden = true;
   } else if (!state.statusTimer) {
@@ -711,6 +727,23 @@ async function stopServices() {
     return;
   }
   enterRunning("idle");
+}
+
+async function restartServices() {
+  const groupIds = selectedFallback();
+  if (groupIds.includes("qc") && !(await ensureOrcaForQC())) return;
+
+  el("restartBtn").disabled = true;
+  el("runError").textContent = "";
+  setRunHeader("◐", "starting", "Restarting services…", "This can take a minute.");
+  try {
+    await App().RestartServiceGroups(groupIds);
+  } catch (e) {
+    el("runError").textContent = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    el("restartBtn").disabled = false;
+  }
+  startStatusPolling();
 }
 
 // ---------- user modal ----------
@@ -843,6 +876,32 @@ async function enterSettings() {
     el("installedRuntimeVersion").textContent = "Installed version could not be read.";
   }
   updateSettingsSections();
+  loadEnvEditor();
+}
+
+async function loadEnvEditor() {
+  el("envEditorError").textContent = "";
+  el("envEditorSaved").hidden = true;
+  try {
+    el("envEditor").value = await App().GetEnvContent("prod");
+  } catch (e) {
+    el("envEditorError").textContent = String(e).replace(/^Error:\s*/, "");
+  }
+}
+
+async function saveEnvEditor() {
+  el("envEditorError").textContent = "";
+  el("envEditorSaved").hidden = true;
+  const btn = el("envEditorSave");
+  btn.disabled = true;
+  try {
+    await App().SaveEnvContent("prod", el("envEditor").value);
+    el("envEditorSaved").hidden = false;
+  } catch (e) {
+    el("envEditorError").textContent = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function loadSettings() {
@@ -897,7 +956,11 @@ async function saveSettings() {
     boltzMsaApiKey:       "",
   };
 
+  const selected = (state.config && state.config.selectedGroups) || [];
   try {
+    if (selected.includes("qc")) {
+      await App().ValidateOrcaHostPath(s.orcaHostPath);
+    }
     await App().SaveUserSettings(s);
     el("settingsSaved").hidden = false;
   } catch (e) {
@@ -906,6 +969,80 @@ async function saveSettings() {
     btn.disabled = false;
     btn.textContent = "Save changes";
   }
+}
+
+// ---------- ORCA path prompt ----------
+// QC bind-mounts ORCA_HOST_PATH into the container. Skip the dialog when that
+// path already contains an orca binary; otherwise require the user to pick one.
+async function ensureOrcaForQC() {
+  try {
+    if (await App().OrcaHostPathReady()) return true;
+  } catch (e) { /* treat as not ready */ }
+  if (state._orcaPrompt || el("orcaModal").open) return false;
+  return promptOrcaPath();
+}
+
+function promptOrcaPath() {
+  return new Promise((resolve) => {
+    state._orcaPrompt = { resolve, confirmed: false };
+    el("orcaModalError").textContent = "";
+    el("orcaModalPath").value = "";
+    (async () => {
+      try {
+        const s = await App().GetUserSettings();
+        el("orcaModalPath").value = s.orcaHostPath || "";
+      } catch (e) { /* leave blank */ }
+      try {
+        const modal = el("orcaModal");
+        modal.showModal();
+        modal.focus();
+      } catch (e) {
+        finishOrcaPrompt(false);
+      }
+    })();
+  });
+}
+
+function finishOrcaPrompt(ok) {
+  const pending = state._orcaPrompt;
+  state._orcaPrompt = null;
+  if (pending && pending.resolve) pending.resolve(ok);
+}
+
+async function browseOrcaModal() {
+  el("orcaModalError").textContent = "";
+  try {
+    const p = await App().BrowseForFolder("Select ORCA Installation Folder");
+    if (!p) return;
+    el("orcaModalPath").value = p;
+    try {
+      await App().ValidateOrcaHostPath(p);
+    } catch (e) {
+      el("orcaModalError").textContent = String(e).replace(/^Error:\s*/, "");
+    }
+  } catch (e) { /* cancelled */ }
+}
+
+async function confirmOrcaModal() {
+  const path = el("orcaModalPath").value.trim();
+  el("orcaModalError").textContent = "";
+  const btn = el("orcaModalConfirm");
+  btn.disabled = true;
+  try {
+    await App().SetOrcaHostPath(path);
+    if (el("orcaPath")) el("orcaPath").value = path;
+    if (state._orcaPrompt) state._orcaPrompt.confirmed = true;
+    el("orcaModal").close();
+  } catch (e) {
+    el("orcaModalError").textContent = String(e).replace(/^Error:\s*/, "");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function onOrcaModalClose() {
+  const pending = state._orcaPrompt;
+  finishOrcaPrompt(!!(pending && pending.confirmed));
 }
 
 // ---------- logs (gate + pull) ----------
@@ -932,6 +1069,11 @@ function wireEvents() {
   el("licenseModalClose").onclick = () => el("licenseModal").close();
   el("licenseModal").addEventListener("click", (e) => { if (e.target === el("licenseModal")) el("licenseModal").close(); });
   el("licenseModalImport").onclick = importLicenseFromModal;
+  el("orcaModalClose").onclick = () => el("orcaModal").close();
+  el("orcaModal").addEventListener("click", (e) => { if (e.target === el("orcaModal")) el("orcaModal").close(); });
+  el("orcaModal").addEventListener("close", onOrcaModalClose);
+  el("orcaModalBrowse").onclick = browseOrcaModal;
+  el("orcaModalConfirm").onclick = confirmOrcaModal;
   el("loginNext").onclick = handleLogin;
   el("password").addEventListener("keydown", (e) => { if (e.key === "Enter") handleLogin(); });
 
@@ -946,7 +1088,10 @@ function wireEvents() {
 
   el("openApp").onclick = () => { try { App().OpenFrontend(); } catch (e) {} };
   el("startBtn").onclick = startFromRunning;
+  el("restartBtn").onclick = restartServices;
   el("stopBtn").onclick = stopServices;
+  el("envEditorReload").onclick = loadEnvEditor;
+  el("envEditorSave").onclick = saveEnvEditor;
   el("changeServices").onclick = () => enterServices(true);
   el("helpBtn").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
   el("openDocs").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
