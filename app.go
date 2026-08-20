@@ -3451,12 +3451,46 @@ func (a *App) ensureProductionEnv() error {
 		cur["PRO_VERSION"] = templatePro
 	}
 
+	// gpu-short is shared between free and Pro work, so which image that worker
+	// runs depends on the current selection rather than on the licence. Resolve
+	// it here, on every compose invocation, so enabling a Pro group later starts
+	// using the Pro worker and disabling it goes back to the credential-free
+	// public one.
+	if err := a.syncGPUShortImage(); err != nil {
+		return err
+	}
+
 	// The template's resource limits describe a multi-GPU workstation. Docker
 	// rejects any container whose `cpus` exceeds the daemon's CPU count, so on a
 	// smaller machine the stack cannot start at all until these are cut down to
 	// size. Runs on every start, so an .env.production carried over from bigger
 	// hardware self-heals too.
 	return a.fitResourceLimits(cur)
+}
+
+// syncGPUShortImage writes or clears LIGANDX_GPU_SHORT_IMAGE to match the groups
+// currently selected.
+//
+// Clearing matters as much as setting: a stale Pro reference left behind after a
+// Pro group is deselected would demand registry credentials the user may no
+// longer have, and would fail the pull for a selection that is now entirely free.
+func (a *App) syncGPUShortImage() error {
+	config, err := a.GetLauncherConfig()
+	if err != nil {
+		// No selection recorded yet (first run) means nothing Pro is running.
+		config = LauncherConfig{}
+	}
+	_, proPrefix := a.productionImageSettings()
+	want := gpuShortImageOverride(config.SelectedGroups, proPrefix, a.productionProVersion())
+
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(parseEnvFile(content)["LIGANDX_GPU_SHORT_IMAGE"]) == want {
+		return nil
+	}
+	return a.setProductionEnvValue("LIGANDX_GPU_SHORT_IMAGE", want)
 }
 
 // templatePinnedVersion returns the VERSION pinned in .env.production.template,
@@ -4062,6 +4096,12 @@ func coreServiceImages(version string) []string {
 func (a *App) GetServiceGroups() []ServiceGroup {
 	license := a.GetLicenseStatus()
 	version, proPrefix := a.productionImageSettings()
+	// Pro images are tagged independently of the public ones; compose resolves
+	// them as ${PRO_VERSION:-${VERSION}}. The shared gpu-short worker is pulled
+	// here and launched from LIGANDX_GPU_SHORT_IMAGE, so both must name the same
+	// tag or the launcher pulls one image and compose runs another.
+	proVersion := a.productionProVersion()
+	proGPUShortImage := imageRef(proPrefix+"/worker-gpu-short", proVersion)
 	groups := []ServiceGroup{
 		{
 			ID:          "core",
@@ -4094,46 +4134,61 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Name:        "Molecular Dynamics",
 			Description: "MD simulations with OpenMM/OpenFF",
 			Services:    []string{"md", "worker-gpu-short"},
+			// The public worker image carries md_optimize and workflow_run, which
+			// is everything this group submits, and needs no registry
+			// credentials -- so a free-tier install can run MD without a licence.
+			// Selecting a Pro group that also uses gpu-short swaps in the Pro
+			// superset image through LIGANDX_GPU_SHORT_IMAGE; see
+			// gpuShortImageOverride.
 			Images: []string{
 				imageRef("ghcr.io/kon-218/ligand-x/md", version),
-				imageRef(proPrefix+"/worker-gpu-short", version),
+				imageRef("ghcr.io/kon-218/ligand-x/worker-gpu-short", version),
 			},
-			RegistryAuthImages: []string{imageRef(proPrefix+"/worker-gpu-short", version)},
-			SizeMB:             4500,
-			Required:           false,
-			DefaultOn:          true,
-			Edition:            "free",
-			Licensed:           true,
+			SizeMB:    4500,
+			Required:  false,
+			DefaultOn: true,
+			Edition:   "free",
+			Licensed:  true,
 		},
 		{
 			ID:          "admet",
 			Name:        "ADMET Prediction",
 			Description: "Pro package: predict molecular properties, pharmacokinetics, and toxicity",
 			Services:    []string{"admet"},
+			// admet_predict runs on the shared gpu-short worker, so this group
+			// owns the Pro image for it: the md group ships the public worker,
+			// which has no admet module.
 			Images: []string{
 				imageRef(proPrefix+"/admet", version),
+				proGPUShortImage,
 			},
-			SizeMB:      1500,
-			Required:    false,
-			DefaultOn:   false,
-			Edition:     "pro",
-			Entitlement: "admet",
+			RegistryAuthImages: []string{proGPUShortImage},
+			SizeMB:             1500,
+			Required:           false,
+			DefaultOn:          false,
+			Edition:            "pro",
+			Entitlement:        "admet",
 		},
 		{
 			ID:          "free-energy",
 			Name:        "Binding Free Energy",
 			Description: "Pro package: ABFE/RBFE binding free energy calculations",
 			Services:    []string{"abfe", "rbfe", "worker-gpu-long"},
+			// rbfe_mapping_preview is routed to gpu-short, not gpu-long, so this
+			// group needs the Pro shared worker too -- previously it depended on
+			// the md group happening to pull it.
 			Images: []string{
 				imageRef(proPrefix+"/abfe", version),
 				imageRef(proPrefix+"/rbfe", version),
 				imageRef(proPrefix+"/worker-gpu-long", version),
+				proGPUShortImage,
 			},
-			SizeMB:      5500,
-			Required:    false,
-			DefaultOn:   false,
-			Edition:     "pro",
-			Entitlement: "free-energy",
+			RegistryAuthImages: []string{proGPUShortImage},
+			SizeMB:             5500,
+			Required:           false,
+			DefaultOn:          false,
+			Edition:            "pro",
+			Entitlement:        "free-energy",
 		},
 		{
 			ID:          "qc",
@@ -4155,14 +4210,17 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Name:        "Boltz-2",
 			Description: "Pro package: Boltz-2 binding affinity predictions",
 			Services:    []string{"boltz2"},
+			// boltz_predict and boltz_batch run on the shared gpu-short worker.
 			Images: []string{
 				imageRef(proPrefix+"/boltz2", version),
+				proGPUShortImage,
 			},
-			SizeMB:      6000,
-			Required:    false,
-			DefaultOn:   false,
-			Edition:     "pro",
-			Entitlement: "boltz2",
+			RegistryAuthImages: []string{proGPUShortImage},
+			SizeMB:             6000,
+			Required:           false,
+			DefaultOn:          false,
+			Edition:            "pro",
+			Entitlement:        "boltz2",
 		},
 		{
 			ID:          "reinvent",
