@@ -989,6 +989,7 @@ function updateEstimatedSize() {
 
 
 async function startWizardPull() {
+    let needDownload = null;
     try {
         if (!distributionStatus || distributionStatus.needsInstall) {
             addLog('launcher', 'Installing Ligand-X runtime files...');
@@ -997,6 +998,18 @@ async function startWizardPull() {
             renderWizardLicenseSummary();
         }
         await ensureWizardAccount();
+
+        // Re-check which images are already present right before we start
+        // downloading. This keeps "skip" correct even if the user pulled
+        // some images earlier in the launcher session.
+        const imageStatus = await window.go.main.App.CheckImagePresence();
+        wizardImageStatus = imageStatus || {};
+        needDownload = wizardSelectedGroups.filter(id => !wizardImageStatus[id]);
+        if (needDownload.length === 0) {
+            await saveWizardConfig();
+            return;
+        }
+
     } catch (err) {
         setWizardSetupError(err.message || err);
         return;
@@ -1017,7 +1030,8 @@ async function startWizardPull() {
     }
 
     // Start pull
-    window.go.main.App.PullServiceGroups(wizardSelectedGroups);
+    window.isPulling = true;
+    window.go.main.App.PullServiceGroups(needDownload);
 }
 
 async function skipWizardPull() {
@@ -1053,6 +1067,11 @@ function handlePullComplete(data) {
     } else {
         // Pull failed
         failedPullGroups = data.failedGroups || wizardSelectedGroups;
+        if (data.reason === 'cancelled') {
+            // Pull cancellation is an intentional user action (Back/Stop); don't
+            // show error UI or reset wizard controls.
+            return;
+        }
 
         // Check if this was a wizard pull or service tab pull
         if (wizardSelectedGroups && wizardSelectedGroups.length > 0 && document.getElementById('firstRunWizard').classList.contains('hidden') === false) {
@@ -1841,7 +1860,24 @@ function setWizardStep(step) {
     if (next) next.textContent = step === 'review' ? 'Launch Ligand-X' : 'Next';
 }
 
-function wizardBack() {
+async function wizardBack() {
+    if (window.isPulling) {
+        // Back during pull means "stop download and go back to service selection".
+        window.isPulling = false;
+        try {
+            await window.go.main.App.StopPullServiceGroups();
+        } catch (e) { /* best-effort cancellation */ }
+
+        const progress = document.getElementById('pullProgressContainer');
+        if (progress) progress.classList.add('hidden');
+
+        const banner = document.getElementById('pullErrorBanner');
+        if (banner) banner.classList.add('hidden');
+
+        setWizardStep('services');
+        return;
+    }
+
     const idx = WIZARD_STEPS.indexOf(currentWizardStep);
     setWizardStep(WIZARD_STEPS[Math.max(0, idx - 1)]);
 }
