@@ -189,20 +189,39 @@ async function installRuntime(onReady, version = "", pullAfter = false) {
 async function openReleaseSelector(onDone, pullAfter = true) {
   state.releaseOnDone = { fn: onDone, pullAfter };
   const modal = el("releaseModal");
+  modal.showModal();
+  await loadReleaseList();
+}
+
+// Split out from opening the modal so toggling the channel can refresh the list
+// in place, without closing and losing what the user was doing.
+async function loadReleaseList() {
   const list = el("releaseList");
   const install = el("releaseInstall");
-  list.textContent = "Loading signed stable releases…";
+  const warning = el("releaseWarning");
+  const toggle = el("releasePrereleaseToggle");
+  list.textContent = "Loading signed releases…";
   el("releaseError").textContent = "";
+  warning.hidden = true;
+  warning.textContent = "";
   install.disabled = true;
   install.dataset.version = "";
-  modal.showModal();
   try {
-    try {
-      const distribution = await App().GetDistributionStatus();
-      state.releaseInstalled = distribution.installedVersion || "";
-    } catch (e) { state.releaseInstalled = ""; }
-    const releases = await App().ListRuntimeReleases();
+    const options = await App().ListRuntimeReleaseOptions();
+    const releases = options.releases || [];
+    state.releaseInstalled = options.installed || "";
+    toggle.checked = !!options.showPrereleases;
+    if (options.warning) {
+      warning.textContent = options.warning;
+      warning.hidden = false;
+    }
     list.textContent = "";
+    if (!releases.length) {
+      list.textContent = options.showPrereleases
+        ? "No signed releases were found."
+        : "No stable releases were found. Turn on release candidates to see pre-release builds.";
+      return;
+    }
     releases.forEach((release) => {
       const label = document.createElement("label");
       label.className = "release-option";
@@ -221,9 +240,13 @@ async function openReleaseSelector(onDone, pullAfter = true) {
       const body = document.createElement("span");
       body.className = "release-option-body";
       const title = document.createElement("strong");
-      title.textContent = `${release.version}${release.recommended ? " · Recommended" : ""}`;
+      const tags = [];
+      if (release.recommended) tags.push("Recommended");
+      if (release.version.includes("-")) tags.push("Release candidate");
+      if (release.version === state.releaseInstalled) tags.push("Installed");
+      title.textContent = `${release.version}${tags.length ? " · " + tags.join(" · ") : ""}`;
       const summary = document.createElement("span");
-      summary.textContent = release.summary || release.compatibility || "Supported stable release";
+      summary.textContent = release.summary || release.compatibility || "Signed, supported release";
       const meta = document.createElement("small");
       const size = release.downloadBytes ? ` · runtime ${(release.downloadBytes / 1048576).toFixed(1)} MB` : "";
       const rebuilt = release.rebuiltComponents && release.rebuiltComponents.length ? ` · ${release.rebuiltComponents.length} rebuilt component${release.rebuiltComponents.length === 1 ? "" : "s"}` : "";
@@ -1065,6 +1088,20 @@ function wireEvents() {
   el("releaseModalClose").onclick = () => el("releaseModal").close();
   el("releaseModal").addEventListener("click", (e) => { if (e.target === el("releaseModal")) el("releaseModal").close(); });
   el("releaseInstall").onclick = installSelectedRelease;
+  el("releasePrereleaseToggle").onchange = async (event) => {
+    const toggle = event.target;
+    toggle.disabled = true;
+    try {
+      await App().SetShowPrereleases(toggle.checked);
+      await loadReleaseList();
+    } catch (e) {
+      // Put the checkbox back where it was: the channel did not actually change.
+      toggle.checked = !toggle.checked;
+      el("releaseError").textContent = String(e).replace(/^Error:\s*/, "");
+    } finally {
+      toggle.disabled = false;
+    }
+  };
   el("editionBadge").onclick = openLicenseModal;
   el("licenseModalClose").onclick = () => el("licenseModal").close();
   el("licenseModal").addEventListener("click", (e) => { if (e.target === el("licenseModal")) el("licenseModal").close(); });
