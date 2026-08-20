@@ -2,6 +2,7 @@
 
 - [Product and installation](../README.md)
 - [FAQ](FAQ.md)
+- [Runtime security](security.md)
 - [Contributor setup](../CONTRIBUTING.md)
 - [Manual Windows build](manual-windows-build.md)
 - [Image asset requirements](images/README.md)
