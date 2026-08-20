@@ -1498,7 +1498,11 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 	}
 }
 
-func TestSignedReleaseIndexRequiresExactlyOneRecommended(t *testing.T) {
+// Superseded by TestMalformedRecommendationDegradesInsteadOfFailing: a wrong
+// recommendation count no longer rejects the index, because doing so hid every
+// release and left the user unable to install anything (v2026.08.15-rc.8). The
+// signature remains mandatory; only the recommendation flags are normalised.
+func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -1536,16 +1540,36 @@ func TestSignedReleaseIndexRequiresExactlyOneRecommended(t *testing.T) {
 	}
 
 	payload, signature := sign(base(false, false))
-	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil || !strings.Contains(err.Error(), "exactly one recommended release") {
-		t.Fatalf("zero recommended releases should be rejected, got %v", err)
+	index, err := verifyRuntimeReleaseIndex(payload, signature)
+	if err != nil {
+		t.Fatalf("zero recommended releases must still list, got %v", err)
 	}
+	if len(index.Releases) != 2 || index.Warning == "" {
+		t.Fatalf("expected both releases listed with a warning, got %d releases, warning %q",
+			len(index.Releases), index.Warning)
+	}
+
 	payload, signature = sign(base(true, true))
-	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil || !strings.Contains(err.Error(), "exactly one recommended release") {
-		t.Fatalf("two recommended releases should be rejected, got %v", err)
+	index, err = verifyRuntimeReleaseIndex(payload, signature)
+	if err != nil {
+		t.Fatalf("two recommended releases must still list, got %v", err)
 	}
+	for _, release := range index.Releases {
+		if release.Recommended {
+			t.Fatalf("ambiguous recommendation must be cleared, %s is still marked", release.Version)
+		}
+	}
+	if index.Warning == "" {
+		t.Fatal("expected a warning for the ambiguous recommendation")
+	}
+
 	payload, signature = sign(base(true, false))
-	if _, err := verifyRuntimeReleaseIndex(payload, signature); err != nil {
+	index, err = verifyRuntimeReleaseIndex(payload, signature)
+	if err != nil {
 		t.Fatalf("single recommended release was rejected: %v", err)
+	}
+	if index.Warning != "" {
+		t.Fatalf("well-formed index must not warn, got %q", index.Warning)
 	}
 }
 

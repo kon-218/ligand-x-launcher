@@ -279,7 +279,13 @@
       <button id="releaseModalClose" class="modal-close" aria-label="Close">✕</button>
     </div>
     <div class="license-modal-body">
-      <p class="field-hint">Only signed, supported stable releases are shown. Images are not downloaded until you confirm.</p>
+      <p class="field-hint">Every release shown is signed and verified. Images are not downloaded until you confirm.</p>
+      <label class="release-channel">
+        <input type="checkbox" id="releasePrereleaseToggle">
+        <span>Show release candidates</span>
+      </label>
+      <p class="field-hint release-channel-hint">Release candidates are pre-release builds for testing. They are signed, but not recommended for day-to-day work.</p>
+      <div id="releaseWarning" class="inline-warning" hidden></div>
       <div id="releaseList" class="release-list"></div>
       <div id="releaseError" class="inline-error"></div>
     </div>

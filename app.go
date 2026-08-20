@@ -121,6 +121,12 @@ type LauncherConfig struct {
 	SelectedGroups []string    `json:"selectedGroups"`
 	UserProfile    UserProfile `json:"userProfile"`
 	ConfigVersion  int         `json:"configVersion"`
+
+	// ShowPrereleases opts this install into release candidates, in the version
+	// picker and in the version-less "install latest" path alike. Defaults to
+	// false, so an install that never touches the toggle keeps seeing only
+	// stable releases.
+	ShowPrereleases bool `json:"showPrereleases"`
 }
 
 type UserProfile struct {
@@ -172,6 +178,11 @@ type runtimeReleaseIndex struct {
 	IssuedAt  string           `json:"issued_at"`
 	ExpiresAt string           `json:"expires_at"`
 	Releases  []RuntimeRelease `json:"releases"`
+
+	// Warning carries a non-fatal defect found while validating the index, for
+	// display alongside the release list. Never serialised: it describes this
+	// verification, not the signed document.
+	Warning string `json:"-"`
 }
 
 type LicenseSummary struct {
@@ -277,6 +288,10 @@ const runtimeBundleAssetName = "ligand-x-runtime.zip"
 
 const latestReleaseAPIURL = "https://api.github.com/repos/kon-218/ligand-x-launcher/releases/latest"
 
+// The listing endpoint, unlike /releases/latest, returns pre-releases and does
+// not depend on GitHub's "Latest" pointer -- which has been wrong here before.
+const releasesListAPIURL = "https://api.github.com/repos/kon-218/ligand-x-launcher/releases?per_page=50"
+
 const runtimeBundleManifestAssetName = "ligand-x-runtime-manifest.json"
 const runtimeBundleSignatureAssetName = "ligand-x-runtime-manifest.sig"
 const runtimeReleaseIndexAssetName = "ligand-x-release-index.json"
@@ -345,6 +360,10 @@ type App struct {
 	logStreams    map[string]context.CancelFunc
 	logStreamsMux sync.Mutex
 	composeLogMux sync.Mutex
+
+	// lastReleaseIndexWarning holds any non-fatal defect from the most recent
+	// index verification, for ListRuntimeReleaseOptions to surface.
+	lastReleaseIndexWarning string
 
 	// Cloudflare tunnel (see tunnel.go)
 	tunnelCmd *exec.Cmd
@@ -555,14 +574,14 @@ func (a *App) runtimeBundleURL() string {
 	return defaultRuntimeBundleURL
 }
 
-// resolveLatestRuntimeBundleURL queries the GitHub releases API to find the
+// fetchReleaseListing queries the GitHub releases API to find the
 // download URL of the runtime bundle asset attached to the latest release.
 // GitHub's /releases/latest/download/<asset> redirect is unreliable on some
 // Windows HTTP clients, so we resolve the concrete asset URL explicitly.
-func resolveLatestReleaseAssets(wanted ...string) (map[string]string, string, error) {
-	req, err := http.NewRequest(http.MethodGet, latestReleaseAPIURL, nil)
+func fetchReleaseListing() ([]githubRelease, error) {
+	req, err := http.NewRequest(http.MethodGet, releasesListAPIURL, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "ligand-x-launcher")
@@ -570,43 +589,32 @@ func resolveLatestReleaseAssets(wanted ...string) (map[string]string, string, er
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("GitHub releases API returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("GitHub releases API returned HTTP %d", resp.StatusCode)
 	}
 
-	var release struct {
-		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		} `json:"assets"`
+	var releases []githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, fmt.Errorf("failed to parse GitHub releases response: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, "", fmt.Errorf("failed to parse GitHub releases response: %w", err)
-	}
-	wantedSet := make(map[string]bool, len(wanted))
-	for _, name := range wanted {
-		wantedSet[name] = true
-	}
-	found := make(map[string]string, len(wanted))
-	for _, asset := range release.Assets {
-		if wantedSet[asset.Name] && strings.TrimSpace(asset.BrowserDownloadURL) != "" {
-			found[asset.Name] = asset.BrowserDownloadURL
-		}
-	}
-	for _, name := range wanted {
-		if found[name] == "" {
-			return nil, "", fmt.Errorf("asset %q not found in latest release %q", name, release.TagName)
-		}
-	}
-	return found, strings.TrimSpace(release.TagName), nil
+	return releases, nil
 }
 
-func resolveLatestRuntimeBundleURL() (string, string, error) {
-	assets, tag, err := resolveLatestReleaseAssets(runtimeBundleAssetName)
+// resolveReleaseAssets finds the newest release on the requested channel that
+// carries every wanted asset.
+func resolveReleaseAssets(includePrereleases bool, wanted ...string) (map[string]string, string, error) {
+	releases, err := fetchReleaseListing()
+	if err != nil {
+		return nil, "", err
+	}
+	return selectReleaseAssets(releases, includePrereleases, wanted)
+}
+
+func resolveRuntimeBundleURLForChannel(includePrereleases bool) (string, string, error) {
+	assets, tag, err := resolveReleaseAssets(includePrereleases, runtimeBundleAssetName)
 	if err != nil {
 		return "", "", err
 	}
@@ -766,8 +774,22 @@ func verifyRuntimeReleaseIndex(indexBytes, signatureBytes []byte) (runtimeReleas
 		release.Compatible = compatible
 		release.Compatibility = message
 	}
-	if recommended != 1 {
-		return runtimeReleaseIndex{}, fmt.Errorf("release index must identify exactly one recommended release")
+	// A wrong recommendation count is a presentation defect, not an authenticity
+	// one: the signature above already proved the document is ours. Failing here
+	// used to hide every release and leave no way to install anything, which is
+	// exactly what v2026.08.15-rc.8 did to the version picker by shipping an
+	// index with no recommendation and being pinned as "Latest". Clear the
+	// ambiguous flags, say so, and still show the list.
+	switch {
+	case recommended == 0:
+		index.Warning = "This release index does not mark a recommended version. " +
+			"Choose one explicitly, or check for a newer release."
+	case recommended > 1:
+		for i := range index.Releases {
+			index.Releases[i].Recommended = false
+		}
+		index.Warning = "This release index marks more than one version as recommended, " +
+			"so none is shown as recommended. Choose one explicitly."
 	}
 	return index, nil
 }
@@ -776,14 +798,21 @@ func verifyRuntimeReleaseIndex(indexBytes, signatureBytes []byte) (runtimeReleas
 // servers without an index retain the latest-only behavior; the selected
 // runtime manifest is still signature-verified during installation.
 func (a *App) ListRuntimeReleases() ([]RuntimeRelease, error) {
-	assets, tag, err := resolveLatestReleaseAssets(runtimeReleaseIndexAssetName, runtimeReleaseIndexSignatureAssetName)
+	// A user already running a pre-release must keep seeing it even with the
+	// toggle off, or the picker hides the version they are on.
+	channel := a.includePrereleases() || isPrereleaseVersion(installedRuntimeVersion(a.projectPath))
+	assets, tag, err := resolveReleaseAssets(channel, runtimeReleaseIndexAssetName, runtimeReleaseIndexSignatureAssetName)
 	if err != nil {
-		bundleURL, latest, latestErr := resolveLatestRuntimeBundleURL()
+		bundleURL, latest, latestErr := resolveRuntimeBundleURLForChannel(channel)
 		if latestErr != nil {
 			return nil, err
 		}
-		version := strings.TrimPrefix(latest, "launcher-")
-		return []RuntimeRelease{{Version: version, Status: "supported", Summary: "Latest stable release", Recommended: true, Compatible: true, Compatibility: "Compatible", BundleURL: bundleURL}}, nil
+		version := releaseVersionFromTag(latest)
+		summary := "Latest stable release"
+		if isPrereleaseVersion(version) {
+			summary = "Latest release candidate"
+		}
+		return []RuntimeRelease{{Version: version, Status: "supported", Summary: summary, Recommended: true, Compatible: true, Compatibility: "Compatible", BundleURL: bundleURL}}, nil
 	}
 	tempDir, err := os.MkdirTemp("", "ligandx-release-index-")
 	if err != nil {
@@ -810,15 +839,36 @@ func (a *App) ListRuntimeReleases() ([]RuntimeRelease, error) {
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(index.Releases, func(left, right RuntimeRelease) int {
-		comparison, comparable := compareReleaseVersions(left.Version, right.Version)
-		if !comparable {
-			return strings.Compare(right.Version, left.Version)
-		}
-		return -comparison
-	})
+	a.lastReleaseIndexWarning = index.Warning
+	slices.SortFunc(index.Releases, compareReleasesNewestFirst)
 	_ = tag
-	return index.Releases, nil
+	return filterReleasesForChannel(index.Releases, channel, installedRuntimeVersion(a.projectPath)), nil
+}
+
+// ReleaseOptions is what the version picker renders: the releases available on
+// the current channel, plus any non-fatal defect found in the signed index.
+type ReleaseOptions struct {
+	Releases        []RuntimeRelease `json:"releases"`
+	Warning         string           `json:"warning"`
+	ShowPrereleases bool             `json:"showPrereleases"`
+	Installed       string           `json:"installed"`
+}
+
+// ListRuntimeReleaseOptions is the picker-facing wrapper around
+// ListRuntimeReleases. It exists so the UI can show why an index looks odd --
+// no recommendation, or several -- instead of the list silently going empty.
+func (a *App) ListRuntimeReleaseOptions() (ReleaseOptions, error) {
+	options := ReleaseOptions{
+		ShowPrereleases: a.includePrereleases(),
+		Installed:       installedRuntimeVersion(a.projectPath),
+	}
+	releases, err := a.ListRuntimeReleases()
+	if err != nil {
+		return options, err
+	}
+	options.Releases = releases
+	options.Warning = a.lastReleaseIndexWarning
+	return options, nil
 }
 
 func verifyRuntimeBundleFile(path string, manifest runtimeBundleManifest) error {
@@ -1162,7 +1212,7 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 	} else if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
 		bundleURL = override
-	} else if resolved, tag, resolveErr := resolveLatestRuntimeBundleURL(); resolveErr == nil {
+	} else if resolved, tag, resolveErr := resolveRuntimeBundleURLForChannel(a.includePrereleases()); resolveErr == nil {
 		bundleURL = resolved
 		releaseTag = tag
 		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Resolved latest runtime bundle: %s", bundleURL), Timestamp: time.Now().Format("15:04:05")})
