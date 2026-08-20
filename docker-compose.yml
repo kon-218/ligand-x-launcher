@@ -873,7 +873,7 @@ services:
         max-size: 10m
         max-file: '3'
   worker-gpu-short:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-short:${PRO_VERSION:-${VERSION:-latest}}
+    image: ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
     command:
     - worker-gpu-short
     networks:
@@ -897,7 +897,7 @@ services:
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
-    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-short:${PRO_VERSION:-${VERSION:-latest}}
+    - LIGANDX_IMAGE_REF=${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully

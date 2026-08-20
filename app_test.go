@@ -207,6 +207,16 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 	}
 
 	resolve := func(raw string) string {
+		// A whole-reference override with a default, e.g.
+		// ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}.
+		// The baseline modelled here is a free selection, where the override is
+		// unset and the public default applies. The Pro branch is asserted
+		// separately by TestGPUShortImageOverride.
+		//
+		// Only unwrap when the whole string is one expression: the Pro images are
+		// ${PREFIX:-...}/name:${TAG:-...}, whose first closing brace lands
+		// mid-string, and unwrapping those yields nonsense.
+		raw = stripWholeEnvDefault(raw)
 		if strings.Contains(raw, "LIGANDX_PRO_IMAGE_PREFIX") {
 			remainder := raw[strings.LastIndex(raw, "}/")+2:]
 			name := strings.SplitN(remainder, ":", 2)[0]
@@ -3143,4 +3153,35 @@ func TestLauncherQualityRunsForMainPushes(t *testing.T) {
 	if !strings.Contains(workflow, "push:\n    branches: [main]") {
 		t.Fatal("launcher quality workflow must run for commits pushed to main")
 	}
+}
+
+// stripWholeEnvDefault returns the default branch of a ${VAR:-default} shell
+// expansion when the entire string is exactly one such expansion, and the input
+// unchanged otherwise. Brace depth decides: a reference like
+// ${PREFIX:-repo}/name:${TAG:-v} closes its first brace mid-string and is left
+// alone, while ${IMAGE:-repo/name:${TAG:-v}} unwraps to repo/name:${TAG:-v}.
+func stripWholeEnvDefault(raw string) string {
+	if !strings.HasPrefix(raw, "${") {
+		return raw
+	}
+	depth := 0
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				if i != len(raw)-1 {
+					return raw
+				}
+				inner := raw[2:i]
+				if idx := strings.Index(inner, ":-"); idx >= 0 {
+					return inner[idx+2:]
+				}
+				return raw
+			}
+		}
+	}
+	return raw
 }
