@@ -215,6 +215,18 @@ body.comfortable .tree-row, body.comfortable .service-table td, body.comfortable
 .pull-progress-header { display: flex; justify-content: space-between; color: var(--text-muted); }
 .license-modal { width: 460px; max-height: 75vh; margin: auto; background: var(--panel); border: 1px solid var(--hairline-strong); border-radius: 6px; overflow: auto; }
 #licenseModalContent { padding: 14px; }
+.support-modal { width: min(620px, 100%); max-height: 90vh; margin: auto; background: var(--panel); border: 1px solid var(--hairline-strong); border-radius: 6px; overflow: auto; }
+.support-modal-body { display: flex; flex-direction: column; gap: 12px; padding: 16px; color: var(--text-secondary); }
+.support-modal-body > p { margin: 0; }
+.support-warning { padding: 10px; border: 1px solid rgba(224, 163, 62, .55); background: rgba(224, 163, 62, .1); color: var(--accent-warning); }
+.support-context { display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; margin: 0; padding: 10px; border: 1px solid var(--hairline); background: var(--raised); }
+.support-context dt { color: var(--text-muted); }
+.support-context dd { margin: 0; color: var(--text-primary); font-family: var(--font-mono); overflow-wrap: anywhere; }
+.support-field { display: flex; flex-direction: column; gap: 6px; color: var(--text-primary); }
+.support-field textarea { resize: vertical; min-height: 90px; padding: 8px; border: 1px solid var(--hairline-strong); background: var(--outer); color: var(--text-primary); font: inherit; }
+.support-error-option { display: flex; align-items: center; gap: 7px; color: var(--text-secondary); }
+.support-error-preview { max-height: 110px; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; border: 1px solid var(--hairline); background: var(--outer); color: var(--text-secondary); }
+.support-modal-actions { display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 980px) { .workspace { grid-template-columns: 220px minmax(360px, 1fr); } .inspector { display: none; } .metric-grid { grid-template-columns: repeat(3, 1fr); } .split-panels { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .workspace { grid-template-columns: 1fr; } .navigator { display: none; } .metric-grid, .resource-grid { grid-template-columns: 1fr 1fr; } .tool-button span { display: none; } }

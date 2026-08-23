@@ -55,6 +55,30 @@ type LogEntry struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type LauncherSupportContext struct {
+	LauncherVersion string `json:"launcherVersion"`
+	ProductVersion  string `json:"productVersion"`
+	Platform        string `json:"platform"`
+}
+
+const launcherSupportIssueURL = "https://github.com/kon-218/ligand-x-support/issues/new"
+
+func buildLauncherSupportIssueURL(context LauncherSupportContext, actual string) string {
+	values := url.Values{}
+	values.Set("template", "01-launcher.yml")
+	values.Set("title", "[Launcher]: Launcher problem")
+	values.Set("launcher-version", context.LauncherVersion)
+	values.Set("product-version", context.ProductVersion)
+	values.Set("os-version", context.Platform)
+	if text := strings.TrimSpace(actual); text != "" {
+		if len(text) > 2000 {
+			text = text[:1986] + "\n… [truncated]"
+		}
+		values.Set("actual", text)
+	}
+	return launcherSupportIssueURL + "?" + values.Encode()
+}
+
 type ResourceMetrics struct {
 	CPUPercent       float64                   `json:"cpuPercent"`
 	LoadAverage      string                    `json:"loadAverage"`
@@ -392,6 +416,26 @@ func NewApp() *App {
 	return &App{
 		logStreams: make(map[string]context.CancelFunc),
 	}
+}
+
+func (a *App) GetLauncherSupportContext() LauncherSupportContext {
+	productVersion := "not available"
+	if a.projectPath != "" {
+		if content, err := os.ReadFile(filepath.Join(a.projectPath, ".env.production")); err == nil {
+			if value := strings.TrimSpace(parseEnvFile(string(content))["VERSION"]); value != "" {
+				productVersion = value
+			}
+		}
+	}
+	return LauncherSupportContext{
+		LauncherVersion: launcherVersion,
+		ProductVersion:  productVersion,
+		Platform:        goruntime.GOOS + "/" + goruntime.GOARCH,
+	}
+}
+
+func (a *App) OpenLauncherSupportIssue(actual string) {
+	wailsRuntime.BrowserOpenURL(a.ctx, buildLauncherSupportIssueURL(a.GetLauncherSupportContext(), actual))
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -3397,6 +3441,15 @@ func (a *App) ensureProductionEnv() error {
 		return err
 	}
 	cur := parseEnvFile(content)
+
+	// Expose only the public build version to the runtime so the web UI can
+	// include it in a user-reviewed support report. This is not a secret and is
+	// refreshed on every start so upgraded launcher binaries cannot leave a
+	// stale value behind.
+	if err := a.setProductionEnvValue("LIGANDX_LAUNCHER_VERSION", launcherVersion); err != nil {
+		return err
+	}
+	cur["LIGANDX_LAUNCHER_VERSION"] = launcherVersion
 
 	// A key defined twice is invisible in an editor but decisive at runtime:
 	// compose resolves the last one, so an override inserted above the original

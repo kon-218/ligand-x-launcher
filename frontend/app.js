@@ -5,6 +5,8 @@
 let statusInterval = null;
 const MAX_LOGS = 500;
 let logs = [];
+let lastLauncherError = '';
+let launcherSupportContext = null;
 
 // Services tab selection state (mirrors config.selectedGroups)
 let serviceTabSelection = [];
@@ -29,7 +31,12 @@ async function init() {
     setupTabSwitching();
     initMenuBar();
     initDrawerActions();
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLicenseModal() })
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') {
+            closeLicenseModal();
+            closeLauncherSupportDialog();
+        }
+    })
 
     // Run all backend initialization in parallel — none of these should block the UI
     checkDocker();
@@ -1801,6 +1808,9 @@ function toggleTweaks() {
 }
 
 function addLog(service, message, type = 'info') {
+    if (service === 'launcher' && (type === 'error' || /\b(error|failed|failure)\b/i.test(String(message)))) {
+        lastLauncherError = String(message).slice(0, 2000);
+    }
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
     logs.push({ timestamp, service, message, type });
     if (logs.length > MAX_LOGS) logs = logs.slice(-MAX_LOGS);
@@ -1823,6 +1833,57 @@ function addLog(service, message, type = 'info') {
         feed.prepend(item);
         while (feed.children.length > 18) feed.removeChild(feed.lastChild);
     }
+}
+
+async function openLauncherSupportDialog() {
+    const modal = document.getElementById('launcherSupportModal');
+    modal.classList.remove('hidden');
+    document.getElementById('launcherSupportActual').focus();
+    document.getElementById('includeLauncherError').checked = false;
+    updateLauncherSupportError();
+    try {
+        launcherSupportContext = await window.go.main.App.GetLauncherSupportContext();
+    } catch (_) {
+        launcherSupportContext = { launcherVersion: 'not available', productVersion: 'not available', platform: navigator.platform || 'not available' };
+    }
+    document.getElementById('supportLauncherVersion').textContent = launcherSupportContext.launcherVersion;
+    document.getElementById('supportProductVersion').textContent = launcherSupportContext.productVersion;
+    document.getElementById('supportPlatform').textContent = launcherSupportContext.platform;
+}
+
+function closeLauncherSupportDialog() {
+    document.getElementById('launcherSupportModal')?.classList.add('hidden');
+}
+
+function updateLauncherSupportError() {
+    const preview = document.getElementById('launcherSupportError');
+    const include = document.getElementById('includeLauncherError')?.checked && lastLauncherError;
+    preview.textContent = include ? lastLauncherError : '';
+    preview.classList.toggle('hidden', !include);
+}
+
+function launcherSupportActual() {
+    const description = document.getElementById('launcherSupportActual').value.trim();
+    const includeError = document.getElementById('includeLauncherError').checked;
+    return [description, includeError && lastLauncherError ? `Latest visible error (reviewed by reporter):\n${lastLauncherError}` : ''].filter(Boolean).join('\n\n');
+}
+
+async function continueLauncherSupport() {
+    await window.go.main.App.OpenLauncherSupportIssue(launcherSupportActual());
+    closeLauncherSupportDialog();
+}
+
+async function copyLauncherSupportDetails() {
+    const context = launcherSupportContext || { launcherVersion: 'not available', productVersion: 'not available', platform: 'not available' };
+    const details = [
+        '[Launcher]: Launcher problem',
+        `Launcher version: ${context.launcherVersion}`,
+        `Ligand-X version: ${context.productVersion}`,
+        `Platform: ${context.platform}`,
+        '',
+        launcherSupportActual() || 'Describe what happened.',
+    ].join('\n');
+    await navigator.clipboard.writeText(details);
 }
 
 function clearLogs() {
@@ -2607,6 +2668,7 @@ function initMenuBar() {
         ],
         'Help': [
             { label: 'Documentation', fn: () => window.go?.main?.App?.OpenBrowser?.('https://docs.ligand-x.com') },
+            { label: 'Report launcher problem', fn: () => openLauncherSupportDialog() },
             { sep: true },
             { label: 'About Ligand-X', fn: () => {} },
         ],

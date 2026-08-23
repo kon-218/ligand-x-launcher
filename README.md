@@ -80,6 +80,10 @@ Use the official [Ligand-X Support](https://github.com/kon-218/ligand-x-support)
 - [request a feature](https://github.com/kon-218/ligand-x-support/issues/new?template=06-feature.yml); or
 - [ask a usage question](https://github.com/kon-218/ligand-x-support/discussions).
 
+The launcher also provides **Report launcher problem** from the Help menu and Diagnostics view. The
+review dialog includes only public version/platform context by default; the latest visible launcher
+error remains opt-in and editable before GitHub opens.
+
 Do not publish licence keys, credentials, proprietary structures, or confidential logs. Security
 vulnerabilities must be submitted through the support repository's
 [private reporting process](https://github.com/kon-218/ligand-x-support/security/advisories/new).

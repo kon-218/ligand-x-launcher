@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1927,6 +1928,9 @@ func TestEnsureProductionEnvFitsShippedTemplateToSmallHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := parseEnvFile(string(written))
+	if env["LIGANDX_LAUNCHER_VERSION"] != launcherVersion {
+		t.Fatalf("launcher version not written to production env: %q", env["LIGANDX_LAUNCHER_VERSION"])
+	}
 	for k, v := range env {
 		if !strings.HasSuffix(k, "_CPU_LIMIT") && !strings.HasSuffix(k, "_CPU_RES") {
 			continue
@@ -1954,6 +1958,28 @@ func TestEnsureProductionEnvFitsShippedTemplateToSmallHost(t *testing.T) {
 	}
 	if string(after) != before {
 		t.Errorf("resource fitting is not idempotent:\nbefore:\n%s\nafter:\n%s", before, string(after))
+	}
+}
+
+func TestBuildLauncherSupportIssueURL(t *testing.T) {
+	reportURL := buildLauncherSupportIssueURL(LauncherSupportContext{
+		LauncherVersion: "v2.0.0",
+		ProductVersion:  "v1.9.0",
+		Platform:        "linux/amd64",
+	}, "Start failed after Docker detection")
+	parsed, err := url.Parse(reportURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if query.Get("template") != "01-launcher.yml" || query.Get("launcher-version") != "v2.0.0" {
+		t.Fatalf("unexpected support URL: %s", reportURL)
+	}
+	if query.Get("product-version") != "v1.9.0" || query.Get("os-version") != "linux/amd64" {
+		t.Fatalf("missing runtime context: %s", reportURL)
+	}
+	if query.Get("actual") != "Start failed after Docker detection" {
+		t.Fatalf("missing reviewed description: %s", reportURL)
 	}
 }
 
