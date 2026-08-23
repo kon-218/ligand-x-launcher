@@ -83,6 +83,10 @@ Do not publish licence keys, credentials, proprietary structures, or confidentia
 vulnerabilities must be submitted through the support repository's
 [private reporting process](https://github.com/kon-218/ligand-x-support/security/advisories/new).
 
+Product news: [X @LigandXinc](https://x.com/LigandXinc), [Instagram @ligandx.inc](https://www.instagram.com/ligandx.inc/).
+Press and mentions: [social@ligand-x.com](mailto:social@ligand-x.com). Account or confidential
+matters: [support@ligand-x.com](mailto:support@ligand-x.com).
+
 ## Building and contributing
 
 The launcher uses Go, Wails v2, and embedded HTML/CSS/JavaScript. Public release
