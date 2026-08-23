@@ -60,6 +60,20 @@ services:
     - ./data/license:/host-license:ro
     - runtime_license:/runtime-license
     restart: 'no'
+  runtime-settings-init:
+    image: alpine:3.21
+    command:
+    - sh
+    - -ec
+    - chown $${SETTINGS_RUNTIME_UID}:$${SETTINGS_RUNTIME_GID} /runtime-settings &&
+      chmod 0750 /runtime-settings
+    environment:
+      SETTINGS_RUNTIME_UID: ${LIGANDX_GATEWAY_UID:-1001}
+      SETTINGS_RUNTIME_GID: ${LIGANDX_GATEWAY_GID:-1001}
+    user: 0:0
+    volumes:
+    - runtime_settings:/runtime-settings
+    restart: 'no'
   gateway:
     image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:-latest}
     command:
@@ -77,6 +91,9 @@ services:
     - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
     - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
+    - LIGANDX_CORE_VERSION=${VERSION:-latest}
+    - LIGANDX_PRO_VERSION=${PRO_VERSION:-${VERSION:-latest}}
+    - LIGANDX_LAUNCHER_VERSION=${LIGANDX_LAUNCHER_VERSION:-}
     - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - REDIS_URL=${REDIS_URL:?REDIS_URL must be set (e.g. redis://redis:6379/0)}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -110,6 +127,8 @@ services:
     - scientific_artifacts:/app/data/scientific_artifacts
     depends_on:
       runtime-license-init:
+        condition: service_completed_successfully
+      runtime-settings-init:
         condition: service_completed_successfully
       scientific-artifact-init:
         condition: service_completed_successfully
