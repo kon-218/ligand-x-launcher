@@ -765,6 +765,8 @@ jobs:
             artifacts/runtime/ligand-x-runtime-manifest.sig
             artifacts/runtime/ligand-x-release-index.json
             artifacts/runtime/ligand-x-release-index.sig
+            THIRD_PARTY_NOTICES.md
+            LICENSE
           body: |
             ## ${{ steps.runtime.outputs.title }}
 

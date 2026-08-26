@@ -268,6 +268,8 @@ services:
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
     - REINVENT_MODELS_PATH=/models
     - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+    - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
     depends_on:
       postgres:
         condition: service_healthy

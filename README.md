@@ -110,3 +110,8 @@ sync/check. See [CONTRIBUTING.md](CONTRIBUTING.md) for platform build details.
 
 The launcher is distributed under the PolyForm Noncommercial License 1.0.0.
 Commercial use and licensed Pro modules require commercial terms.
+
+Third-party Go modules linked into the binary are listed in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), which is also attached to
+each GitHub release. Container images the launcher pulls carry their own
+notices at `/app/THIRD_PARTY_NOTICES.md`.
