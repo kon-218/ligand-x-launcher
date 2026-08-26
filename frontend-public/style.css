@@ -122,6 +122,10 @@ select.input option {
   background: var(--surface-2);
   color: var(--text);
 }
+.env-editor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px; line-height: 1.5; resize: vertical; min-height: 160px;
+}
 
 /* ---------- Buttons ---------- */
 .btn {
@@ -157,6 +161,23 @@ select.input option {
   min-height: 16px;
 }
 .note { font-size: 12px; color: var(--text-faint); margin-top: 10px; }
+
+/* Non-fatal defect in a signed release index -- the list is still usable, so
+   this warns rather than replacing the list the way .inline-error does. */
+.inline-warning {
+  margin-top: 10px; padding: 8px 10px; font-size: 12.5px;
+  color: var(--warn); border: 1px solid rgba(251,191,36,0.35);
+  border-radius: var(--radius); background: rgba(251,191,36,0.08);
+}
+.inline-warning[hidden] { display: none; }
+
+/* ---------- Release channel toggle ---------- */
+.release-channel {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 12px; font-size: 13px; cursor: pointer;
+}
+.release-channel input { cursor: pointer; }
+.release-channel-hint { margin-top: 4px; }
 
 /* ---------- License card ---------- */
 .license-card {
@@ -296,6 +317,7 @@ select.input option {
 .license-modal-body { padding: 14px 16px; }
 .license-modal-footer { padding: 0 16px 14px; }
 .release-modal { width: 460px; }
+.orca-modal { width: 420px; }
 .release-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; max-height: 330px; overflow-y: auto; }
 .release-option {
   display: flex; gap: 10px; align-items: flex-start; padding: 11px;

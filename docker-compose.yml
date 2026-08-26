@@ -41,6 +41,25 @@ services:
     volumes:
     - scientific_artifacts:/app/data/scientific_artifacts
     restart: 'no'
+  runtime-license-init:
+    image: alpine:3.21
+    command:
+    - sh
+    - -ec
+    - "rm -f /runtime-license/ligandx-license.json /runtime-license/.license.tmp\n\
+      if [ -f /host-license/ligandx-license.json ]; then\n  cp /host-license/ligandx-license.json\
+      \ /runtime-license/.license.tmp\n  chown \"$${LICENSE_RUNTIME_UID}:$${LICENSE_RUNTIME_GID}\"\
+      \ /runtime-license/.license.tmp\n  chmod 0600 /runtime-license/.license.tmp\n\
+      \  mv /runtime-license/.license.tmp /runtime-license/ligandx-license.json\n\
+      fi\n"
+    environment:
+      LICENSE_RUNTIME_UID: ${LIGANDX_GATEWAY_UID:-1001}
+      LICENSE_RUNTIME_GID: ${LIGANDX_GATEWAY_GID:-1001}
+    user: 0:0
+    volumes:
+    - ./data/license:/host-license:ro
+    - runtime_license:/runtime-license
+    restart: 'no'
   gateway:
     image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:-latest}
     command:
@@ -60,6 +79,8 @@ services:
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - REDIS_URL=${REDIS_URL:?REDIS_URL must be set (e.g. redis://redis:6379/0)}
+    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
+      set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
     - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
@@ -84,10 +105,12 @@ services:
       (see .env.example)}
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
     volumes:
-    - ./data/license:/app/data/license:ro
+    - runtime_license:/app/data/license:ro
     - runtime_settings:/app/data/settings
     - scientific_artifacts:/app/data/scientific_artifacts
     depends_on:
+      runtime-license-init:
+        condition: service_completed_successfully
       scientific-artifact-init:
         condition: service_completed_successfully
       redis:
@@ -641,6 +664,10 @@ services:
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test:
       - CMD
@@ -846,7 +873,7 @@ services:
         max-size: 10m
         max-file: '3'
   worker-gpu-short:
-    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-short:${PRO_VERSION:-${VERSION:-latest}}
+    image: ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
     command:
     - worker-gpu-short
     networks:
@@ -870,7 +897,7 @@ services:
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
-    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-short:${PRO_VERSION:-${VERSION:-latest}}
+    - LIGANDX_IMAGE_REF=${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully
@@ -1406,6 +1433,7 @@ volumes:
   qc_results: null
   msa_cache: null
   runtime_settings: null
+  runtime_license: null
   scientific_artifacts: null
   reinvent_campaigns: null
   redis_data: null

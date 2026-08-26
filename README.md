@@ -70,6 +70,19 @@ contains private paths or identifiers.
 
 See [FAQ](docs/FAQ.md) for platform and recovery guidance.
 
+## Support and feedback
+
+Use the official [Ligand-X Support](https://github.com/kon-218/ligand-x-support) repository to:
+
+- [report a launcher problem](https://github.com/kon-218/ligand-x-support/issues/new?template=01-launcher.yml);
+- [report an installation or update problem](https://github.com/kon-218/ligand-x-support/issues/new?template=04-installation.yml);
+- [request a feature](https://github.com/kon-218/ligand-x-support/issues/new?template=06-feature.yml); or
+- [ask a usage question](https://github.com/kon-218/ligand-x-support/discussions).
+
+Do not publish licence keys, credentials, proprietary structures, or confidential logs. Security
+vulnerabilities must be submitted through the support repository's
+[private reporting process](https://github.com/kon-218/ligand-x-support/security/advisories/new).
+
 ## Building and contributing
 
 The launcher uses Go, Wails v2, and embedded HTML/CSS/JavaScript. Public release

@@ -638,10 +638,13 @@ jobs:
           # The signed index is the only source the launcher's version chooser
           # trusts. Existing releases remain selectable without rebuilding;
           # downgrade permission stays empty until a release explicitly proves
-          # database/runtime backward compatibility.
+          # database/runtime backward compatibility. Every signed index must
+          # name exactly one recommended stable: an RC/preview keeps the last
+          # promoted recommendation instead of blanking it.
           recommended = os.environ.get("PROMOTE_LATEST", "false").lower() == "true"
+          current_version = os.environ["RELEASE_VERSION"]
           entries = [{
-              "version": os.environ["RELEASE_VERSION"],
+              "version": current_version,
               "publishedAt": release["issued_at"],
               "status": "supported",
               "summary": "Recommended stable Ligand-X release" if recommended else f"Ligand-X {os.environ['RELEASE_CHANNEL']} release",
@@ -656,8 +659,9 @@ jobs:
           if prior_index.is_file():
               prior_entries = json.loads(prior_index.read_text(encoding="utf-8")).get("releases", [])
               for entry in prior_entries:
-                  entry["recommended"] = False
-              entries.extend(entry for entry in prior_entries if entry.get("version") != os.environ["RELEASE_VERSION"])
+                  if recommended:
+                      entry["recommended"] = False
+              entries.extend(entry for entry in prior_entries if entry.get("version") != current_version)
           history = json.loads((artifact_root / "github-releases.json").read_text(encoding="utf-8"))
           known = {entry["version"] for entry in entries}
           for old in history:
@@ -680,6 +684,34 @@ jobs:
               if len(entries) >= 10:
                   break
           entries = entries[:10]
+
+          def is_stable_product_version(version):
+              base = str(version or "").removeprefix("v")
+              return bool(base) and "-" not in base and all(part.isdigit() for part in base.split("."))
+
+          def version_key(version):
+              base = str(version or "").removeprefix("v").split("-", 1)[0]
+              try:
+                  return tuple(int(part) for part in base.split("."))
+              except ValueError:
+                  return (0,)
+
+          marked = [entry for entry in entries if entry.get("recommended")]
+          if recommended:
+              if len(marked) != 1 or marked[0].get("version") != current_version:
+                  raise SystemExit("promoted release index must recommend only the new version")
+          elif len(marked) > 1:
+              raise SystemExit("prior release index identified multiple recommended releases")
+          elif not marked:
+              stables = [
+                  entry for entry in entries
+                  if entry.get("status") == "supported" and is_stable_product_version(entry.get("version"))
+              ]
+              if not stables:
+                  raise SystemExit("release index must identify exactly one recommended release")
+              max(stables, key=lambda entry: version_key(entry["version"]))["recommended"] = True
+          if sum(1 for entry in entries if entry.get("recommended")) != 1:
+              raise SystemExit("release index must identify exactly one recommended release")
           index = {
               "schema": "ligandx-release-index/1",
               "issued_at": release["issued_at"],
@@ -780,3 +812,35 @@ jobs:
             chmod +x ligandx-linux-amd64.AppImage
             ./ligandx-linux-amd64.AppImage
             ```
+
+      # softprops/action-gh-release can leave make_latest at GitHub's default
+      # (true). GitHub then refuses prerelease on that release because latest
+      # cannot be a pre-release — which is how rc.8 became the live latest
+      # index with zero recommended entries.
+      - name: Enforce GitHub prerelease and latest policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.runtime.outputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id)"
+          if [ "${CHANNEL}" = "stable" ]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              -f make_latest=false \
+              -F prerelease=false
+          else
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              -f make_latest=false \
+              -F prerelease=true
+          fi
+          prerelease="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq .prerelease)"
+          echo "release ${RELEASE_TAG} prerelease=${prerelease} channel=${CHANNEL}"
+          if [ "${CHANNEL}" != "stable" ] && [ "${prerelease}" != "true" ]; then
+            echo "::error::non-stable release ${RELEASE_TAG} must remain a GitHub pre-release"
+            exit 1
+          fi
+          if [ "${CHANNEL}" = "stable" ] && [ "${prerelease}" != "false" ]; then
+            echo "::error::stable release ${RELEASE_TAG} must not be a GitHub pre-release"
+            exit 1
+          fi

@@ -101,18 +101,19 @@ type PullProgress struct {
 }
 
 type ServiceGroup struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Services    []string `json:"services"`
-	Images      []string `json:"images"`
-	SizeMB      int      `json:"sizeMb"`
-	Required    bool     `json:"required"`
-	DefaultOn   bool     `json:"defaultOn"`
-	Edition     string   `json:"edition"`
-	Entitlement string   `json:"entitlement"`
-	Licensed    bool     `json:"licensed"`
-	Locked      bool     `json:"locked"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	Description        string   `json:"description"`
+	Services           []string `json:"services"`
+	Images             []string `json:"images"`
+	RegistryAuthImages []string `json:"-"`
+	SizeMB             int      `json:"sizeMb"`
+	Required           bool     `json:"required"`
+	DefaultOn          bool     `json:"defaultOn"`
+	Edition            string   `json:"edition"`
+	Entitlement        string   `json:"entitlement"`
+	Licensed           bool     `json:"licensed"`
+	Locked             bool     `json:"locked"`
 }
 
 type LauncherConfig struct {
@@ -120,6 +121,12 @@ type LauncherConfig struct {
 	SelectedGroups []string    `json:"selectedGroups"`
 	UserProfile    UserProfile `json:"userProfile"`
 	ConfigVersion  int         `json:"configVersion"`
+
+	// ShowPrereleases opts this install into release candidates, in the version
+	// picker and in the version-less "install latest" path alike. Defaults to
+	// false, so an install that never touches the toggle keeps seeing only
+	// stable releases.
+	ShowPrereleases bool `json:"showPrereleases"`
 }
 
 type UserProfile struct {
@@ -171,6 +178,11 @@ type runtimeReleaseIndex struct {
 	IssuedAt  string           `json:"issued_at"`
 	ExpiresAt string           `json:"expires_at"`
 	Releases  []RuntimeRelease `json:"releases"`
+
+	// Warning carries a non-fatal defect found while validating the index, for
+	// display alongside the release list. Never serialised: it describes this
+	// verification, not the signed document.
+	Warning string `json:"-"`
 }
 
 type LicenseSummary struct {
@@ -276,6 +288,10 @@ const runtimeBundleAssetName = "ligand-x-runtime.zip"
 
 const latestReleaseAPIURL = "https://api.github.com/repos/kon-218/ligand-x-launcher/releases/latest"
 
+// The listing endpoint, unlike /releases/latest, returns pre-releases and does
+// not depend on GitHub's "Latest" pointer -- which has been wrong here before.
+const releasesListAPIURL = "https://api.github.com/repos/kon-218/ligand-x-launcher/releases?per_page=50"
+
 const runtimeBundleManifestAssetName = "ligand-x-runtime-manifest.json"
 const runtimeBundleSignatureAssetName = "ligand-x-runtime-manifest.sig"
 const runtimeReleaseIndexAssetName = "ligand-x-release-index.json"
@@ -297,16 +313,33 @@ type runtimeReleaseArtifact struct {
 	Size   int64  `json:"size"`
 }
 
+type runtimeWindowsSigning struct {
+	Authenticode bool   `json:"authenticode"`
+	Evidence     string `json:"evidence"`
+}
+
+type runtimeMacOSSigning struct {
+	DeveloperID bool   `json:"developer_id"`
+	Notarized   bool   `json:"notarized"`
+	Evidence    string `json:"evidence"`
+}
+
+type runtimePlatformSigning struct {
+	Windows runtimeWindowsSigning `json:"windows"`
+	MacOS   runtimeMacOSSigning   `json:"macos"`
+}
+
 type runtimeBundleManifest struct {
-	Schema    string                            `json:"schema"`
-	Version   string                            `json:"version"`
-	Asset     string                            `json:"asset"`
-	SHA256    string                            `json:"sha256"`
-	Size      int64                             `json:"size"`
-	IssuedAt  string                            `json:"issued_at"`
-	ExpiresAt string                            `json:"expires_at"`
-	GitCommit string                            `json:"git_commit"`
-	Artifacts map[string]runtimeReleaseArtifact `json:"artifacts,omitempty"`
+	Schema          string                            `json:"schema"`
+	Version         string                            `json:"version"`
+	Asset           string                            `json:"asset"`
+	SHA256          string                            `json:"sha256"`
+	Size            int64                             `json:"size"`
+	IssuedAt        string                            `json:"issued_at"`
+	ExpiresAt       string                            `json:"expires_at"`
+	GitCommit       string                            `json:"git_commit"`
+	Artifacts       map[string]runtimeReleaseArtifact `json:"artifacts,omitempty"`
+	PlatformSigning runtimePlatformSigning            `json:"platform_signing,omitempty"`
 }
 
 // defaultPinnedImageVersion is the image tag this launcher build was published
@@ -327,6 +360,10 @@ type App struct {
 	logStreams    map[string]context.CancelFunc
 	logStreamsMux sync.Mutex
 	composeLogMux sync.Mutex
+
+	// lastReleaseIndexWarning holds any non-fatal defect from the most recent
+	// index verification, for ListRuntimeReleaseOptions to surface.
+	lastReleaseIndexWarning string
 
 	// Cloudflare tunnel (see tunnel.go)
 	tunnelCmd *exec.Cmd
@@ -537,14 +574,14 @@ func (a *App) runtimeBundleURL() string {
 	return defaultRuntimeBundleURL
 }
 
-// resolveLatestRuntimeBundleURL queries the GitHub releases API to find the
+// fetchReleaseListing queries the GitHub releases API to find the
 // download URL of the runtime bundle asset attached to the latest release.
 // GitHub's /releases/latest/download/<asset> redirect is unreliable on some
 // Windows HTTP clients, so we resolve the concrete asset URL explicitly.
-func resolveLatestReleaseAssets(wanted ...string) (map[string]string, string, error) {
-	req, err := http.NewRequest(http.MethodGet, latestReleaseAPIURL, nil)
+func fetchReleaseListing() ([]githubRelease, error) {
+	req, err := http.NewRequest(http.MethodGet, releasesListAPIURL, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "ligand-x-launcher")
@@ -552,43 +589,32 @@ func resolveLatestReleaseAssets(wanted ...string) (map[string]string, string, er
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("GitHub releases API returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("GitHub releases API returned HTTP %d", resp.StatusCode)
 	}
 
-	var release struct {
-		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		} `json:"assets"`
+	var releases []githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, fmt.Errorf("failed to parse GitHub releases response: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, "", fmt.Errorf("failed to parse GitHub releases response: %w", err)
-	}
-	wantedSet := make(map[string]bool, len(wanted))
-	for _, name := range wanted {
-		wantedSet[name] = true
-	}
-	found := make(map[string]string, len(wanted))
-	for _, asset := range release.Assets {
-		if wantedSet[asset.Name] && strings.TrimSpace(asset.BrowserDownloadURL) != "" {
-			found[asset.Name] = asset.BrowserDownloadURL
-		}
-	}
-	for _, name := range wanted {
-		if found[name] == "" {
-			return nil, "", fmt.Errorf("asset %q not found in latest release %q", name, release.TagName)
-		}
-	}
-	return found, strings.TrimSpace(release.TagName), nil
+	return releases, nil
 }
 
-func resolveLatestRuntimeBundleURL() (string, string, error) {
-	assets, tag, err := resolveLatestReleaseAssets(runtimeBundleAssetName)
+// resolveReleaseAssets finds the newest release on the requested channel that
+// carries every wanted asset.
+func resolveReleaseAssets(includePrereleases bool, wanted ...string) (map[string]string, string, error) {
+	releases, err := fetchReleaseListing()
+	if err != nil {
+		return nil, "", err
+	}
+	return selectReleaseAssets(releases, includePrereleases, wanted)
+}
+
+func resolveRuntimeBundleURLForChannel(includePrereleases bool) (string, string, error) {
+	assets, tag, err := resolveReleaseAssets(includePrereleases, runtimeBundleAssetName)
 	if err != nil {
 		return "", "", err
 	}
@@ -748,8 +774,22 @@ func verifyRuntimeReleaseIndex(indexBytes, signatureBytes []byte) (runtimeReleas
 		release.Compatible = compatible
 		release.Compatibility = message
 	}
-	if recommended != 1 {
-		return runtimeReleaseIndex{}, fmt.Errorf("release index must identify exactly one recommended release")
+	// A wrong recommendation count is a presentation defect, not an authenticity
+	// one: the signature above already proved the document is ours. Failing here
+	// used to hide every release and leave no way to install anything, which is
+	// exactly what v2026.08.15-rc.8 did to the version picker by shipping an
+	// index with no recommendation and being pinned as "Latest". Clear the
+	// ambiguous flags, say so, and still show the list.
+	switch {
+	case recommended == 0:
+		index.Warning = "This release index does not mark a recommended version. " +
+			"Choose one explicitly, or check for a newer release."
+	case recommended > 1:
+		for i := range index.Releases {
+			index.Releases[i].Recommended = false
+		}
+		index.Warning = "This release index marks more than one version as recommended, " +
+			"so none is shown as recommended. Choose one explicitly."
 	}
 	return index, nil
 }
@@ -758,14 +798,21 @@ func verifyRuntimeReleaseIndex(indexBytes, signatureBytes []byte) (runtimeReleas
 // servers without an index retain the latest-only behavior; the selected
 // runtime manifest is still signature-verified during installation.
 func (a *App) ListRuntimeReleases() ([]RuntimeRelease, error) {
-	assets, tag, err := resolveLatestReleaseAssets(runtimeReleaseIndexAssetName, runtimeReleaseIndexSignatureAssetName)
+	// A user already running a pre-release must keep seeing it even with the
+	// toggle off, or the picker hides the version they are on.
+	channel := a.includePrereleases() || isPrereleaseVersion(installedRuntimeVersion(a.projectPath))
+	assets, tag, err := resolveReleaseAssets(channel, runtimeReleaseIndexAssetName, runtimeReleaseIndexSignatureAssetName)
 	if err != nil {
-		bundleURL, latest, latestErr := resolveLatestRuntimeBundleURL()
+		bundleURL, latest, latestErr := resolveRuntimeBundleURLForChannel(channel)
 		if latestErr != nil {
 			return nil, err
 		}
-		version := strings.TrimPrefix(latest, "launcher-")
-		return []RuntimeRelease{{Version: version, Status: "supported", Summary: "Latest stable release", Recommended: true, Compatible: true, Compatibility: "Compatible", BundleURL: bundleURL}}, nil
+		version := releaseVersionFromTag(latest)
+		summary := "Latest stable release"
+		if isPrereleaseVersion(version) {
+			summary = "Latest release candidate"
+		}
+		return []RuntimeRelease{{Version: version, Status: "supported", Summary: summary, Recommended: true, Compatible: true, Compatibility: "Compatible", BundleURL: bundleURL}}, nil
 	}
 	tempDir, err := os.MkdirTemp("", "ligandx-release-index-")
 	if err != nil {
@@ -792,15 +839,36 @@ func (a *App) ListRuntimeReleases() ([]RuntimeRelease, error) {
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(index.Releases, func(left, right RuntimeRelease) int {
-		comparison, comparable := compareReleaseVersions(left.Version, right.Version)
-		if !comparable {
-			return strings.Compare(right.Version, left.Version)
-		}
-		return -comparison
-	})
+	a.lastReleaseIndexWarning = index.Warning
+	slices.SortFunc(index.Releases, compareReleasesNewestFirst)
 	_ = tag
-	return index.Releases, nil
+	return filterReleasesForChannel(index.Releases, channel, installedRuntimeVersion(a.projectPath)), nil
+}
+
+// ReleaseOptions is what the version picker renders: the releases available on
+// the current channel, plus any non-fatal defect found in the signed index.
+type ReleaseOptions struct {
+	Releases        []RuntimeRelease `json:"releases"`
+	Warning         string           `json:"warning"`
+	ShowPrereleases bool             `json:"showPrereleases"`
+	Installed       string           `json:"installed"`
+}
+
+// ListRuntimeReleaseOptions is the picker-facing wrapper around
+// ListRuntimeReleases. It exists so the UI can show why an index looks odd --
+// no recommendation, or several -- instead of the list silently going empty.
+func (a *App) ListRuntimeReleaseOptions() (ReleaseOptions, error) {
+	options := ReleaseOptions{
+		ShowPrereleases: a.includePrereleases(),
+		Installed:       installedRuntimeVersion(a.projectPath),
+	}
+	releases, err := a.ListRuntimeReleases()
+	if err != nil {
+		return options, err
+	}
+	options.Releases = releases
+	options.Warning = a.lastReleaseIndexWarning
+	return options, nil
 }
 
 func verifyRuntimeBundleFile(path string, manifest runtimeBundleManifest) error {
@@ -1144,7 +1212,7 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 	} else if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
 		bundleURL = override
-	} else if resolved, tag, resolveErr := resolveLatestRuntimeBundleURL(); resolveErr == nil {
+	} else if resolved, tag, resolveErr := resolveRuntimeBundleURLForChannel(a.includePrereleases()); resolveErr == nil {
 		bundleURL = resolved
 		releaseTag = tag
 		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Resolved latest runtime bundle: %s", bundleURL), Timestamp: time.Now().Format("15:04:05")})
@@ -2122,10 +2190,7 @@ func (a *App) StartServices(mode string) error {
 			args = append(args, a.gpuComposeArgs()...)
 			args = append(args, "up", "-d", "--pull=never")
 		case "core":
-			coreServices := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "flower"}
-			if !isPublicBuild {
-				coreServices = append(coreServices, "pocket-finder")
-			}
+			coreServices := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "flower", "pocket-finder"}
 			args = append(a.devComposeArgs(), append([]string{"up", "-d", "--pull=never"}, coreServices...)...)
 		case "docking":
 			args = append(a.devComposeArgs(), "up", "-d", "--pull=never", "postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "ketcher", "docking", "worker-cpu")
@@ -2159,6 +2224,9 @@ func (a *App) StartServices(mode string) error {
 		}
 
 		if err := a.checkGPUForServices(services); err != nil {
+			return err
+		}
+		if err := a.checkOrcaForServices(services); err != nil {
 			return err
 		}
 
@@ -2225,6 +2293,9 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 	if err := a.checkGPUForServices(services); err != nil {
 		return err
 	}
+	if err := a.checkOrcaForServices(services); err != nil {
+		return err
+	}
 
 	var args []string
 	if env == "prod" {
@@ -2250,6 +2321,9 @@ func (a *App) StartServicesCustom(env string, services []string) error {
 	}
 
 	if err := a.validateUnlockedServices(services); err != nil {
+		return err
+	}
+	if err := a.checkOrcaForServices(services); err != nil {
 		return err
 	}
 
@@ -2397,6 +2471,10 @@ func (a *App) RestartServiceGroups(groupIDs []string) error {
 		services = append(services, svc)
 	}
 
+	if err := a.checkOrcaForServices(services); err != nil {
+		return err
+	}
+
 	args := append(a.devComposeArgs(), "up", "-d", "--pull=never")
 	args = append(args, services...)
 	return a.runDockerCompose(args, fmt.Sprintf("Restarting %d services...", len(services)))
@@ -2404,6 +2482,9 @@ func (a *App) RestartServiceGroups(groupIDs []string) error {
 
 func (a *App) RestartServicesCustom(services []string) error {
 	if err := a.validateUnlockedServices(services); err != nil {
+		return err
+	}
+	if err := a.checkOrcaForServices(services); err != nil {
 		return err
 	}
 	args := append(a.devComposeArgs(), "up", "-d", "--pull=never")
@@ -2442,6 +2523,15 @@ func (a *App) runDockerCompose(args []string, message string) error {
 		a.emitAndLog("launcher", errMsg)
 		return fmt.Errorf("%s", errMsg)
 	}
+
+	// A managed runtime intentionally keeps a stable Compose project name so
+	// upgrades retain stateful volumes. When a newer runtime removes or renames
+	// a service, containers from the previous model otherwise survive forever
+	// (and can keep exposing an obsolete Pro/Preview service). This flag removes
+	// only containers labeled as services of this same Compose project that are
+	// absent from the current model; it does not remove unrelated containers or
+	// unselected services that still exist in the model.
+	args = composeUpWithRemoveOrphans(args)
 
 	// emitAndLog rather than a bare EventsEmit: it guards against a nil ctx
 	// (before Wails startup, and under test, where wails' EventsEmit calls
@@ -2503,7 +2593,7 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	// retry once before giving up, so a single Start click self-heals instead
 	// of silently leaving frontend/proxy un-started.
 	if waitErr != nil && isProductionUpCommand(args) {
-		a.reconcileProductionCredentials()
+		_ = a.reconcileProductionCredentials()
 		retryCmd := exec.Command("docker", args...)
 		retryCmd.Dir = cmd.Dir
 		retryCmd.Env = cmd.Env
@@ -2520,7 +2610,7 @@ func (a *App) runDockerCompose(args []string, message string) error {
 			tail = retryTail // report the final attempt's output
 		}
 	} else if isProductionUpCommand(args) {
-		a.reconcileProductionCredentials()
+		_ = a.reconcileProductionCredentials()
 	}
 
 	if waitErr != nil {
@@ -2548,6 +2638,23 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	return nil
 }
 
+func composeUpWithRemoveOrphans(args []string) []string {
+	for _, arg := range args {
+		if arg == "--remove-orphans" {
+			return args
+		}
+	}
+	for i, arg := range args {
+		if arg != "up" {
+			continue
+		}
+		result := append([]string{}, args[:i+1]...)
+		result = append(result, "--remove-orphans")
+		return append(result, args[i+1:]...)
+	}
+	return args
+}
+
 // prepareProductionInfra starts stateful dependencies first and reconciles their
 // stored credentials before stateless app/worker containers are created. Docker
 // images pick up .env.production immediately, but Postgres/RabbitMQ keep the
@@ -2571,7 +2678,9 @@ func (a *App) prepareProductionInfra(upArgs []string) error {
 		return fmt.Errorf("failed to prepare production dependencies: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 
-	a.reconcileProductionCredentials()
+	if err := a.reconcileProductionCredentials(); err != nil {
+		return fmt.Errorf("failed to reconcile production credentials: %w", err)
+	}
 	return nil
 }
 
@@ -2590,7 +2699,11 @@ func productionInfraUpArgs(upArgs []string) []string {
 		return nil
 	}
 	args := append([]string{}, upArgs[:upIndex]...)
-	args = append(args, "up", "-d")
+	// `docker compose up -d` returns as soon as containers are running, before
+	// RabbitMQ is necessarily ready to accept rabbitmqctl commands. Waiting for
+	// the declared health checks prevents credential rotation from racing broker
+	// startup on both fresh installs and upgrades that retain named volumes.
+	args = append(args, "up", "-d", "--wait", "--wait-timeout", "120")
 	if hasPullNever {
 		args = append(args, "--pull=never")
 	}
@@ -2706,17 +2819,19 @@ func isProductionUpCommand(args []string) bool {
 // that don't require knowing the previous password: Postgres via the
 // trust-authenticated local socket, RabbitMQ via rabbitmqctl, which changes a
 // user's password without needing the old one.
-func (a *App) reconcileProductionCredentials() {
+func (a *App) reconcileProductionCredentials() error {
 	content, err := a.GetEnvContent("prod")
 	if err != nil {
-		return
+		return err
 	}
 	cur := parseEnvFile(content)
+	var failures []string
 
 	if pgUser, pgPass := cur["POSTGRES_USER"], cur["POSTGRES_PASSWORD"]; pgUser != "" && pgPass != "" && isContainerRunning("ligandx-postgres") {
 		sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s';", pgUser, strings.ReplaceAll(pgPass, "'", "''"))
 		cmd := exec.Command("docker", "exec", "ligandx-postgres", "psql", "-U", pgUser, "-d", pgUser, "-c", sql)
 		if out, err := cmd.CombinedOutput(); err != nil {
+			failures = append(failures, fmt.Sprintf("postgres: %v: %s", err, strings.TrimSpace(string(out))))
 			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Credential reconciliation (postgres) failed: %v: %s", err, strings.TrimSpace(string(out))),
@@ -2727,6 +2842,7 @@ func (a *App) reconcileProductionCredentials() {
 
 	if rmqUser, rmqPass := cur["RABBITMQ_USER"], cur["RABBITMQ_PASSWORD"]; rmqUser != "" && rmqPass != "" && isContainerRunning("ligandx-rabbitmq") {
 		if err := reconcileRabbitMQUser("ligandx-rabbitmq", rmqUser, rmqPass); err != nil {
+			failures = append(failures, fmt.Sprintf("rabbitmq: %v", err))
 			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Credential reconciliation (rabbitmq) failed: %v", err),
@@ -2734,6 +2850,10 @@ func (a *App) reconcileProductionCredentials() {
 			})
 		}
 	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func reconcileRabbitMQUser(containerName, username, password string) error {
@@ -3381,12 +3501,46 @@ func (a *App) ensureProductionEnv() error {
 		cur["PRO_VERSION"] = templatePro
 	}
 
+	// gpu-short is shared between free and Pro work, so which image that worker
+	// runs depends on the current selection rather than on the licence. Resolve
+	// it here, on every compose invocation, so enabling a Pro group later starts
+	// using the Pro worker and disabling it goes back to the credential-free
+	// public one.
+	if err := a.syncGPUShortImage(); err != nil {
+		return err
+	}
+
 	// The template's resource limits describe a multi-GPU workstation. Docker
 	// rejects any container whose `cpus` exceeds the daemon's CPU count, so on a
 	// smaller machine the stack cannot start at all until these are cut down to
 	// size. Runs on every start, so an .env.production carried over from bigger
 	// hardware self-heals too.
 	return a.fitResourceLimits(cur)
+}
+
+// syncGPUShortImage writes or clears LIGANDX_GPU_SHORT_IMAGE to match the groups
+// currently selected.
+//
+// Clearing matters as much as setting: a stale Pro reference left behind after a
+// Pro group is deselected would demand registry credentials the user may no
+// longer have, and would fail the pull for a selection that is now entirely free.
+func (a *App) syncGPUShortImage() error {
+	config, err := a.GetLauncherConfig()
+	if err != nil {
+		// No selection recorded yet (first run) means nothing Pro is running.
+		config = LauncherConfig{}
+	}
+	_, proPrefix := a.productionImageSettings()
+	want := gpuShortImageOverride(config.SelectedGroups, proPrefix, a.productionProVersion())
+
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(parseEnvFile(content)["LIGANDX_GPU_SHORT_IMAGE"]) == want {
+		return nil
+	}
+	return a.setProductionEnvValue("LIGANDX_GPU_SHORT_IMAGE", want)
 }
 
 // templatePinnedVersion returns the VERSION pinned in .env.production.template,
@@ -3458,6 +3612,37 @@ func (a *App) SaveUserSettings(s UserSettings) error {
 		}
 	}
 	return nil
+}
+
+// ValidateOrcaHostPath reports whether path is a folder that contains an ORCA
+// executable. The UI calls this after Browse and before confirming the dialog.
+func (a *App) ValidateOrcaHostPath(path string) error {
+	return validateOrcaHostPath(path)
+}
+
+// OrcaHostPathReady is true when .env.production already points at a real
+// ORCA install. The template default /opt/orca does not count unless that
+// folder actually contains the binary.
+func (a *App) OrcaHostPathReady() bool {
+	return validateOrcaHostPath(a.currentOrcaHostPath()) == nil
+}
+
+// SetOrcaHostPath validates path and writes ORCA_HOST_PATH without touching
+// the rest of user settings.
+func (a *App) SetOrcaHostPath(path string) error {
+	if err := validateOrcaHostPath(path); err != nil {
+		return err
+	}
+	return a.setProductionEnvValue("ORCA_HOST_PATH", strings.TrimSpace(path))
+}
+
+func (a *App) currentOrcaHostPath() string {
+	envPath := filepath.Join(a.projectPath, ".env.production")
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parseEnvFile(string(data))["ORCA_HOST_PATH"])
 }
 
 // canWriteDir checks whether a directory can be created and written to.
@@ -3890,18 +4075,11 @@ func (a *App) getConfigPath() (string, error) {
 }
 
 func coreServicesDescription() string {
-	if isPublicBuild {
-		return "Essential services: Proxy, Gateway, Frontend, Structure, and supporting infrastructure"
-	}
 	return "Essential services: Proxy, Gateway, Frontend, Structure, Pocket Finder (fpocket / DeepPocket / etc.), and supporting infrastructure"
 }
 
 func coreServiceNames() []string {
-	services := []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "alignment", "ketcher", "msa", "worker-cpu", "flower"}
-	if !isPublicBuild {
-		services = append(services, "pocket-finder")
-	}
-	return services
+	return []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "alignment", "ketcher", "msa", "worker-cpu", "flower", "pocket-finder"}
 }
 
 func imageRef(repository, tag string) string {
@@ -3947,9 +4125,11 @@ func (a *App) requirePinnedProductionVersion() (string, error) {
 
 func coreServiceImages(version string) []string {
 	images := []string{
+		"alpine:3.21",
 		imageRef("ghcr.io/kon-218/ligand-x/gateway", version),
 		imageRef("ghcr.io/kon-218/ligand-x/frontend", version),
 		"nginx:1.27-alpine",
+		imageRef("ghcr.io/kon-218/ligand-x/pocket-finder", version),
 		imageRef("ghcr.io/kon-218/ligand-x/structure", version),
 		imageRef("ghcr.io/kon-218/ligand-x/alignment", version),
 		imageRef("ghcr.io/kon-218/ligand-x/ketcher", version),
@@ -3960,15 +4140,18 @@ func coreServiceImages(version string) []string {
 		"rabbitmq:3.13-management-alpine",
 		"mher/flower:2.0",
 	}
-	if !isPublicBuild {
-		images = append(images[:3], append([]string{imageRef("ghcr.io/kon-218/ligand-x/pocket-finder", version)}, images[3:]...)...)
-	}
 	return images
 }
 
 func (a *App) GetServiceGroups() []ServiceGroup {
 	license := a.GetLicenseStatus()
 	version, proPrefix := a.productionImageSettings()
+	// Pro images are tagged independently of the public ones; compose resolves
+	// them as ${PRO_VERSION:-${VERSION}}. The shared gpu-short worker is pulled
+	// here and launched from LIGANDX_GPU_SHORT_IMAGE, so both must name the same
+	// tag or the launcher pulls one image and compose runs another.
+	proVersion := a.productionProVersion()
+	proGPUShortImage := imageRef(proPrefix+"/worker-gpu-short", proVersion)
 	groups := []ServiceGroup{
 		{
 			ID:          "core",
@@ -4001,6 +4184,12 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Name:        "Molecular Dynamics",
 			Description: "MD simulations with OpenMM/OpenFF",
 			Services:    []string{"md", "worker-gpu-short"},
+			// The public worker image carries md_optimize and workflow_run, which
+			// is everything this group submits, and needs no registry
+			// credentials -- so a free-tier install can run MD without a licence.
+			// Selecting a Pro group that also uses gpu-short swaps in the Pro
+			// superset image through LIGANDX_GPU_SHORT_IMAGE; see
+			// gpuShortImageOverride.
 			Images: []string{
 				imageRef("ghcr.io/kon-218/ligand-x/md", version),
 				imageRef("ghcr.io/kon-218/ligand-x/worker-gpu-short", version),
@@ -4016,30 +4205,40 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Name:        "ADMET Prediction",
 			Description: "Pro package: predict molecular properties, pharmacokinetics, and toxicity",
 			Services:    []string{"admet"},
+			// admet_predict runs on the shared gpu-short worker, so this group
+			// owns the Pro image for it: the md group ships the public worker,
+			// which has no admet module.
 			Images: []string{
 				imageRef(proPrefix+"/admet", version),
+				proGPUShortImage,
 			},
-			SizeMB:      1500,
-			Required:    false,
-			DefaultOn:   false,
-			Edition:     "pro",
-			Entitlement: "admet",
+			RegistryAuthImages: []string{proGPUShortImage},
+			SizeMB:             1500,
+			Required:           false,
+			DefaultOn:          false,
+			Edition:            "pro",
+			Entitlement:        "admet",
 		},
 		{
 			ID:          "free-energy",
 			Name:        "Binding Free Energy",
 			Description: "Pro package: ABFE/RBFE binding free energy calculations",
 			Services:    []string{"abfe", "rbfe", "worker-gpu-long"},
+			// rbfe_mapping_preview is routed to gpu-short, not gpu-long, so this
+			// group needs the Pro shared worker too -- previously it depended on
+			// the md group happening to pull it.
 			Images: []string{
 				imageRef(proPrefix+"/abfe", version),
 				imageRef(proPrefix+"/rbfe", version),
 				imageRef(proPrefix+"/worker-gpu-long", version),
+				proGPUShortImage,
 			},
-			SizeMB:      5500,
-			Required:    false,
-			DefaultOn:   false,
-			Edition:     "pro",
-			Entitlement: "free-energy",
+			RegistryAuthImages: []string{proGPUShortImage},
+			SizeMB:             5500,
+			Required:           false,
+			DefaultOn:          false,
+			Edition:            "pro",
+			Entitlement:        "free-energy",
 		},
 		{
 			ID:          "qc",
@@ -4061,14 +4260,17 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			Name:        "Boltz-2",
 			Description: "Pro package: Boltz-2 binding affinity predictions",
 			Services:    []string{"boltz2"},
+			// boltz_predict and boltz_batch run on the shared gpu-short worker.
 			Images: []string{
 				imageRef(proPrefix+"/boltz2", version),
+				proGPUShortImage,
 			},
-			SizeMB:      6000,
-			Required:    false,
-			DefaultOn:   false,
-			Edition:     "pro",
-			Entitlement: "boltz2",
+			RegistryAuthImages: []string{proGPUShortImage},
+			SizeMB:             6000,
+			Required:           false,
+			DefaultOn:          false,
+			Edition:            "pro",
+			Entitlement:        "boltz2",
 		},
 		{
 			ID:          "reinvent",
@@ -4449,19 +4651,19 @@ func (s LicenseSummary) HasEntitlement(entitlement string) bool {
 	return false
 }
 
-func (a *App) registryCredentialsFromLicense() (registryCredentials, bool) {
-	data, err := os.ReadFile(a.licensePath())
-	if err != nil {
+func registryCredentialsFromLicenseData(data, publicKeyPEM []byte) (registryCredentials, bool) {
+	status, err := verifyLicenseDataWithPublicKey(data, publicKeyPEM)
+	if err != nil || !status.Valid {
 		return registryCredentials{}, false
 	}
+
 	var bundle licenseBundle
 	if err := json.Unmarshal(data, &bundle); err != nil {
 		return registryCredentials{}, false
 	}
 	// Bridge registry credentials embedded in the license are an offline /
-	// airgap fallback. They MUST be opt-in via an explicit signed claim so
-	// that misconfiguration cannot silently leak long-lived tokens to anyone
-	// who exfiltrates the license file.
+	// airgap fallback. They MUST be opt-in via an explicit signed claim and
+	// are accepted only after the complete certificate verifies above.
 	if mode := stringValue(bundle.Payload["registry_mode"]); mode != "bridge" {
 		return registryCredentials{}, false
 	}
@@ -4470,16 +4672,27 @@ func (a *App) registryCredentialsFromLicense() (registryCredentials, bool) {
 		return registryCredentials{}, false
 	}
 	creds := registryCredentials{
-		Host:     stringValue(registry["host"]),
-		Username: stringValue(registry["username"]),
-		Token:    stringValue(registry["token"]),
+		Host:     strings.ToLower(strings.TrimSpace(stringValue(registry["host"]))),
+		Username: strings.TrimSpace(stringValue(registry["username"])),
+		Token:    strings.TrimSpace(stringValue(registry["token"])),
 	}
-	return creds, creds.Host != "" && creds.Username != "" && creds.Token != ""
+	if creds.Host != "ghcr.io" || creds.Username == "" || creds.Token == "" {
+		return registryCredentials{}, false
+	}
+	return creds, true
+}
+
+func (a *App) registryCredentialsFromLicense() (registryCredentials, bool) {
+	data, err := os.ReadFile(a.licensePath())
+	if err != nil {
+		return registryCredentials{}, false
+	}
+	return registryCredentialsFromLicenseData(data, []byte(licensePublicKeyPEM))
 }
 
 func needsProRegistryAuth(groupIDs []string, groupMap map[string]ServiceGroup) bool {
 	for _, groupID := range groupIDs {
-		if group, ok := groupMap[groupID]; ok && group.Edition == "pro" {
+		if group, ok := groupMap[groupID]; ok && (group.Edition == "pro" || len(group.RegistryAuthImages) > 0) {
 			return true
 		}
 	}
@@ -4491,10 +4704,14 @@ func selectedProRepositories(groupIDs []string, groupMap map[string]ServiceGroup
 	var repos []string
 	for _, groupID := range groupIDs {
 		group, ok := groupMap[groupID]
-		if !ok || group.Edition != "pro" {
+		if !ok {
 			continue
 		}
-		for _, image := range group.Images {
+		images := group.RegistryAuthImages
+		if group.Edition == "pro" {
+			images = group.Images
+		}
+		for _, image := range images {
 			repo := image
 			if at := strings.Index(repo, "@"); at >= 0 {
 				repo = repo[:at]
@@ -4625,7 +4842,14 @@ func stringValueOrDefault(value, fallback string) string {
 	return value
 }
 
-func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[string]ServiceGroup) (registryCredentials, bool, error) {
+type bridgeCredentialLoader func() (registryCredentials, bool)
+
+func (a *App) registryCredentialsForProImagesForBuild(
+	groupIDs []string,
+	groupMap map[string]ServiceGroup,
+	publicBuild bool,
+	loadBridge bridgeCredentialLoader,
+) (registryCredentials, bool, error) {
 	if !needsProRegistryAuth(groupIDs, groupMap) {
 		return registryCredentials{}, false, nil
 	}
@@ -4634,20 +4858,23 @@ func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[st
 		return creds, configured && err == nil, err
 	}
 
-	if isPublicBuild {
-		return registryCredentials{}, false, fmt.Errorf("public launcher requires the short-lived registry token broker")
+	if creds, ok := loadBridge(); ok {
+		return creds, true, nil
 	}
 
-	creds, ok := a.registryCredentialsFromLicense()
-	if !ok {
-		return registryCredentials{}, false, fmt.Errorf("Pro image pull requires LIGANDX_REGISTRY_TOKEN_URL/LIGANDX_VENDOR_ACCESS_TOKEN or bridge registry credentials in the license")
+	if publicBuild {
+		return registryCredentials{}, false, fmt.Errorf("public launcher requires the short-lived registry token broker or signed bridge credentials")
 	}
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-		Service:   "launcher",
-		Message:   "Warning: using bridge registry credentials embedded in the license. Configure LIGANDX_REGISTRY_TOKEN_URL for production token-broker auth.",
-		Timestamp: time.Now().Format("15:04:05"),
-	})
-	return creds, true, nil
+	return registryCredentials{}, false, fmt.Errorf("Pro image pull requires LIGANDX_REGISTRY_TOKEN_URL/LIGANDX_VENDOR_ACCESS_TOKEN or signed bridge credentials in the license")
+}
+
+func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[string]ServiceGroup) (registryCredentials, bool, error) {
+	return a.registryCredentialsForProImagesForBuild(
+		groupIDs,
+		groupMap,
+		isPublicBuild,
+		a.registryCredentialsFromLicense,
+	)
 }
 
 func encodeRegistryAuth(creds registryCredentials) (string, error) {
@@ -4748,6 +4975,66 @@ func (a *App) CheckGPU() bool {
 	cmd := exec.CommandContext(ctx, "nvidia-smi")
 	err := cmd.Run()
 	return err == nil
+}
+
+func servicesNeedOrca(services []string) bool {
+	for _, svc := range services {
+		if svc == "qc" || svc == "worker-qc" {
+			return true
+		}
+	}
+	return false
+}
+
+// checkOrcaForServices returns an error if QC is about to start without a
+// host folder that actually contains the ORCA binary. Docker would otherwise
+// create an empty mount at the missing path and QC jobs would fail later.
+func (a *App) checkOrcaForServices(services []string) error {
+	if !servicesNeedOrca(services) {
+		return nil
+	}
+	path := a.currentOrcaHostPath()
+	if err := validateOrcaHostPath(path); err != nil {
+		return fmt.Errorf(
+			"Quantum Chemistry needs a local ORCA installation. "+
+				"Choose the folder that contains the ORCA executable before starting: %v",
+			err,
+		)
+	}
+	return nil
+}
+
+// validateOrcaHostPath requires a directory that contains the ORCA binary
+// (orca on Unix, orca.exe on Windows). The template default /opt/orca is
+// not treated as configured unless that folder is a real install.
+func validateOrcaHostPath(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("choose the folder that contains the ORCA executable")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("ORCA folder not found: %s", path)
+		}
+		return fmt.Errorf("cannot read ORCA folder %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("ORCA path is not a folder: %s", path)
+	}
+
+	names := []string{"orca"}
+	if goruntime.GOOS == "windows" {
+		names = []string{"orca.exe"}
+	}
+	for _, name := range names {
+		bin := filepath.Join(path, name)
+		st, err := os.Stat(bin)
+		if err == nil && st.Mode().IsRegular() {
+			return nil
+		}
+	}
+	return fmt.Errorf("no ORCA executable found in %s (expected %s)", path, strings.Join(names, " or "))
 }
 
 // canonicalImageRef normalizes a tag reference for exact comparisons.
@@ -5031,7 +5318,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 				ctx, cancel := context.WithCancel(a.ctx)
 
 				imageAuth := ""
-				if group.Edition == "pro" {
+				if group.Edition == "pro" || slices.Contains(group.RegistryAuthImages, image) {
 					imageAuth = registryAuth
 				}
 				if err := a.verifyImageSignature(image); err != nil {

@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"strconv"
 	"strings"
@@ -141,6 +142,124 @@ func TestGetServiceGroups(t *testing.T) {
 		if !found {
 			t.Errorf("core service %q has no matching image in coreServiceImages(): %v", svc, core.Images)
 		}
+	}
+}
+
+func TestCorePullListIncludesEveryFixedComposeImage(t *testing.T) {
+	compose, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := make(map[string]bool)
+	for _, image := range coreServiceImages("v-test") {
+		listed[image] = true
+	}
+
+	// Variable image references belong to optional product groups and are
+	// checked elsewhere. Literal references are runtime/infra dependencies that
+	// `up --pull=never` cannot recover when the launcher forgets to pre-pull
+	// them. Both scientific init containers, for example, use alpine:3.21.
+	imageLine := regexp.MustCompile(`(?m)^\s+image:\s+([^\s#]+)\s*$`)
+	for _, match := range imageLine.FindAllStringSubmatch(string(compose), -1) {
+		image := match[1]
+		if strings.Contains(image, "${") {
+			continue
+		}
+		if !listed[image] {
+			t.Errorf("fixed Compose image %q is absent from the Core pull list", image)
+		}
+	}
+}
+
+func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
+	const version = "v-test"
+	const proPrefix = "ghcr.io/kon-218/ligand-x-pro"
+	runtimeDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(runtimeDir, ".env.production"),
+		[]byte("VERSION="+version+"\nPRO_VERSION="+version+"\nLIGANDX_PRO_IMAGE_PREFIX="+proPrefix+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.projectPath = runtimeDir
+
+	compose, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceLine := regexp.MustCompile(`^  ([a-zA-Z0-9_-]+):\s*$`)
+	imageLine := regexp.MustCompile(`^    image:\s+([^\s#]+)\s*$`)
+	serviceImages := make(map[string]string)
+	service := ""
+	for _, line := range strings.Split(string(compose), "\n") {
+		if match := serviceLine.FindStringSubmatch(line); match != nil {
+			service = match[1]
+			continue
+		}
+		if service == "" {
+			continue
+		}
+		if match := imageLine.FindStringSubmatch(line); match != nil {
+			serviceImages[service] = match[1]
+		}
+	}
+
+	resolve := func(raw string) string {
+		// A whole-reference override with a default, e.g.
+		// ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}.
+		// The baseline modelled here is a free selection, where the override is
+		// unset and the public default applies. The Pro branch is asserted
+		// separately by TestGPUShortImageOverride.
+		//
+		// Only unwrap when the whole string is one expression: the Pro images are
+		// ${PREFIX:-...}/name:${TAG:-...}, whose first closing brace lands
+		// mid-string, and unwrapping those yields nonsense.
+		raw = stripWholeEnvDefault(raw)
+		if strings.Contains(raw, "LIGANDX_PRO_IMAGE_PREFIX") {
+			remainder := raw[strings.LastIndex(raw, "}/")+2:]
+			name := strings.SplitN(remainder, ":", 2)[0]
+			return imageRef(proPrefix+"/"+name, version)
+		}
+		if strings.Contains(raw, "${VERSION:-latest}") {
+			return strings.ReplaceAll(raw, "${VERSION:-latest}", version)
+		}
+		return raw
+	}
+
+	for _, group := range app.GetServiceGroups() {
+		listed := make(map[string]bool)
+		for _, image := range group.Images {
+			listed[image] = true
+		}
+		for _, service := range group.Services {
+			raw, ok := serviceImages[service]
+			if !ok {
+				t.Errorf("selected service %q in group %q has no Compose image", service, group.ID)
+				continue
+			}
+			expected := resolve(raw)
+			if !listed[expected] {
+				t.Errorf("group %q starts service %q as %q but does not pull that image: %v", group.ID, service, expected, group.Images)
+			}
+		}
+	}
+}
+
+func TestComposeUpAlwaysRemovesOnlyProjectOrphans(t *testing.T) {
+	input := []string{"compose", "--env-file", ".env.production", "up", "-d", "--pull=never", "gateway"}
+	want := []string{"compose", "--env-file", ".env.production", "up", "--remove-orphans", "-d", "--pull=never", "gateway"}
+	got := composeUpWithRemoveOrphans(input)
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("composeUpWithRemoveOrphans() = %v, want %v", got, want)
+	}
+	if again := composeUpWithRemoveOrphans(got); strings.Join(again, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("orphan flag insertion is not idempotent: %v", again)
+	}
+	nonUp := []string{"compose", "ps", "--all"}
+	if got := composeUpWithRemoveOrphans(nonUp); strings.Join(got, "\x00") != strings.Join(nonUp, "\x00") {
+		t.Fatalf("non-up command changed: %v", got)
 	}
 }
 
@@ -352,6 +471,9 @@ func TestSaveLocalAccountWorksWithProductionBundleOnly(t *testing.T) {
 }
 
 func TestFindProjectPathPrefersSourceCheckoutForDevBuild(t *testing.T) {
+	if isPublicBuild {
+		t.Skip("source checkout discovery is disabled in public builds")
+	}
 	tmpDir := t.TempDir()
 	launcherDir := filepath.Join(tmpDir, "ligand-x-launcher")
 	sourceDir := filepath.Join(tmpDir, "ligand-x")
@@ -630,8 +752,28 @@ func TestProRegistryCredentialsRequireBrokerOrBridge(t *testing.T) {
 	if ok {
 		t.Fatal("Expected no registry credentials")
 	}
-	if !strings.Contains(err.Error(), "LIGANDX_REGISTRY_TOKEN_URL") {
-		t.Fatalf("Expected broker guidance in error, got %v", err)
+	if !strings.Contains(err.Error(), "signed bridge") {
+		t.Fatalf("Expected signed bridge guidance in error, got %v", err)
+	}
+}
+
+func TestRegistryAuthIncludesPrivateImageInFreeGroup(t *testing.T) {
+	privateWorker := "ghcr.io/kon-218/ligand-x-pro/worker-gpu-short:v-test"
+	groups := map[string]ServiceGroup{
+		"md": {
+			ID:                 "md",
+			Edition:            "free",
+			Images:             []string{"ghcr.io/kon-218/ligand-x/md:v-test", privateWorker},
+			RegistryAuthImages: []string{privateWorker},
+		},
+	}
+	if !needsProRegistryAuth([]string{"md"}, groups) {
+		t.Fatal("a private image selected by a Free group must still request registry credentials")
+	}
+	repositories := selectedProRepositories([]string{"md"}, groups)
+	want := "ghcr.io/kon-218/ligand-x-pro/worker-gpu-short"
+	if len(repositories) != 1 || repositories[0] != want {
+		t.Fatalf("selectedProRepositories() = %v, want [%s]", repositories, want)
 	}
 }
 
@@ -657,6 +799,125 @@ func TestCheckGPU(t *testing.T) {
 	app := NewApp()
 	// Just verify the method doesn't panic
 	_ = app.CheckGPU()
+}
+
+func writeFakeOrcaInstall(t *testing.T, dir string) {
+	t.Helper()
+	name := "orca"
+	if goruntime.GOOS == "windows" {
+		name = "orca.exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("fake-orca"), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateOrcaHostPathRejectsEmpty(t *testing.T) {
+	if err := validateOrcaHostPath(""); err == nil {
+		t.Fatal("expected error for empty path")
+	}
+	if err := validateOrcaHostPath("   "); err == nil {
+		t.Fatal("expected error for whitespace path")
+	}
+}
+
+func TestValidateOrcaHostPathRejectsMissingDir(t *testing.T) {
+	if err := validateOrcaHostPath(filepath.Join(t.TempDir(), "no-such-orca")); err == nil {
+		t.Fatal("expected error for missing directory")
+	}
+}
+
+func TestValidateOrcaHostPathRejectsDirWithoutBinary(t *testing.T) {
+	if err := validateOrcaHostPath(t.TempDir()); err == nil {
+		t.Fatal("expected error when folder has no orca binary")
+	}
+}
+
+func TestValidateOrcaHostPathRejectsFileNotDir(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOrcaHostPath(f); err == nil {
+		t.Fatal("expected error when path is a file")
+	}
+}
+
+func TestValidateOrcaHostPathAcceptsFolderWithBinary(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeOrcaInstall(t, dir)
+	if err := validateOrcaHostPath(dir); err != nil {
+		t.Fatalf("expected valid install: %v", err)
+	}
+}
+
+func TestCheckOrcaForServicesSkipsWhenQCNotSelected(t *testing.T) {
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	if err := app.checkOrcaForServices([]string{"gateway", "frontend", "md"}); err != nil {
+		t.Fatalf("non-QC services should not require ORCA: %v", err)
+	}
+}
+
+func TestCheckOrcaForServicesFailsWhenMissing(t *testing.T) {
+	tmp := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmp
+	if err := os.WriteFile(filepath.Join(tmp, ".env.production"), []byte("ORCA_HOST_PATH=/definitely/not/orca\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.checkOrcaForServices([]string{"qc", "worker-qc"}); err == nil {
+		t.Fatal("expected error when QC is selected without a valid ORCA path")
+	}
+}
+
+func TestCheckOrcaForServicesAcceptsValidPath(t *testing.T) {
+	tmp := t.TempDir()
+	install := filepath.Join(tmp, "orca-install")
+	if err := os.Mkdir(install, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeOrcaInstall(t, install)
+	app := NewApp()
+	app.projectPath = tmp
+	content := "ORCA_HOST_PATH=" + install + "\n"
+	if err := os.WriteFile(filepath.Join(tmp, ".env.production"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.checkOrcaForServices([]string{"qc"}); err != nil {
+		t.Fatalf("valid ORCA path should allow QC start: %v", err)
+	}
+}
+
+func TestSetOrcaHostPathPersists(t *testing.T) {
+	tmp := t.TempDir()
+	install := filepath.Join(tmp, "orca-install")
+	if err := os.Mkdir(install, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeOrcaInstall(t, install)
+	app := NewApp()
+	app.projectPath = tmp
+	if err := app.SetOrcaHostPath(install); err != nil {
+		t.Fatal(err)
+	}
+	if !app.OrcaHostPathReady() {
+		t.Fatal("OrcaHostPathReady should be true after SetOrcaHostPath")
+	}
+	if got := app.currentOrcaHostPath(); got != install {
+		t.Fatalf("ORCA_HOST_PATH=%q, want %q", got, install)
+	}
+}
+
+func TestSetOrcaHostPathRejectsInvalid(t *testing.T) {
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	if err := app.SetOrcaHostPath(t.TempDir()); err == nil {
+		t.Fatal("expected error for folder without orca binary")
+	}
+	if app.OrcaHostPathReady() {
+		t.Fatal("invalid path must not mark ORCA as ready")
+	}
 }
 
 // TestEmbeddedPublicKeyMatchesPemFile prevents drift between the launcher's
@@ -913,48 +1174,88 @@ func TestValidateUnlockedServicesBlocksLockedGroup(t *testing.T) {
 	}
 }
 
-func TestRegistryCredentialsFromLicenseRequiresBridgeMode(t *testing.T) {
-	app := NewApp()
-	app.projectPath = t.TempDir()
-	licDir := filepath.Join(app.projectPath, "data", "license")
-	if err := os.MkdirAll(licDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	writeBundle := func(payload map[string]interface{}) {
-		bundle := map[string]interface{}{
-			"schema":    "ligandx-license/1",
-			"algorithm": "Ed25519",
-			"payload":   payload,
-			"signature": base64.StdEncoding.EncodeToString([]byte("ignored-by-this-helper")),
-		}
-		raw, _ := json.Marshal(bundle)
-		if err := os.WriteFile(app.licensePath(), raw, 0600); err != nil {
-			t.Fatalf("write license: %v", err)
-		}
-	}
-
-	// Without registry_mode=bridge, embedded creds must be ignored.
-	writeBundle(map[string]interface{}{
-		"edition": "pro",
-		"registry": map[string]interface{}{
-			"host": "ghcr.io", "username": "oauth2", "token": "tok",
-		},
-	})
-	if _, ok := app.registryCredentialsFromLicense(); ok {
-		t.Fatal("expected creds to be ignored without registry_mode=bridge")
-	}
-
-	// With registry_mode=bridge, accept them.
-	writeBundle(map[string]interface{}{
-		"edition":       "pro",
+func TestRegistryCredentialsFromLicenseRequiresValidSignedBridgeMode(t *testing.T) {
+	validPayload := map[string]interface{}{
+		"edition":       "academic",
+		"license_id":    "LX-BRIDGE-TEST",
+		"expires_at":    time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
 		"registry_mode": "bridge",
 		"registry": map[string]interface{}{
-			"host": "ghcr.io", "username": "oauth2", "token": "tok",
+			"host": "ghcr.io", "username": "reader", "token": "tok",
 		},
-	})
-	if _, ok := app.registryCredentialsFromLicense(); !ok {
-		t.Fatal("expected creds to be accepted under registry_mode=bridge")
+	}
+	bundle, pub := signTestLicense(t, validPayload)
+	creds, ok := registryCredentialsFromLicenseData(bundle, pub)
+	if !ok {
+		t.Fatal("expected valid signed bridge credentials to be accepted")
+	}
+	if creds.Host != "ghcr.io" || creds.Username != "reader" || creds.Token != "tok" {
+		t.Fatalf("unexpected bridge credentials: %+v", creds)
+	}
+
+	withoutMode := map[string]interface{}{}
+	for key, value := range validPayload {
+		withoutMode[key] = value
+	}
+	delete(withoutMode, "registry_mode")
+	bundle, pub = signTestLicense(t, withoutMode)
+	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
+		t.Fatal("expected credentials without registry_mode=bridge to be ignored")
+	}
+
+	bundle, pub = signTestLicense(t, validPayload)
+	tampered := bytes.Replace(bundle, []byte(`"tok"`), []byte(`"other"`), 1)
+	if _, ok := registryCredentialsFromLicenseData(tampered, pub); ok {
+		t.Fatal("expected tampered bridge credentials to be rejected")
+	}
+
+	expiredPayload := map[string]interface{}{}
+	for key, value := range validPayload {
+		expiredPayload[key] = value
+	}
+	expiredPayload["expires_at"] = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	bundle, pub = signTestLicense(t, expiredPayload)
+	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
+		t.Fatal("expected expired bridge credentials to be rejected")
+	}
+
+	wrongHostPayload := map[string]interface{}{}
+	for key, value := range validPayload {
+		wrongHostPayload[key] = value
+	}
+	wrongHostPayload["registry"] = map[string]interface{}{
+		"host": "example.com", "username": "reader", "token": "tok",
+	}
+	bundle, pub = signTestLicense(t, wrongHostPayload)
+	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
+		t.Fatal("expected non-GHCR bridge credentials to be rejected")
+	}
+}
+
+func TestPublicBuildAcceptsSignedBridgeCredentials(t *testing.T) {
+	t.Setenv("LIGANDX_REGISTRY_TOKEN_URL", "")
+	t.Setenv("LIGANDX_VENDOR_ACCESS_TOKEN", "")
+
+	app := NewApp()
+	groups := app.GetServiceGroups()
+	groupMap := make(map[string]ServiceGroup)
+	for _, group := range groups {
+		groupMap[group.ID] = group
+	}
+	want := registryCredentials{Host: "ghcr.io", Username: "reader", Token: "tok"}
+	loader := func() (registryCredentials, bool) { return want, true }
+
+	got, ok, err := app.registryCredentialsForProImagesForBuild(
+		[]string{"admet"},
+		groupMap,
+		true,
+		loader,
+	)
+	if err != nil {
+		t.Fatalf("public build rejected signed bridge credentials: %v", err)
+	}
+	if !ok || got != want {
+		t.Fatalf("public build returned (%+v, %v), want (%+v, true)", got, ok, want)
 	}
 }
 
@@ -985,7 +1286,7 @@ func TestProductionInfraUpArgsPreservesGlobalFlags(t *testing.T) {
 	want := []string{
 		"compose", "--env-file", ".env.production",
 		"-f", "docker-compose.yml", "-f", "docker-compose.gpu.yml",
-		"up", "-d", "--pull=never", "postgres", "redis", "rabbitmq",
+		"up", "-d", "--wait", "--wait-timeout", "120", "--pull=never", "postgres", "redis", "rabbitmq",
 	}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("productionInfraUpArgs() = %v, want %v", got, want)
@@ -1087,6 +1388,14 @@ func signRuntimeManifestForTest(t *testing.T, bundle []byte, version string, exp
 		Artifacts: map[string]runtimeReleaseArtifact{
 			runtimeBundleAssetName: {SHA256: fmt.Sprintf("%x", digest), Size: int64(len(bundle))},
 		},
+		PlatformSigning: runtimePlatformSigning{
+			Windows: runtimeWindowsSigning{Authenticode: false, Evidence: "workflow-verification"},
+			MacOS: runtimeMacOSSigning{
+				DeveloperID: false,
+				Notarized:   false,
+				Evidence:    "workflow-verification",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1101,6 +1410,10 @@ func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 	manifest, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v1.2.3")
 	if err != nil {
 		t.Fatalf("valid manifest rejected: %v", err)
+	}
+	if manifest.PlatformSigning.Windows.Evidence != "workflow-verification" ||
+		manifest.PlatformSigning.MacOS.Evidence != "workflow-verification" {
+		t.Fatalf("platform-signing evidence was not decoded: %+v", manifest.PlatformSigning)
 	}
 
 	if _, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v9.9.9"); err == nil {
@@ -1182,6 +1495,81 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 	payload[0] ^= 1
 	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil {
 		t.Fatal("tampered release index was accepted")
+	}
+}
+
+// Superseded by TestMalformedRecommendationDegradesInsteadOfFailing: a wrong
+// recommendation count no longer rejects the index, because doing so hid every
+// release and left the user unable to install anything (v2026.08.15-rc.8). The
+// signature remains mandatory; only the recommendation flags are normalised.
+func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := runtimeBundlePublicKeyB64
+	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
+	t.Cleanup(func() { runtimeBundlePublicKeyB64 = oldKey })
+
+	sign := func(index runtimeReleaseIndex) ([]byte, []byte) {
+		t.Helper()
+		payload, err := json.Marshal(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload, []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload)))
+	}
+	base := func(recommended ...bool) runtimeReleaseIndex {
+		releases := make([]RuntimeRelease, len(recommended))
+		for i, rec := range recommended {
+			releases[i] = RuntimeRelease{
+				Version:         fmt.Sprintf("v2.1.%d", i),
+				Status:          "supported",
+				Recommended:     rec,
+				MinimumLauncher: "v2.0.0",
+				BundleURL:       fmt.Sprintf("https://github.com/kon-218/ligand-x-launcher/releases/download/v2.1.%d/ligand-x-runtime.zip", i),
+				DownloadBytes:   1024,
+			}
+		}
+		return runtimeReleaseIndex{
+			Schema:    "ligandx-release-index/1",
+			IssuedAt:  time.Now().UTC().Format(time.RFC3339),
+			ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+			Releases:  releases,
+		}
+	}
+
+	payload, signature := sign(base(false, false))
+	index, err := verifyRuntimeReleaseIndex(payload, signature)
+	if err != nil {
+		t.Fatalf("zero recommended releases must still list, got %v", err)
+	}
+	if len(index.Releases) != 2 || index.Warning == "" {
+		t.Fatalf("expected both releases listed with a warning, got %d releases, warning %q",
+			len(index.Releases), index.Warning)
+	}
+
+	payload, signature = sign(base(true, true))
+	index, err = verifyRuntimeReleaseIndex(payload, signature)
+	if err != nil {
+		t.Fatalf("two recommended releases must still list, got %v", err)
+	}
+	for _, release := range index.Releases {
+		if release.Recommended {
+			t.Fatalf("ambiguous recommendation must be cleared, %s is still marked", release.Version)
+		}
+	}
+	if index.Warning == "" {
+		t.Fatal("expected a warning for the ambiguous recommendation")
+	}
+
+	payload, signature = sign(base(true, false))
+	index, err = verifyRuntimeReleaseIndex(payload, signature)
+	if err != nil {
+		t.Fatalf("single recommended release was rejected: %v", err)
+	}
+	if index.Warning != "" {
+		t.Fatalf("well-formed index must not warn, got %q", index.Warning)
 	}
 }
 
@@ -2766,6 +3154,10 @@ func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
 		"make_latest: false",
 		`"platform_signing": platform_signing`,
 		`"recommended": recommended`,
+		"if recommended:",
+		`raise SystemExit("release index must identify exactly one recommended release")`,
+		"Enforce GitHub prerelease and latest policy",
+		"-F prerelease=true",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("launcher release workflow is missing %q", required)
@@ -2785,4 +3177,35 @@ func TestLauncherQualityRunsForMainPushes(t *testing.T) {
 	if !strings.Contains(workflow, "push:\n    branches: [main]") {
 		t.Fatal("launcher quality workflow must run for commits pushed to main")
 	}
+}
+
+// stripWholeEnvDefault returns the default branch of a ${VAR:-default} shell
+// expansion when the entire string is exactly one such expansion, and the input
+// unchanged otherwise. Brace depth decides: a reference like
+// ${PREFIX:-repo}/name:${TAG:-v} closes its first brace mid-string and is left
+// alone, while ${IMAGE:-repo/name:${TAG:-v}} unwraps to repo/name:${TAG:-v}.
+func stripWholeEnvDefault(raw string) string {
+	if !strings.HasPrefix(raw, "${") {
+		return raw
+	}
+	depth := 0
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				if i != len(raw)-1 {
+					return raw
+				}
+				inner := raw[2:i]
+				if idx := strings.Index(inner, ":-"); idx >= 0 {
+					return inner[idx+2:]
+				}
+				return raw
+			}
+		}
+	}
+	return raw
 }
