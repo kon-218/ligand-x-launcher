@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -803,11 +804,7 @@ func TestCheckGPU(t *testing.T) {
 
 func writeFakeOrcaInstall(t *testing.T, dir string) {
 	t.Helper()
-	name := "orca"
-	if goruntime.GOOS == "windows" {
-		name = "orca.exe"
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("fake-orca"), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "orca"), []byte("fake-orca"), 0755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -880,10 +877,11 @@ func TestCheckOrcaForServicesAcceptsValidPath(t *testing.T) {
 	writeFakeOrcaInstall(t, install)
 	app := NewApp()
 	app.projectPath = tmp
-	content := "ORCA_HOST_PATH=" + install + "\n"
+	content := "ORCA_HOST_PATH=" + install + "\nVERSION=v-core\nPRO_VERSION=v-pro\n"
 	if err := os.WriteFile(filepath.Join(tmp, ".env.production"), []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
+	app.orcaProbeFn = func(_ context.Context, _ []string) ([]byte, error) { return nil, nil }
 	if err := app.checkOrcaForServices([]string{"qc"}); err != nil {
 		t.Fatalf("valid ORCA path should allow QC start: %v", err)
 	}

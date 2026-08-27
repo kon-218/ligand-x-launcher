@@ -381,6 +381,11 @@ type App struct {
 	// nil in production, set by tests so the resolved-model check can be
 	// exercised without a running daemon.
 	composeConfigFn func(args []string) ([]byte, error)
+
+	// orcaProbeFn overrides the isolated `docker run` used to prove that the
+	// configured Linux ORCA install is executable by the QC worker runtime.
+	// Nil in production; tests inject it to inspect arguments without Docker.
+	orcaProbeFn func(context.Context, []string) ([]byte, error)
 }
 
 func NewApp() *App {
@@ -2180,8 +2185,10 @@ func (a *App) StartServices(mode string) error {
 		// Fallback to legacy mode behavior if config not available
 		switch mode {
 		case "dev":
+			services = []string{"qc"} // unscoped compose up includes QC
 			args = append(a.devComposeArgs(), "up", "-d", "--pull=never")
 		case "prod":
+			services = []string{"qc"} // unscoped compose up includes QC
 			if _, err := a.requirePinnedProductionVersion(); err != nil {
 				return err
 			}
@@ -2197,6 +2204,7 @@ func (a *App) StartServices(mode string) error {
 		case "md":
 			args = append(a.devComposeArgs(), "up", "-d", "--pull=never", "postgres", "redis", "rabbitmq", "gateway", "frontend", "structure", "ketcher", "md", "worker-gpu-short")
 		default:
+			services = []string{"qc"} // unscoped compose up includes QC
 			args = append(a.devComposeArgs(), "up", "-d", "--pull=never")
 		}
 	} else {
@@ -2226,12 +2234,11 @@ func (a *App) StartServices(mode string) error {
 		if err := a.checkGPUForServices(services); err != nil {
 			return err
 		}
-		if err := a.checkOrcaForServices(services); err != nil {
-			return err
-		}
-
 		args = append(a.devComposeArgs(), "up", "-d", "--pull=never")
 		args = append(args, services...)
+	}
+	if err := a.checkOrcaForServices(services); err != nil {
+		return err
 	}
 
 	return a.runDockerCompose(args, "Starting services...")
@@ -2439,6 +2446,10 @@ func (a *App) StopServices() error {
 func (a *App) RestartServices() error {
 	// Use "up -d" instead of "restart" so containers are recreated when .env changes
 	// (e.g. REINVENT_MODELS_PATH update). "restart" keeps stale container config.
+	// With no service targets Compose includes QC, so apply both ORCA preflights.
+	if err := a.checkOrcaForServices([]string{"qc"}); err != nil {
+		return err
+	}
 	return a.runDockerCompose(append(a.devComposeArgs(), "up", "-d", "--pull=never"), "Restarting services...")
 }
 
@@ -4986,9 +4997,9 @@ func servicesNeedOrca(services []string) bool {
 	return false
 }
 
-// checkOrcaForServices returns an error if QC is about to start without a
-// host folder that actually contains the ORCA binary. Docker would otherwise
-// create an empty mount at the missing path and QC jobs would fail later.
+// checkOrcaForServices applies both ORCA preflights before any QC start or
+// restart: cheap host-folder shape first, then an actual isolated execution in
+// the exact pinned worker-qc image.
 func (a *App) checkOrcaForServices(services []string) error {
 	if !servicesNeedOrca(services) {
 		return nil
@@ -4997,16 +5008,16 @@ func (a *App) checkOrcaForServices(services []string) error {
 	if err := validateOrcaHostPath(path); err != nil {
 		return fmt.Errorf(
 			"Quantum Chemistry needs a local ORCA installation. "+
-				"Choose the folder that contains the ORCA executable before starting: %v",
+				"Choose the extracted Linux x86-64 ORCA folder that contains a file named 'orca' before starting: %v",
 			err,
 		)
 	}
-	return nil
+	return a.probeOrcaRuntime(path)
 }
 
-// validateOrcaHostPath requires a directory that contains the ORCA binary
-// (orca on Unix, orca.exe on Windows). The template default /opt/orca is
-// not treated as configured unless that folder is a real install.
+// validateOrcaHostPath requires a directory containing the Linux ORCA binary.
+// QC always runs in a Linux container, including under Docker Desktop on
+// Windows and macOS, so orca.exe is never a valid host-side shape.
 func validateOrcaHostPath(path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -5023,18 +5034,11 @@ func validateOrcaHostPath(path string) error {
 		return fmt.Errorf("ORCA path is not a folder: %s", path)
 	}
 
-	names := []string{"orca"}
-	if goruntime.GOOS == "windows" {
-		names = []string{"orca.exe"}
+	bin := filepath.Join(path, "orca")
+	if st, err := os.Stat(bin); err == nil && st.Mode().IsRegular() {
+		return nil
 	}
-	for _, name := range names {
-		bin := filepath.Join(path, name)
-		st, err := os.Stat(bin)
-		if err == nil && st.Mode().IsRegular() {
-			return nil
-		}
-	}
-	return fmt.Errorf("no ORCA executable found in %s (expected %s)", path, strings.Join(names, " or "))
+	return fmt.Errorf("no Linux ORCA executable found in %s (expected a regular file named orca)", path)
 }
 
 // canonicalImageRef normalizes a tag reference for exact comparisons.

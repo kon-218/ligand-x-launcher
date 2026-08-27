@@ -31,7 +31,8 @@ builds are preview and cannot run NVIDIA-accelerated containers locally.
 - Image download progress with retryable errors.
 - Start, stop, and open-app controls.
 - CPU/GPU worker-concurrency settings.
-- Optional ORCA host-folder and Boltz MSA credential settings.
+- Linux ORCA host-folder validation for licensed Quantum Chemistry installs,
+  plus optional Boltz MSA credential settings.
 - Resource-limit reset and explicit uninstall flow.
 - Best-effort update notification, signed stable-version selection, and
   verified runtime replacement. The launcher never accepts an arbitrary image

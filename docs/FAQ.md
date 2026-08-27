@@ -69,6 +69,22 @@ The public launcher displays installation/start errors but does not ship the
 developer dashboard’s broad log-filter/export controls. Use the emitted setup log
 and Docker/Compose diagnostics for a support case.
 
+## How do I configure ORCA for Quantum Chemistry?
+
+ORCA is separately licensed and is not distributed in Ligand-X images. Download
+the Linux x86-64 ORCA archive under your own ORCA license, extract the complete
+folder, and select that folder in launcher Settings. It must contain a regular
+file named `orca`, even when the launcher runs on Windows or macOS: Docker Desktop
+runs the Quantum Chemistry worker in a Linux container, so `orca.exe` and macOS
+binaries are incompatible.
+
+Before every Quantum Chemistry start or restart, the launcher mounts the folder
+read-only into the exact pinned `worker-qc` image and runs a short isolated ORCA
+calculation as the worker user. The check never pulls an image and has no network
+access. If it reports a permission error, make the extracted folders traversable
+and the ORCA files readable/executable by container users. If it reports that the
+pinned worker image is absent, download the Quantum Chemistry images first.
+
 ## How do updates work?
 
 The launcher checks the release source on a best-effort basis. At startup you
