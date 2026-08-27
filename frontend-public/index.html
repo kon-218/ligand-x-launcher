@@ -191,7 +191,7 @@
           <h3 class="settings-section-title">Quantum Chemistry</h3>
           <div class="field">
             <label for="orcaPath">ORCA installation folder</label>
-            <p class="field-hint">The folder containing the ORCA executable. Quantum chemistry jobs won't run without it. Find your ORCA folder and select it here.</p>
+            <p class="field-hint">Choose the extracted Linux x86-64 ORCA folder containing a file named <code>orca</code>. This is required even on Windows or macOS because Quantum Chemistry runs in a Linux container. Ligand-X tests the install inside the pinned QC worker before every start.</p>
             <div class="path-field">
               <input id="orcaPath" class="input" placeholder="/opt/orca" readonly>
               <button id="browseOrca" class="btn btn-ghost">Browse…</button>
@@ -335,7 +335,7 @@
       <button id="orcaModalClose" class="modal-close" aria-label="Close">✕</button>
     </div>
     <div class="license-modal-body">
-      <p class="field-hint" style="margin-bottom:14px">Quantum chemistry needs a licensed ORCA install on this computer. Choose the folder that contains the ORCA executable — Ligand-X will mount it into the QC container.</p>
+      <p class="field-hint" style="margin-bottom:14px">Quantum Chemistry needs your separately licensed Linux x86-64 ORCA install. Choose the extracted folder containing a file named <code>orca</code> (not <code>orca.exe</code>). Ligand-X mounts it read-only and runs a short isolated check in the pinned QC worker before services start.</p>
       <div class="field">
         <label for="orcaModalPath">ORCA installation folder</label>
         <div class="path-field">
