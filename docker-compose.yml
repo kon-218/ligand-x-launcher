@@ -153,6 +153,7 @@ services:
         max-file: '3'
   structure:
     image: ghcr.io/kon-218/ligand-x/structure:${VERSION:-latest}
+    init: true
     command:
     - structure
     - '8001'
@@ -203,6 +204,7 @@ services:
         max-file: '3'
   pocket-finder:
     image: ghcr.io/kon-218/ligand-x/pocket-finder:${VERSION:-latest}
+    init: true
     command:
     - pocket_finder
     - '8012'
@@ -256,6 +258,7 @@ services:
         max-file: '3'
   reinvent:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/reinvent:${PRO_VERSION:-${VERSION:-latest}}
+    init: true
     command:
     - reinvent
     - '8013'
@@ -313,6 +316,7 @@ services:
         max-file: '3'
   alignment:
     image: ghcr.io/kon-218/ligand-x/alignment:${VERSION:-latest}
+    init: true
     command:
     - alignment
     - '8007'
@@ -356,6 +360,7 @@ services:
         max-file: '3'
   ketcher:
     image: ghcr.io/kon-218/ligand-x/ketcher:${VERSION:-latest}
+    init: true
     command:
     - ketcher
     - '8008'
@@ -399,6 +404,7 @@ services:
         max-file: '3'
   msa:
     image: ghcr.io/kon-218/ligand-x/msa:${VERSION:-latest}
+    init: true
     command:
     - msa
     - '8009'
@@ -446,6 +452,7 @@ services:
         max-file: '3'
   docking:
     image: ghcr.io/kon-218/ligand-x/docking:${VERSION:-latest}
+    init: true
     command:
     - docking
     - '8002'
@@ -491,6 +498,7 @@ services:
         max-file: '3'
   md:
     image: ghcr.io/kon-218/ligand-x/md:${VERSION:-latest}
+    init: true
     command:
     - md
     - '8003'
@@ -541,6 +549,7 @@ services:
         max-file: '3'
   abfe:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/abfe:${PRO_VERSION:-${VERSION:-latest}}
+    init: true
     command:
     - abfe
     - '8010'
@@ -600,6 +609,7 @@ services:
         max-file: '3'
   rbfe:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/rbfe:${PRO_VERSION:-${VERSION:-latest}}
+    init: true
     command:
     - rbfe
     - '8011'
@@ -662,6 +672,7 @@ services:
         max-file: '3'
   admet:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/admet:${PRO_VERSION:-${VERSION:-latest}}
+    init: true
     command:
     - admet
     - '8004'
@@ -709,6 +720,7 @@ services:
         max-file: '3'
   boltz2:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/boltz2:${PRO_VERSION:-${VERSION:-latest}}
+    init: true
     command:
     - boltz2
     - '8005'
@@ -762,6 +774,7 @@ services:
         max-file: '3'
   qc:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/qc:${PRO_VERSION:-${VERSION:-latest}}
+    init: true
     command:
     - qc
     - '8006'
@@ -821,6 +834,7 @@ services:
         max-file: '3'
   worker-qc:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${PRO_VERSION:-${VERSION:-latest}}
+    init: true
     command:
     - worker-qc
     networks:
@@ -891,6 +905,7 @@ services:
         max-file: '3'
   worker-gpu-short:
     image: ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
+    init: true
     command:
     - worker-gpu-short
     networks:
@@ -958,6 +973,7 @@ services:
         max-file: '3'
   worker-gpu-long:
     image: ${LIGANDX_GPU_LONG_IMAGE:-${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${PRO_VERSION:-${VERSION:-latest}}}
+    init: true
     command:
     - worker-gpu-long
     networks:
@@ -1030,6 +1046,7 @@ services:
         max-file: '3'
   worker-cpu:
     image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
+    init: true
     command:
     - worker-cpu
     networks:
@@ -1096,6 +1113,7 @@ services:
         max-file: '3'
   worker-reinvent:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${PRO_VERSION:-${VERSION:-latest}}
+    init: true
     command:
     - worker-reinvent
     networks:
