@@ -3154,8 +3154,10 @@ func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
 		`"recommended": recommended`,
 		"if recommended:",
 		`raise SystemExit("release index must identify exactly one recommended release")`,
-		"Enforce GitHub prerelease and latest policy",
-		"-F prerelease=true",
+		"Enforce draft stable publication policy",
+		"draft: true",
+		"prerelease: false",
+		"-F draft=true",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("launcher release workflow is missing %q", required)
@@ -3163,6 +3165,9 @@ func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
 	}
 	if strings.Contains(workflow, "make_latest: ${{ inputs.channel == 'stable' }}") {
 		t.Fatal("launcher workflow must not promote GitHub latest independently")
+	}
+	if strings.Contains(workflow, "options: [rc, stable, preview]") {
+		t.Fatal("internal candidates must not create public launcher prereleases")
 	}
 }
 

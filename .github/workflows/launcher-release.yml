@@ -11,7 +11,7 @@ on:
         description: 'Product release channel.'
         required: true
         type: choice
-        options: [rc, stable, preview]
+        options: [stable]
       launcher_ref:
         description: 'Exact ligand-x-launcher commit SHA to build.'
         required: true
@@ -752,8 +752,11 @@ jobs:
           tag_name: ${{ steps.runtime.outputs.tag }}
           name: ${{ steps.runtime.outputs.title }}
           target_commitish: ${{ github.sha }}
-          draft: false
-          prerelease: ${{ inputs.channel != 'stable' }}
+          # The protected product orchestrator uploads/signs the complete product
+          # manifest and only then publishes this draft. Candidates never reach
+          # GitHub Releases at all.
+          draft: true
+          prerelease: false
           make_latest: false
           overwrite_files: false
           files: |
@@ -813,11 +816,7 @@ jobs:
             ./ligandx-linux-amd64.AppImage
             ```
 
-      # softprops/action-gh-release can leave make_latest at GitHub's default
-      # (true). GitHub then refuses prerelease on that release because latest
-      # cannot be a pre-release — which is how rc.8 became the live latest
-      # index with zero recommended entries.
-      - name: Enforce GitHub prerelease and latest policy
+      - name: Enforce draft stable publication policy
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.runtime.outputs.tag }}
@@ -825,22 +824,8 @@ jobs:
         run: |
           set -euo pipefail
           release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id)"
-          if [ "${CHANNEL}" = "stable" ]; then
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-              -f make_latest=false \
-              -F prerelease=false
-          else
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-              -f make_latest=false \
-              -F prerelease=true
-          fi
-          prerelease="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq .prerelease)"
-          echo "release ${RELEASE_TAG} prerelease=${prerelease} channel=${CHANNEL}"
-          if [ "${CHANNEL}" != "stable" ] && [ "${prerelease}" != "true" ]; then
-            echo "::error::non-stable release ${RELEASE_TAG} must remain a GitHub pre-release"
-            exit 1
-          fi
-          if [ "${CHANNEL}" = "stable" ] && [ "${prerelease}" != "false" ]; then
-            echo "::error::stable release ${RELEASE_TAG} must not be a GitHub pre-release"
-            exit 1
-          fi
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -f make_latest=false -F prerelease=false -F draft=true
+          state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")"
+          test "$(jq -r .draft <<<"$state")" = true
+          test "$(jq -r .prerelease <<<"$state")" = false
