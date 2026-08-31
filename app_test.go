@@ -2966,7 +2966,7 @@ func TestEnsureProductionEnvDerivesCORSFromAppPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := parseEnvFile(content)["CORS_ORIGINS"]
-	want := "http://localhost:8081,http://127.0.0.1:8081"
+	want := "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8081,http://127.0.0.1:8081"
 	if got != want {
 		t.Errorf("CORS_ORIGINS did not follow APP_PORT:\n got %q\nwant %q", got, want)
 	}

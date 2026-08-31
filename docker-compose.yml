@@ -109,7 +109,7 @@ services:
     - REINVENT_URL=http://reinvent:8013
     - KINETICS_URL=http://kinetics:8014
     - QMMM_URL=http://qmmm:8015
-    - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+    - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080}
     - LIGANDX_LICENSE_FILE=/app/data/license/ligandx-license.json
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
@@ -1083,6 +1083,7 @@ services:
         condition: service_healthy
     volumes:
     - docking_outputs:/app/data/docking_outputs
+    - msa_cache:/app/data/msa_cache
     - runtime_settings:/app/data/settings
     - scientific_artifacts:/app/data/scientific_artifacts
     healthcheck:
