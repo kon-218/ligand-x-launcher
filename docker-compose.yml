@@ -163,6 +163,10 @@ services:
     - '8001'
     volumes:
     - runtime_settings:/app/data/settings
+    - scientific_artifacts:/app/data/scientific_artifacts
+    depends_on:
+      scientific-artifact-init:
+        condition: service_completed_successfully
     environment:
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
@@ -324,6 +328,11 @@ services:
     - backend
     expose:
     - '8007'
+    volumes:
+    - scientific_artifacts:/app/data/scientific_artifacts
+    depends_on:
+      scientific-artifact-init:
+        condition: service_completed_successfully
     environment:
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
