@@ -13,6 +13,14 @@ POLL_SECONDS="${POLL_SECONDS:-10}"
 CLEANUP="${CLEANUP:-true}"
 LOG_DIR="${LOG_DIR:-}"
 
+# rabbitmq/redis/postgres/flower/proxy use a fixed container_name in the
+# canonical compose file (so a dev override stack can deliberately share them
+# with a real running install), which defeats --project-name isolation for
+# those five services specifically. Give this run its own prefix so it can
+# start alongside an already-running install instead of failing with
+# "Conflict. The container name ... is already in use".
+export LIGANDX_INFRA_CONTAINER_PREFIX="${LIGANDX_INFRA_CONTAINER_PREFIX:-$COMPOSE_PROJECT_NAME}"
+
 if [ ! -f "$ENV_FILE" ]; then
   echo "Missing env file: $ENV_FILE" >&2
   exit 1

@@ -1252,7 +1252,7 @@ services:
         max-file: '3'
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
-    container_name: ligandx-rabbitmq
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-rabbitmq
     hostname: rabbitmq
     networks:
     - backend
@@ -1291,7 +1291,7 @@ services:
         max-file: '3'
   redis:
     image: redis:7-alpine
-    container_name: ligandx-redis
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-redis
     hostname: redis
     command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
       --appendonly yes --appendfsync everysec
@@ -1325,7 +1325,7 @@ services:
         max-file: '3'
   postgres:
     image: postgres:16-alpine
-    container_name: ligandx-postgres
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-postgres
     networks:
     - backend
     environment:
@@ -1358,7 +1358,7 @@ services:
         max-file: '3'
   flower:
     image: mher/flower:2.0
-    container_name: ligandx-flower
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-flower
     command: celery flower --port=5555 --url_prefix=flower
     networks:
     - backend
@@ -1410,7 +1410,7 @@ services:
         max-file: '3'
   proxy:
     image: nginx:1.27-alpine
-    container_name: ligandx-proxy
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-proxy
     ports:
     - ${LIGANDX_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:80
     networks:
