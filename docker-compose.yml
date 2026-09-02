@@ -109,7 +109,7 @@ services:
     - REINVENT_URL=http://reinvent:8013
     - KINETICS_URL=http://kinetics:8014
     - QMMM_URL=http://qmmm:8015
-    - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+    - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080}
     - LIGANDX_LICENSE_FILE=/app/data/license/ligandx-license.json
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
@@ -163,6 +163,10 @@ services:
     - '8001'
     volumes:
     - runtime_settings:/app/data/settings
+    - scientific_artifacts:/app/data/scientific_artifacts
+    depends_on:
+      scientific-artifact-init:
+        condition: service_completed_successfully
     environment:
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
@@ -324,6 +328,11 @@ services:
     - backend
     expose:
     - '8007'
+    volumes:
+    - scientific_artifacts:/app/data/scientific_artifacts
+    depends_on:
+      scientific-artifact-init:
+        condition: service_completed_successfully
     environment:
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
@@ -1083,6 +1092,7 @@ services:
         condition: service_healthy
     volumes:
     - docking_outputs:/app/data/docking_outputs
+    - msa_cache:/app/data/msa_cache
     - runtime_settings:/app/data/settings
     - scientific_artifacts:/app/data/scientific_artifacts
     healthcheck:
@@ -1242,7 +1252,7 @@ services:
         max-file: '3'
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
-    container_name: ligandx-rabbitmq
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-rabbitmq
     hostname: rabbitmq
     networks:
     - backend
@@ -1281,7 +1291,7 @@ services:
         max-file: '3'
   redis:
     image: redis:7-alpine
-    container_name: ligandx-redis
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-redis
     hostname: redis
     command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
       --appendonly yes --appendfsync everysec
@@ -1315,7 +1325,7 @@ services:
         max-file: '3'
   postgres:
     image: postgres:16-alpine
-    container_name: ligandx-postgres
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-postgres
     networks:
     - backend
     environment:
@@ -1348,7 +1358,7 @@ services:
         max-file: '3'
   flower:
     image: mher/flower:2.0
-    container_name: ligandx-flower
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-flower
     command: celery flower --port=5555 --url_prefix=flower
     networks:
     - backend
@@ -1400,7 +1410,7 @@ services:
         max-file: '3'
   proxy:
     image: nginx:1.27-alpine
-    container_name: ligandx-proxy
+    container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-proxy
     ports:
     - ${LIGANDX_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:80
     networks:

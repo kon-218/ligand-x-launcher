@@ -3478,8 +3478,11 @@ func (a *App) ensureProductionEnv() error {
 	// running but the UI unable to call the API — a far more confusing failure
 	// than the bind error we just avoided.
 	appPort := portOrFallback(cur["APP_PORT"], 8080)
-	if err := a.setProductionEnvValue("CORS_ORIGINS",
-		fmt.Sprintf("http://localhost:%d,http://127.0.0.1:%d", appPort, appPort)); err != nil {
+	corsOrigins := "http://localhost:3000,http://127.0.0.1:3000"
+	if appPort != 3000 {
+		corsOrigins += fmt.Sprintf(",http://localhost:%d,http://127.0.0.1:%d", appPort, appPort)
+	}
+	if err := a.setProductionEnvValue("CORS_ORIGINS", corsOrigins); err != nil {
 		return err
 	}
 
