@@ -751,7 +751,7 @@ jobs:
         with:
           tag_name: ${{ steps.runtime.outputs.tag }}
           name: ${{ steps.runtime.outputs.title }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ inputs.launcher_ref }}
           # The protected product orchestrator uploads/signs the complete product
           # manifest and only then publishes this draft. Candidates never reach
           # GitHub Releases at all.
@@ -832,14 +832,14 @@ jobs:
           # retry accepts that error body as a false-positive release_id on
           # the very first (still-404) attempt. Require a purely numeric id.
           release_id=""
-          for attempt in $(seq 1 10); do
+          for attempt in $(seq 1 20); do
             candidate="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id 2>/dev/null || true)"
             case "$candidate" in
               ''|*[!0-9]*) : ;;
               *) release_id="$candidate" ;;
             esac
             [ -n "$release_id" ] && break
-            sleep 3
+            sleep 5
           done
           test -n "$release_id"
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
