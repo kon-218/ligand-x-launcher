@@ -461,12 +461,20 @@ jobs:
       - name: Install pinned topology-renderer dependency
         run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
 
-      - name: Create release tag for manual dispatch
+      - name: Guard against reusing an existing tag for a different commit
         if: github.event_name == 'workflow_dispatch'
         env:
           RELEASE_TAG: ${{ steps.runtime.outputs.tag }}
         run: |
           set -euo pipefail
+          # Pushing this tag ourselves (rather than letting the "Create Release"
+          # step below create tag+release together atomically) raced GitHub's
+          # Releases API: it would sometimes not yet see the just-pushed tag and
+          # fall back to an internal "untagged-*" placeholder release that never
+          # converges to the real tag, no matter how long later steps retry.
+          # Reproduced repeatedly promoting v0.1.0 -- observed the placeholder
+          # still unresolved after 4+ minutes of polling. Only guard against a
+          # conflicting existing tag here; leave tag creation to action-gh-release.
           if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
             remote_sha="$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}" | awk '{print $1}')"
             checkout_sha="$(git rev-parse HEAD)"
@@ -475,12 +483,7 @@ jobs:
               exit 1
             fi
             echo "Release tag already points to this launcher commit; continuing idempotently."
-            exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${RELEASE_TAG}"
-          git push origin "${RELEASE_TAG}"
 
       - name: Verify generated launcher topology snapshot
         env:
