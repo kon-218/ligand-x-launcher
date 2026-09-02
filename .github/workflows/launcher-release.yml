@@ -823,7 +823,17 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id)"
+          # The releases-by-tag endpoint lags behind the release the previous
+          # step just created/finalized (softprops/action-gh-release hits the
+          # same lag internally and retries its own lookup) -- retry here too
+          # instead of failing on a fresh release that isn't queryable yet.
+          release_id=""
+          for attempt in $(seq 1 10); do
+            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id 2>/dev/null || true)"
+            [ -n "$release_id" ] && break
+            sleep 3
+          done
+          test -n "$release_id"
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
             -f make_latest=false -F prerelease=false -F draft=true
           state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")"
