@@ -140,3 +140,73 @@ func TestProbeOrcaRuntimeExplainsMissingPinnedImage(t *testing.T) {
 		t.Fatalf("missing-image failure is not actionable: %v", err)
 	}
 }
+
+// TestRelaxOrcaPermissionsWidensOtherToMatchOwner is the regression case for
+// orca-validated-as-desktop-user: a normal `tar xf orca.tar.gz` extract is
+// 0700, unreadable by the container's fixed unprivileged runtime user (1001)
+// -- and the operator should never have to fix that with their own chmod.
+func TestRelaxOrcaPermissionsWidensOtherToMatchOwner(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "basis")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "orca")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(sub, "def2-SVP.gbw")
+	if err := os.WriteFile(data, []byte("basis data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := relaxOrcaPermissions(root); err != nil {
+		t.Fatalf("relaxOrcaPermissions: %v", err)
+	}
+
+	cases := []struct {
+		path string
+		want os.FileMode
+	}{
+		{root, 0o705}, // directory, owner had x -> other gets rx
+		{sub, 0o705},
+		{bin, 0o705},  // owner had x -> other gets rx, not just r
+		{data, 0o604}, // owner had no x -> other gets r only, no execute
+	}
+	for _, c := range cases {
+		info, err := os.Stat(c.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != c.want {
+			t.Errorf("%s: mode = %o, want %o", c.path, got, c.want)
+		}
+	}
+}
+
+func TestRelaxOrcaPermissionsLeavesSymlinksAlone(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "outside-root")
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "orca")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := relaxOrcaPermissions(root); err != nil {
+		t.Fatalf("relaxOrcaPermissions: %v", err)
+	}
+
+	info, err := os.Stat(target) // follows the symlink
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("symlink target mode changed: %o, want unchanged 0600", got)
+	}
+}
