@@ -827,9 +827,17 @@ jobs:
           # step just created/finalized (softprops/action-gh-release hits the
           # same lag internally and retries its own lookup) -- retry here too
           # instead of failing on a fresh release that isn't queryable yet.
+          # gh api writes the raw error JSON body to stdout (not just stderr)
+          # on a non-2xx response, so a bare "capture stdout, ignore stderr"
+          # retry accepts that error body as a false-positive release_id on
+          # the very first (still-404) attempt. Require a purely numeric id.
           release_id=""
           for attempt in $(seq 1 10); do
-            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id 2>/dev/null || true)"
+            candidate="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id 2>/dev/null || true)"
+            case "$candidate" in
+              ''|*[!0-9]*) : ;;
+              *) release_id="$candidate" ;;
+            esac
             [ -n "$release_id" ] && break
             sleep 3
           done
