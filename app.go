@@ -3642,10 +3642,22 @@ func (a *App) OrcaHostPathReady() bool {
 }
 
 // SetOrcaHostPath validates path and writes ORCA_HOST_PATH without touching
-// the rest of user settings.
+// the rest of user settings. Also widens the folder's own permissions so the
+// QC container's fixed unprivileged runtime user can read it -- a typical
+// tarball extract is 0700, and the operator should never have to fix that by
+// hand (see relaxOrcaPermissions). Best-effort: a failure here is not
+// surfaced, since checkOrcaForServices' real probe is the actual gate before
+// any QC job runs.
 func (a *App) SetOrcaHostPath(path string) error {
 	if err := validateOrcaHostPath(path); err != nil {
 		return err
+	}
+	if err := relaxOrcaPermissions(strings.TrimSpace(path)); err != nil && a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			Service:   "launcher",
+			Message:   fmt.Sprintf("Could not widen ORCA folder permissions automatically: %v", err),
+			Timestamp: time.Now().Format("15:04:05"),
+		})
 	}
 	return a.setProductionEnvValue("ORCA_HOST_PATH", strings.TrimSpace(path))
 }
@@ -5002,7 +5014,10 @@ func servicesNeedOrca(services []string) bool {
 
 // checkOrcaForServices applies both ORCA preflights before any QC start or
 // restart: cheap host-folder shape first, then an actual isolated execution in
-// the exact pinned worker-qc image.
+// the exact pinned worker-qc image. Also re-applies relaxOrcaPermissions here
+// (not just in SetOrcaHostPath) so a path that reached .env.production some
+// other way -- a hand-edit, a migrated install, restored settings -- still
+// gets fixed automatically before the operator ever sees a permission error.
 func (a *App) checkOrcaForServices(services []string) error {
 	if !servicesNeedOrca(services) {
 		return nil
@@ -5014,6 +5029,13 @@ func (a *App) checkOrcaForServices(services []string) error {
 				"Choose the extracted Linux x86-64 ORCA folder that contains a file named 'orca' before starting: %v",
 			err,
 		)
+	}
+	if err := relaxOrcaPermissions(path); err != nil && a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			Service:   "launcher",
+			Message:   fmt.Sprintf("Could not widen ORCA folder permissions automatically: %v", err),
+			Timestamp: time.Now().Format("15:04:05"),
+		})
 	}
 	return a.probeOrcaRuntime(path)
 }

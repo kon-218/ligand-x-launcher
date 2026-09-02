@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -15,6 +18,48 @@ const (
 	orcaProbeTimeout   = 30 * time.Second
 	orcaCommandTimeout = "20s"
 )
+
+// relaxOrcaPermissions grants "other" read (and, where the owner already
+// marks an entry executable, execute) access under root -- equivalent to
+// `chmod -R o+rX`. The QC container always runs as a fixed, unprivileged
+// user baked into the image (uid 1001; see orcaWorkerUser) that is a
+// stranger to any host filesystem, so a typical `tar xf orca.tar.gz` extract
+// (mode 0700, owned by the person who ran it) is unreadable to it. The
+// desktop user who selected this folder already owns it and can freely
+// widen its own "other" bits -- the operator should never see a Docker/uid
+// error and have to fix this by hand.
+//
+// Never propagates the write bit, and the mount this feeds is always
+// read-only (see orcaRuntimeProbeArgs) regardless, so this does not widen
+// what the container can do to the install even though it widens who can
+// read it. Symlinks are left alone -- their mode is not meaningful and
+// os.Chmod on one affects the target, which may lie outside root.
+// Best-effort: a failure here does not necessarily mean ORCA is unusable
+// (e.g. a file legitimately owned by someone else), so callers should still
+// run the real probe afterward rather than treat this as the verification.
+func relaxOrcaPermissions(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode().Perm()
+		want := mode | ((mode & 0o500) >> 6)
+		if want == mode {
+			return nil
+		}
+		if chErr := os.Chmod(path, want); chErr != nil {
+			return fmt.Errorf("cannot widen permissions on %s: %w", path, chErr)
+		}
+		return nil
+	})
+}
 
 // A tiny single-atom calculation proves more than a host-side executable-bit
 // check: the Linux loader, bundled ORCA helpers and basis data must all be
