@@ -747,6 +747,7 @@ jobs:
         run: ls -R artifacts
 
       - name: Create Release
+        id: create_release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.runtime.outputs.tag }}
@@ -819,29 +820,20 @@ jobs:
       - name: Enforce draft stable publication policy
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.runtime.outputs.tag }}
+          RELEASE_ID: ${{ steps.create_release.outputs.id }}
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          # The releases-by-tag endpoint lags behind the release the previous
-          # step just created/finalized (softprops/action-gh-release hits the
-          # same lag internally and retries its own lookup) -- retry here too
-          # instead of failing on a fresh release that isn't queryable yet.
-          # gh api writes the raw error JSON body to stdout (not just stderr)
-          # on a non-2xx response, so a bare "capture stdout, ignore stderr"
-          # retry accepts that error body as a false-positive release_id on
-          # the very first (still-404) attempt. Require a purely numeric id.
-          release_id=""
-          for attempt in $(seq 1 20); do
-            candidate="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id 2>/dev/null || true)"
-            case "$candidate" in
-              ''|*[!0-9]*) : ;;
-              *) release_id="$candidate" ;;
-            esac
-            [ -n "$release_id" ] && break
-            sleep 5
-          done
-          test -n "$release_id"
+          # The releases-by-tag REST endpoint lags behind a just-created release
+          # by an unbounded amount (observed 100s+ in practice, independent of
+          # target_commitish correctness) -- softprops/action-gh-release already
+          # returns the numeric release id synchronously from the create call
+          # itself, so use that directly instead of re-deriving it through a
+          # lookup that has no reliable retry budget.
+          release_id="${RELEASE_ID}"
+          case "$release_id" in
+            ''|*[!0-9]*) echo "::error::create_release step produced no numeric id output"; exit 1 ;;
+          esac
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
             -f make_latest=false -F prerelease=false -F draft=true
           state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")"
