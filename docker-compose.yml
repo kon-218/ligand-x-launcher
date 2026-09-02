@@ -1185,7 +1185,7 @@ services:
         max-size: 10m
         max-file: '3'
   celery-beat:
-    image: ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}
+    image: ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
     command:
     - celery
     - -A
