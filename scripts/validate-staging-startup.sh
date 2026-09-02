@@ -35,6 +35,29 @@ if [ -n "$OVERRIDE_ENV_FILE" ]; then
   compose+=(--env-file "$OVERRIDE_ENV_FILE")
 fi
 
+# The base docker-compose.yml is deliberately CPU-safe (no GPU device
+# reservations). Most GPU services fall back to CPU gracefully, but
+# worker-gpu-long fails closed by default (entrypoint.sh's worker-gpu-long
+# branch: LIGANDX_REQUIRE_CUDA defaults to "1" and SystemExits if OpenMM has
+# no CUDA platform, with no CPU path) — so under the base file alone it
+# crash-loops for this script's whole TIMEOUT_SECONDS wait, on GPU hosts and
+# CPU-only ones alike. The launcher's gpuComposeArgs() layers
+# docker-compose.gpu.yml whenever CheckGPU() (an `nvidia-smi` probe) succeeds
+# and the overlay file exists (app.go); mirror that exact check here so this
+# "exact production Compose bundle" validation matches what a real install
+# would run. When no GPU is present, relax LIGANDX_REQUIRE_CUDA the same way
+# a genuine CPU-only production install must, so the smoke test still
+# validates the rest of the stack instead of failing on a check the base
+# compose file was never going to satisfy.
+if [ -f "$ROOT_DIR/docker-compose.gpu.yml" ] && command -v nvidia-smi >/dev/null 2>&1 \
+    && nvidia-smi >/dev/null 2>&1; then
+  compose+=(-f docker-compose.yml -f docker-compose.gpu.yml)
+  echo "NVIDIA GPU detected: layering docker-compose.gpu.yml onto staging validation."
+else
+  export LIGANDX_REQUIRE_CUDA="${LIGANDX_REQUIRE_CUDA:-0}"
+  echo "No NVIDIA GPU detected: staging validation runs CPU-only (LIGANDX_REQUIRE_CUDA=$LIGANDX_REQUIRE_CUDA)."
+fi
+
 collect_diagnostics() {
   local status=$?
   if [ -n "$LOG_DIR" ]; then
