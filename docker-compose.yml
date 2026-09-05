@@ -481,6 +481,11 @@ services:
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
+      set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+    - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
+      must be set}@redis:6379/0}
+    - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
     healthcheck:
       test:
       - CMD
