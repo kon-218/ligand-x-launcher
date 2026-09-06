@@ -69,7 +69,6 @@ services:
     user: 0:0
     volumes:
     - celery_beat_data:/app/celery-beat
-
   runtime-settings-init:
     image: alpine:3.21
     command:
@@ -500,6 +499,11 @@ services:
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
+      set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+    - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
+      must be set}@redis:6379/0}
+    - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
     healthcheck:
       test:
       - CMD
@@ -879,7 +883,6 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
-    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - ORCA_PATH=/opt/orca/orca
     - SECRET_KEY=${QC_SECRET_KEY:?Set QC_SECRET_KEY in .env or .env.production}
     - CELERY_CONCURRENCY=${QC_WORKER_CONCURRENCY:-2}
@@ -951,7 +954,6 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
-    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - CELERY_CONCURRENCY=${GPU_SHORT_CONCURRENCY:-2}
     - BOLTZ_OUTPUT_ROOT=/app/data/boltz_results_input/outputs
     - GATEWAY_URL=http://gateway:8000
@@ -1021,7 +1023,6 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
-    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - CELERY_CONCURRENCY=${GPU_LONG_CONCURRENCY:-1}
     - LIGANDX_REQUIRE_CUDA=${LIGANDX_REQUIRE_CUDA:-1}
     - GATEWAY_URL=http://gateway:8000
@@ -1093,7 +1094,6 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
-    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - CELERY_CONCURRENCY=${CPU_WORKER_CONCURRENCY:-4}
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
@@ -1157,7 +1157,6 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
-    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
@@ -1230,7 +1229,6 @@ services:
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
     - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
-    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - REINVENT_MODELS_PATH=${REINVENT_MODELS_PATH:-/models}
     - CELERY_CONCURRENCY=${REINVENT_WORKER_CONCURRENCY:-1}
     - GATEWAY_URL=http://gateway:8000
@@ -1302,7 +1300,6 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
-    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
     depends_on:
       celery-beat-init:
