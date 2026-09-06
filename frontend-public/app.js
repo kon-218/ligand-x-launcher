@@ -531,7 +531,9 @@ function startPull(groupIds) {
   state.pulling = true;
   state._pullGroups = groupIds;
   el("pullError").textContent = "";
-  el("pullActions").hidden = true;
+  el("pullActions").hidden = false;
+  el("pullBack").textContent = "Stop";
+  el("pullRetry").hidden = true;
   el("pullLog").textContent = "";
   el("pullFill").style.width = "0%";
   el("pullGroup").textContent = "Preparing…";
@@ -542,6 +544,36 @@ function startPull(groupIds) {
   } catch (e) {
     pullFailed(String(e));
   }
+}
+
+async function stopPullAndReturnToServices() {
+  if (!state.pulling) {
+    await enterServices(true);
+    return;
+  }
+
+  // Stop UI updates immediately to avoid late events overwriting the services screen.
+  state.pulling = false;
+
+  try {
+    await App().StopPullServiceGroups();
+  } catch (e) { /* best-effort cancellation */ }
+
+  state._pullGroups = null;
+
+  // Reset pull screen visuals (screen will switch away anyway, but helps avoid flicker).
+  el("pullError").textContent = "";
+  el("pullFill").style.width = "0%";
+  el("pullGroup").textContent = "Preparing…";
+  el("pullCounter").textContent = "";
+  el("pullCaption").textContent = "";
+
+  // Keep the user's current in-progress selection when we re-enter the services screen.
+  // `enterServices(true)` rebuilds selection from `state.config.selectedGroups`.
+  if (!state.config) state.config = {};
+  state.config.selectedGroups = selectedGroupIds();
+
+  await enterServices(true);
 }
 
 function onPullProgress(p) {
@@ -569,6 +601,10 @@ async function onPullComplete(res) {
 
   // Failure paths.
   const reason = res && res.reason;
+  if (reason === "cancelled") {
+    // Cancellation is handled by the UI stop/back handler.
+    return;
+  }
   if (reason === "gpu_not_found") {
     // Drop GPU-requiring groups and bounce back to selection.
     pullFailed("Some selected modules need an NVIDIA GPU that wasn't found. Remove them or continue with the rest.");
@@ -590,6 +626,8 @@ function pullFailed(msg) {
   state.pulling = false;
   el("pullError").textContent = msg;
   el("pullActions").hidden = false;
+  el("pullBack").textContent = "Back";
+  el("pullRetry").hidden = false;
 }
 
 async function persistSelection() {
@@ -1131,7 +1169,7 @@ function wireEvents() {
   el("svcBack").onclick = () => enterLicense();
   el("svcNext").onclick = confirmServices;
 
-  el("pullBack").onclick = () => enterServices(true);
+  el("pullBack").onclick = () => stopPullAndReturnToServices();
   el("pullRetry").onclick = () => startPull(state._pullGroups || selectedGroupIds());
 
   el("openApp").onclick = () => { try { App().OpenFrontend(); } catch (e) {} };
