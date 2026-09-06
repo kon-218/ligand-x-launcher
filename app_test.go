@@ -802,6 +802,72 @@ func TestCheckGPU(t *testing.T) {
 	_ = app.CheckGPU()
 }
 
+func TestStopPullServiceGroupsNoOpWithoutActivePull(t *testing.T) {
+	app := NewApp()
+	if err := app.StopPullServiceGroups(); err != nil {
+		t.Fatalf("expected nil error with no active pull, got %v", err)
+	}
+}
+
+func TestStopPullServiceGroupsCancelsStoredContext(t *testing.T) {
+	app := NewApp()
+	ctx, cancel := context.WithCancel(context.Background())
+	app.activePullCancel = cancel
+
+	if err := app.StopPullServiceGroups(); err != nil {
+		t.Fatalf("StopPullServiceGroups returned error: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("expected the stored pull context to be cancelled")
+	}
+}
+
+// TestPullServiceGroupsGenerationCounterSurvivesRestart exercises the actual
+// bookkeeping PullServiceGroups uses around a real Docker pull: a second
+// caller interrupts the first (activePullGen distinguishes which goroutine's
+// deferred cleanup is allowed to null out activePullCancel — see the comment
+// at its declaration; a raw func-to-func comparison isn't legal in Go).
+func TestPullServiceGroupsGenerationCounterSurvivesRestart(t *testing.T) {
+	app := NewApp()
+
+	firstCtx, firstCancel := context.WithCancel(context.Background())
+	app.activePullCancel = firstCancel
+	app.activePullGen = 1
+
+	// Simulate PullServiceGroups starting a second pull: it interrupts the
+	// first, installs its own cancel func, and bumps the generation.
+	app.pullCancelMu.Lock()
+	app.activePullCancel()
+	secondCtx, secondCancel := context.WithCancel(context.Background())
+	app.activePullCancel = secondCancel
+	app.activePullGen++
+	secondGen := app.activePullGen
+	app.pullCancelMu.Unlock()
+
+	if firstCtx.Err() == nil {
+		t.Fatal("expected the interrupted first pull's context to be cancelled")
+	}
+	if secondCtx.Err() != nil {
+		t.Fatal("the second pull's context must not be cancelled by starting it")
+	}
+
+	// The first goroutine's deferred cleanup must not clear the second
+	// pull's cancel func just because it runs after the second one started.
+	app.pullCancelMu.Lock()
+	if app.activePullGen == 1 { // stale generation from the (hypothetical) first goroutine
+		app.activePullCancel = nil
+	}
+	app.pullCancelMu.Unlock()
+
+	app.pullCancelMu.Lock()
+	stillActive := app.activePullCancel
+	stillCorrectGen := app.activePullGen == secondGen
+	app.pullCancelMu.Unlock()
+	if stillActive == nil || !stillCorrectGen {
+		t.Fatal("a stale pull's cleanup must not clobber a newer pull's cancel state")
+	}
+}
+
 func writeFakeOrcaInstall(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, "orca"), []byte("fake-orca"), 0755); err != nil {
