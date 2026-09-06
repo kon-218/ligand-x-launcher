@@ -1061,8 +1061,37 @@ func (a *App) GetDistributionStatus() DistributionStatus {
 	return status
 }
 
+// InstallRuntimeBundle installs the release the signed index currently marks
+// recommended for this install's channel -- the same source ListRuntimeReleases,
+// CheckForRuntimeUpdate and the version picker already use, so the plain
+// one-click "Download runtime" path can't disagree with them about what's
+// safe to install. It used to resolve independently via the newest GitHub
+// release carrying the bundle asset, which does not know about the index's
+// recommended/revoked/compatible flags -- see recommendedReleaseVersion.
 func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
-	return a.installRuntimeBundleSelected("", "", false)
+	if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
+		return a.installRuntimeBundleSelected(override, "", false)
+	}
+	version, err := a.recommendedReleaseVersion()
+	if err != nil {
+		return a.GetDistributionStatus(), err
+	}
+	return a.InstallRuntimeBundleVersion(version)
+}
+
+// recommendedReleaseVersion returns the version the signed release index (or
+// its unreachable-index fallback -- see ListRuntimeReleases) marks
+// recommended for the current channel.
+func (a *App) recommendedReleaseVersion() (string, error) {
+	releases, err := a.ListRuntimeReleases()
+	if err != nil {
+		return "", err
+	}
+	release, ok := recommendedRelease(releases)
+	if !ok {
+		return "", fmt.Errorf("signed release index has no recommended compatible release")
+	}
+	return release.Version, nil
 }
 
 // InstallRuntimeBundleVersion installs a release chosen from the signed stable
@@ -1222,18 +1251,10 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 
 	bundleURL := strings.TrimSpace(selectedURL)
 	releaseTag := strings.TrimSpace(selectedVersion)
-	if bundleURL != "" {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
-	} else if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
-		bundleURL = override
-	} else if resolved, tag, resolveErr := resolveRuntimeBundleURLForChannel(a.includePrereleases()); resolveErr == nil {
-		bundleURL = resolved
-		releaseTag = tag
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Resolved latest runtime bundle: %s", bundleURL), Timestamp: time.Now().Format("15:04:05")})
-	} else {
-		bundleURL = defaultRuntimeBundleURL
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Could not resolve latest release (%v); falling back to %s", resolveErr, bundleURL), Timestamp: time.Now().Format("15:04:05")})
+	if bundleURL == "" {
+		return a.GetDistributionStatus(), fmt.Errorf("no runtime bundle URL resolved")
 	}
+	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 
 	manifestURL, err := companionRuntimeAssetURL(bundleURL, runtimeBundleManifestAssetName)
 	if err != nil {

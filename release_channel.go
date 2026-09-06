@@ -122,6 +122,18 @@ func (a *App) SetShowPrereleases(enabled bool) error {
 	return a.SaveLauncherConfig(config)
 }
 
+// recommendedRelease returns the release the signed index marks recommended,
+// used both to install on first setup and to prompt an update on an existing
+// one -- so those two decisions can't disagree about what's safe to install.
+func recommendedRelease(releases []RuntimeRelease) (RuntimeRelease, bool) {
+	for _, release := range releases {
+		if release.Recommended {
+			return release, true
+		}
+	}
+	return RuntimeRelease{}, false
+}
+
 // prereleaseOrdinal returns the trailing number of a pre-release suffix, e.g.
 // v2026.08.15-rc.10 -> 10. Zero when there is no numeric part.
 func prereleaseOrdinal(version string) int {
