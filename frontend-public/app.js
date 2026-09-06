@@ -142,9 +142,20 @@ async function preflight(onReady) {
   }
 
   if (dist && dist.needsInstall) {
+    let msg = dist.message || "Ligand-X needs to download its runtime files (~small) before the first launch.";
+    try {
+      const options = await App().ListRuntimeReleaseOptions();
+      const recommended = (options.releases || []).find((r) => r.recommended);
+      if (recommended) {
+        msg += ` This will install ${recommended.version}${recommended.summary ? " (" + recommended.summary + ")" : ""}.`;
+      }
+    } catch (e) {
+      // Best-effort: the plain download button still works without this detail.
+      console.warn("could not resolve recommended version for display", e);
+    }
     gate({
       icon: "📦", title: "Set up runtime files",
-      msg: dist.message || "Ligand-X needs to download its runtime files (~small) before the first launch.",
+      msg,
       action: { label: "Download runtime", fn: () => installRuntime(onReady) },
       secondary: { label: "Choose version", fn: () => openReleaseSelector(onReady, false) },
     });

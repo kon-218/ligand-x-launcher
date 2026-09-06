@@ -313,6 +313,39 @@ func TestCompareReleasesNewestFirst(t *testing.T) {
 	}
 }
 
+// recommendedRelease backs both InstallRuntimeBundle (fresh installs) and
+// CheckForRuntimeUpdate/the version picker (existing installs) -- they must
+// not be able to disagree about what's safe to install.
+func TestRecommendedRelease(t *testing.T) {
+	t.Run("returns the flagged release", func(t *testing.T) {
+		releases := []RuntimeRelease{
+			{Version: "v1.9.0", Recommended: false},
+			{Version: "v2.0.0", Recommended: true},
+			{Version: "v1.8.0", Status: "revoked"},
+		}
+		release, ok := recommendedRelease(releases)
+		if !ok || release.Version != "v2.0.0" {
+			t.Fatalf("got %+v, ok=%v, want v2.0.0", release, ok)
+		}
+	})
+
+	t.Run("no recommendation is reported, not guessed", func(t *testing.T) {
+		releases := []RuntimeRelease{
+			{Version: "v2.0.0"},
+			{Version: "v1.9.0"},
+		}
+		if _, ok := recommendedRelease(releases); ok {
+			t.Fatal("expected no recommended release, but one was returned")
+		}
+	})
+
+	t.Run("empty list is reported, not guessed", func(t *testing.T) {
+		if _, ok := recommendedRelease(nil); ok {
+			t.Fatal("expected no recommended release from an empty list")
+		}
+	})
+}
+
 func versionsOf(releases []RuntimeRelease) []string {
 	out := make([]string, len(releases))
 	for i, release := range releases {
