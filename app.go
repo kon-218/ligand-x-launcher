@@ -371,6 +371,7 @@ type App struct {
 	// the services selection screen.
 	pullCancelMu     sync.Mutex
 	activePullCancel context.CancelFunc
+	activePullGen    uint64
 
 	// Cloudflare tunnel (see tunnel.go)
 	tunnelCmd *exec.Cmd
@@ -5240,18 +5241,22 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 	go func() {
 		pullCtx, pullCancel := context.WithCancel(a.ctx)
 
-		// Store cancel func so the UI can stop an in-progress pull.
+		// Store cancel func so the UI can stop an in-progress pull. activePullGen
+		// disambiguates which goroutine's cleanup defer is running below — a
+		// func value can only be compared to nil, not to another func value.
 		a.pullCancelMu.Lock()
 		if a.activePullCancel != nil {
 			// Interrupt any existing pull before starting a new one.
 			a.activePullCancel()
 		}
 		a.activePullCancel = pullCancel
+		a.activePullGen++
+		myGen := a.activePullGen
 		a.pullCancelMu.Unlock()
 
 		defer func() {
 			a.pullCancelMu.Lock()
-			if a.activePullCancel == pullCancel {
+			if a.activePullGen == myGen {
 				a.activePullCancel = nil
 			}
 			a.pullCancelMu.Unlock()
