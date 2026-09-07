@@ -69,19 +69,6 @@ services:
     user: 0:0
     volumes:
     - celery_beat_data:/app/celery-beat
-  runtime-settings-init:
-    image: alpine:3.21
-    command:
-    - sh
-    - -ec
-    - chown $${SETTINGS_RUNTIME_UID}:$${SETTINGS_RUNTIME_GID} /runtime-settings &&
-      chmod 0750 /runtime-settings
-    environment:
-      SETTINGS_RUNTIME_UID: ${LIGANDX_GATEWAY_UID:-1001}
-      SETTINGS_RUNTIME_GID: ${LIGANDX_GATEWAY_GID:-1001}
-    user: 0:0
-    volumes:
-    - runtime_settings:/runtime-settings
     restart: 'no'
   gateway:
     image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:-latest}
@@ -100,9 +87,6 @@ services:
     - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
     - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
-    - LIGANDX_CORE_VERSION=${VERSION:-latest}
-    - LIGANDX_PRO_VERSION=${PRO_VERSION:-${VERSION:-latest}}
-    - LIGANDX_LAUNCHER_VERSION=${LIGANDX_LAUNCHER_VERSION:-}
     - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - REDIS_URL=${REDIS_URL:?REDIS_URL must be set (e.g. redis://redis:6379/0)}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -136,8 +120,6 @@ services:
     - scientific_artifacts:/app/data/scientific_artifacts
     depends_on:
       runtime-license-init:
-        condition: service_completed_successfully
-      runtime-settings-init:
         condition: service_completed_successfully
       scientific-artifact-init:
         condition: service_completed_successfully
@@ -499,11 +481,6 @@ services:
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
-      set RABBITMQ_PASSWORD}@rabbitmq:5672/}
-    - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
-      must be set}@redis:6379/0}
-    - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
     healthcheck:
       test:
       - CMD
@@ -883,6 +860,7 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
+    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - ORCA_PATH=/opt/orca/orca
     - SECRET_KEY=${QC_SECRET_KEY:?Set QC_SECRET_KEY in .env or .env.production}
     - CELERY_CONCURRENCY=${QC_WORKER_CONCURRENCY:-2}
@@ -954,6 +932,7 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
+    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - CELERY_CONCURRENCY=${GPU_SHORT_CONCURRENCY:-2}
     - BOLTZ_OUTPUT_ROOT=/app/data/boltz_results_input/outputs
     - GATEWAY_URL=http://gateway:8000
@@ -1023,6 +1002,7 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
+    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - CELERY_CONCURRENCY=${GPU_LONG_CONCURRENCY:-1}
     - LIGANDX_REQUIRE_CUDA=${LIGANDX_REQUIRE_CUDA:-1}
     - GATEWAY_URL=http://gateway:8000
@@ -1094,6 +1074,7 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
+    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - CELERY_CONCURRENCY=${CPU_WORKER_CONCURRENCY:-4}
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
@@ -1140,75 +1121,6 @@ services:
       options:
         max-size: 10m
         max-file: '3'
-  worker-control:
-    image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
-    init: true
-    command:
-    - worker-control
-    networks:
-    - backend
-    environment:
-    - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
-    - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - PYTHONIOENCODING=utf-8
-    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
-      set RABBITMQ_PASSWORD}@rabbitmq:5672/}
-    - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
-      must be set}@redis:6379/0}
-    - GATEWAY_URL=http://gateway:8000
-    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
-      (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
-    - LIGANDX_IMAGE_REF=ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
-    depends_on:
-      scientific-artifact-init:
-        condition: service_completed_successfully
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      gateway:
-        condition: service_healthy
-    volumes:
-    - docking_outputs:/data/docking_outputs
-    - md_outputs:/data/md_outputs
-    - abfe_outputs:/data/abfe_outputs
-    - rbfe_outputs:/data/rbfe_outputs
-    - boltz_outputs:/data/boltz_outputs
-    - qc_results:/data/qc_results
-    - kinetics_jobs:/data/kinetics_jobs
-    - reinvent_campaigns:/data/reinvent_campaigns
-    - scientific_artifacts:/app/data/scientific_artifacts
-    healthcheck:
-      test:
-      - CMD
-      - celery
-      - -A
-      - lib.tasks.control_tasks
-      - inspect
-      - ping
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: ${WORKER_CONTROL_CPU_LIMIT:-1}
-          memory: ${WORKER_CONTROL_MEM_LIMIT:-1G}
-        reservations:
-          cpus: ${WORKER_CONTROL_CPU_RES:-0.25}
-          memory: ${WORKER_CONTROL_MEM_RES:-256M}
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: '3'
   worker-reinvent:
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${PRO_VERSION:-${VERSION:-latest}}
     init: true
@@ -1229,6 +1141,7 @@ services:
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
     - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - REINVENT_MODELS_PATH=${REINVENT_MODELS_PATH:-/models}
     - CELERY_CONCURRENCY=${REINVENT_WORKER_CONCURRENCY:-1}
     - GATEWAY_URL=http://gateway:8000
@@ -1300,6 +1213,7 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
+    - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
     - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
     depends_on:
       celery-beat-init:
@@ -1572,7 +1486,6 @@ volumes:
   runtime_license: null
   scientific_artifacts: null
   reinvent_campaigns: null
-  kinetics_jobs: null
   redis_data: null
   postgres_data: null
   rabbitmq_data: null
