@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -375,6 +376,13 @@ type App struct {
 	// index verification, for ListRuntimeReleaseOptions to surface.
 	lastReleaseIndexWarning string
 
+	// Pull cancellation state for PullServiceGroups.
+	// Allows the UI to stop an in-progress Docker image pull and return to
+	// the services selection screen.
+	pullCancelMu     sync.Mutex
+	activePullCancel context.CancelFunc
+	activePullGen    uint64
+
 	// Cloudflare tunnel (see tunnel.go)
 	tunnelCmd *exec.Cmd
 	tunnelMux sync.Mutex
@@ -423,6 +431,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	_ = a.StopPullServiceGroups()
 	a.stopAllLogStreams()
 	a.shutdownTunnel()
 	if a.dockerClient != nil {
@@ -5518,8 +5527,42 @@ func (a *App) DeleteServiceGroupImages(groupID string) error {
 	return nil
 }
 
+func (a *App) StopPullServiceGroups() error {
+	a.pullCancelMu.Lock()
+	cancel := a.activePullCancel
+	a.pullCancelMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	return nil
+}
+
 func (a *App) PullServiceGroups(groupIDs []string) {
 	go func() {
+		pullCtx, pullCancel := context.WithCancel(a.ctx)
+
+		// Store cancel func so the UI can stop an in-progress pull. activePullGen
+		// disambiguates which goroutine's cleanup defer is running below — a
+		// func value can only be compared to nil, not to another func value.
+		a.pullCancelMu.Lock()
+		if a.activePullCancel != nil {
+			// Interrupt any existing pull before starting a new one.
+			a.activePullCancel()
+		}
+		a.activePullCancel = pullCancel
+		a.activePullGen++
+		myGen := a.activePullGen
+		a.pullCancelMu.Unlock()
+
+		defer func() {
+			a.pullCancelMu.Lock()
+			if a.activePullGen == myGen {
+				a.activePullCancel = nil
+			}
+			a.pullCancelMu.Unlock()
+		}()
+
 		defer func() {
 			if r := recover(); r != nil {
 				wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
@@ -5647,6 +5690,14 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 		globalImgIdx := 0
 
 		for _, groupID := range groupIDs {
+			if pullCtx.Err() != nil {
+				wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+					"success": false,
+					"reason":  "cancelled",
+				})
+				return
+			}
+
 			group, ok := groupMap[groupID]
 			if !ok {
 				continue
@@ -5660,8 +5711,15 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 
 			groupFailed := false
 			for _, image := range group.Images {
+				if pullCtx.Err() != nil {
+					wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+						"success": false,
+						"reason":  "cancelled",
+					})
+					return
+				}
+
 				imgIdx := globalImgIdx
-				ctx, cancel := context.WithCancel(a.ctx)
 
 				imageAuth := ""
 				if group.Edition == "pro" || slices.Contains(group.RegistryAuthImages, image) {
@@ -5674,7 +5732,18 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 						Timestamp: time.Now().Format("15:04:05"),
 					})
 					groupFailed = true
-				} else if err := a.pullImageWithProgress(ctx, image, groupID, group.Name, imgIdx, totalImagesAll, imageAuth); err != nil {
+				} else if err := a.pullImageWithProgress(pullCtx, image, groupID, group.Name, imgIdx, totalImagesAll, imageAuth); err != nil {
+					if pullCtx.Err() != nil || errors.Is(err, context.Canceled) {
+						groupFailed = false
+						// Cancellation: stop immediately and let the caller decide how to
+						// interpret the pull lifecycle.
+						wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+							"success": false,
+							"reason":  "cancelled",
+						})
+						return
+					}
+
 					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
 						Service:   groupID,
 						Message:   fmt.Sprintf("Failed to pull %s: %v", image, err),
@@ -5689,7 +5758,6 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 					})
 				}
 
-				cancel()
 				globalImgIdx++
 			}
 
