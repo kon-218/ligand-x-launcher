@@ -134,10 +134,18 @@
         <div id="runError" class="inline-error"></div>
         <div class="actions actions-stack" style="margin-top:18px">
           <button id="openApp" class="btn btn-primary btn-lg btn-block" disabled>Open Ligand-X</button>
+          <label class="note" style="text-align:left"><input id="assistantExecution" type="checkbox"> Allow this assistant to execute approved calculations for this 8-hour session</label>
+          <button id="connectAssistant" class="btn btn-secondary btn-block" disabled>Connect an AI assistant</button>
+          <p class="note" style="text-align:left">Use a dedicated Claude Code, Codex, or Cursor session for Ligand-X only. Mixing this connector with other MCP servers that can read private files or browse the web while scientific content and optional egress are enabled creates a high-risk combination.</p>
+          <div id="assistantLegacyBanner" class="note" hidden>A previous file-based assistant session is on this machine. Connect once to migrate it into protected OS storage; Ligand-X itself keeps working until then.</div>
+          <div id="assistantStorageStatus" class="note" hidden></div>
+          <div id="assistantSessionList" class="assistant-session-list" hidden></div>
+          <button id="revokeAssistant" class="link-btn" disabled>Revoke all AI assistant access</button>
           <button id="startBtn" class="btn btn-primary btn-lg btn-block" hidden>Start services</button>
           <button id="restartBtn" class="btn btn-secondary btn-block" hidden>Restart</button>
           <button id="stopBtn" class="btn btn-danger btn-block" hidden>Stop</button>
         </div>
+        <p id="assistantSetupStatus" class="note" hidden></p>
         <p id="runTip" class="note">After Open Ligand-X, log in with the account you created.</p>
         <div class="run-links">
           <button id="changeServices" class="link-btn">Change services</button>

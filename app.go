@@ -207,6 +207,16 @@ type UserSettings struct {
 	BoltzMSAApiKey       string `json:"boltzMsaApiKey"`
 }
 
+// AgentSetup is intentionally short-lived. It contains paste-ready MCP setup text
+// and a workspace-token expiry timestamp, never the user's password.
+type AgentSetup struct {
+	Instructions   string `json:"instructions"`
+	ExpiresAt      string `json:"expiresAt"`
+	SessionID      string `json:"sessionId"`
+	CredentialID   string `json:"credentialId"`
+	MigratedLegacy bool   `json:"migratedLegacy"`
+}
+
 type licenseBundle struct {
 	Schema    string                 `json:"schema"`
 	Algorithm string                 `json:"algorithm"`
@@ -394,12 +404,24 @@ type App struct {
 	// configured Linux ORCA install is executable by the QC worker runtime.
 	// Nil in production; tests inject it to inspect arguments without Docker.
 	orcaProbeFn func(context.Context, []string) ([]byte, error)
+
+	// secretStore holds assistant MCP credentials. Tests inject a memory
+	// store; production uses OS Keychain / Credential Manager / Secret Service.
+	secretStore SecretStore
 }
 
 func NewApp() *App {
 	return &App{
-		logStreams: make(map[string]context.CancelFunc),
+		logStreams:  make(map[string]context.CancelFunc),
+		secretStore: defaultSecretStore(),
 	}
+}
+
+func (a *App) sessionStore() SecretStore {
+	if a.secretStore != nil {
+		return a.secretStore
+	}
+	return defaultSecretStore()
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -1061,37 +1083,8 @@ func (a *App) GetDistributionStatus() DistributionStatus {
 	return status
 }
 
-// InstallRuntimeBundle installs the release the signed index currently marks
-// recommended for this install's channel -- the same source ListRuntimeReleases,
-// CheckForRuntimeUpdate and the version picker already use, so the plain
-// one-click "Download runtime" path can't disagree with them about what's
-// safe to install. It used to resolve independently via the newest GitHub
-// release carrying the bundle asset, which does not know about the index's
-// recommended/revoked/compatible flags -- see recommendedReleaseVersion.
 func (a *App) InstallRuntimeBundle() (DistributionStatus, error) {
-	if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
-		return a.installRuntimeBundleSelected(override, "", false)
-	}
-	version, err := a.recommendedReleaseVersion()
-	if err != nil {
-		return a.GetDistributionStatus(), err
-	}
-	return a.InstallRuntimeBundleVersion(version)
-}
-
-// recommendedReleaseVersion returns the version the signed release index (or
-// its unreachable-index fallback -- see ListRuntimeReleases) marks
-// recommended for the current channel.
-func (a *App) recommendedReleaseVersion() (string, error) {
-	releases, err := a.ListRuntimeReleases()
-	if err != nil {
-		return "", err
-	}
-	release, ok := recommendedRelease(releases)
-	if !ok {
-		return "", fmt.Errorf("signed release index has no recommended compatible release")
-	}
-	return release.Version, nil
+	return a.installRuntimeBundleSelected("", "", false)
 }
 
 // InstallRuntimeBundleVersion installs a release chosen from the signed stable
@@ -1251,10 +1244,18 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 
 	bundleURL := strings.TrimSpace(selectedURL)
 	releaseTag := strings.TrimSpace(selectedVersion)
-	if bundleURL == "" {
-		return a.GetDistributionStatus(), fmt.Errorf("no runtime bundle URL resolved")
+	if bundleURL != "" {
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
+	} else if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
+		bundleURL = override
+	} else if resolved, tag, resolveErr := resolveRuntimeBundleURLForChannel(a.includePrereleases()); resolveErr == nil {
+		bundleURL = resolved
+		releaseTag = tag
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Resolved latest runtime bundle: %s", bundleURL), Timestamp: time.Now().Format("15:04:05")})
+	} else {
+		bundleURL = defaultRuntimeBundleURL
+		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Could not resolve latest release (%v); falling back to %s", resolveErr, bundleURL), Timestamp: time.Now().Format("15:04:05")})
 	}
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 
 	manifestURL, err := companionRuntimeAssetURL(bundleURL, runtimeBundleManifestAssetName)
 	if err != nil {
@@ -3076,6 +3077,323 @@ func (a *App) OpenAPI() {
 	a.OpenBrowser(fmt.Sprintf("http://localhost:%d/docs", a.envPort("GATEWAY_PORT", 8000)))
 }
 
+// CreateAgentSetup authenticates locally using the launcher's protected runtime
+// configuration, then returns a paste-ready workspace handoff. The password is
+// used only for this loopback request and is never included in the result.
+func (a *App) CreateAgentSetup() (AgentSetup, error) {
+	return a.createAgentSetup(false)
+}
+
+// CreateAgentSetupWithExecution makes the execution authority an explicit
+// per-session choice in the launcher UI. The default Connect path remains
+// planning/read-only.
+func (a *App) CreateAgentSetupWithExecution(allowExecution bool) (AgentSetup, error) {
+	return a.createAgentSetup(allowExecution)
+}
+
+func (a *App) withLocalBrowserSession(fn func(client *http.Client, port int, apiKey string) error) error {
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return err
+	}
+	env := parseEnvFile(content)
+	username := strings.TrimSpace(env["LIGANDX_USERNAME"])
+	password := env["LIGANDX_PASSWORD"]
+	if username == "" || password == "" || password == "CHANGE_ME" {
+		return fmt.Errorf("finish setting a local Ligand-X account before managing assistant access")
+	}
+	port := a.envPort("GATEWAY_PORT", 8000)
+	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/api/auth/login", port), "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("Ligand-X must be running before managing assistant access: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("could not authenticate to manage assistant access (gateway returned HTTP %d)", resp.StatusCode)
+	}
+	var login struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&login); err != nil || login.Token == "" {
+		return fmt.Errorf("gateway returned an invalid assistant access response")
+	}
+	defer func() {
+		logoutReq, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/auth/logout", port), nil)
+		logoutReq.Header.Set("X-API-Key", login.Token)
+		if logoutResp, _ := client.Do(logoutReq); logoutResp != nil {
+			logoutResp.Body.Close()
+		}
+	}()
+	return fn(client, port, login.Token)
+}
+
+func (a *App) createAgentSetup(allowExecution bool) (AgentSetup, error) {
+	store := a.sessionStore()
+	if err := store.Available(); err != nil {
+		return AgentSetup{}, fmt.Errorf("%s. Ligand-X itself still works; unlock %s and reconnect the assistant", err.Error(), store.Name())
+	}
+	sessionID, err := generateAgentSessionID()
+	if err != nil {
+		return AgentSetup{}, err
+	}
+	privateHex, publicHex, err := generateAgentSigningKey()
+	if err != nil {
+		return AgentSetup{}, err
+	}
+	legacyFiles := listLegacyAgentTokenFiles(a.projectPath)
+	scopes := []string{"projects:read", "projects:create", "inputs:prepare", "jobs:read", "jobs:plan"}
+	if allowExecution {
+		scopes = append(scopes, "jobs:submit")
+	}
+	var credential struct {
+		Token        string `json:"token"`
+		ExpiresAt    string `json:"expires_at"`
+		CredentialID string `json:"credential_id"`
+	}
+	err = a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
+		if len(legacyFiles) > 0 {
+			revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials", port), nil)
+			revokeReq.Header.Set("X-API-Key", apiKey)
+			revokeResp, revokeErr := client.Do(revokeReq)
+			if revokeErr != nil {
+				return fmt.Errorf("could not revoke the previous file-based assistant session: %w", revokeErr)
+			}
+			revokeResp.Body.Close()
+			if revokeResp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("could not revoke the previous file-based assistant session (HTTP %d)", revokeResp.StatusCode)
+			}
+		}
+		credentialRequest, _ := json.Marshal(map[string]interface{}{
+			"expires_in_minutes": 480,
+			"scopes":             scopes,
+			"session_id":         sessionID,
+			"public_key":         publicHex,
+		})
+		credentialReq, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials", port), bytes.NewReader(credentialRequest))
+		credentialReq.Header.Set("Content-Type", "application/json")
+		credentialReq.Header.Set("X-API-Key", apiKey)
+		credentialResp, credErr := client.Do(credentialReq)
+		if credErr != nil {
+			return fmt.Errorf("could not create dedicated assistant access: %w", credErr)
+		}
+		defer credentialResp.Body.Close()
+		if credentialResp.StatusCode != http.StatusCreated {
+			return fmt.Errorf("could not create dedicated assistant access (gateway returned HTTP %d)", credentialResp.StatusCode)
+		}
+		if err := json.NewDecoder(io.LimitReader(credentialResp.Body, 64*1024)).Decode(&credential); err != nil || credential.Token == "" || credential.CredentialID == "" {
+			return fmt.Errorf("gateway returned an invalid assistant credential")
+		}
+		return nil
+	})
+	if err != nil {
+		return AgentSetup{}, err
+	}
+	meta := agentSessionMeta{
+		SessionID:        sessionID,
+		CredentialID:     credential.CredentialID,
+		ExpiresAt:        credential.ExpiresAt,
+		ExecutionEnabled: allowExecution,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+	}
+	secret := agentSessionSecret{
+		Token:        credential.Token,
+		SigningKey:   privateHex,
+		CredentialID: credential.CredentialID,
+		Scopes:       scopes,
+	}
+	if err := storeAgentSession(store, a.projectPath, meta, secret); err != nil {
+		_ = a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
+			revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials/%s", port, credential.CredentialID), nil)
+			revokeReq.Header.Set("X-API-Key", apiKey)
+			if revokeResp, revokeErr := client.Do(revokeReq); revokeResp != nil {
+				revokeResp.Body.Close()
+			} else if revokeErr != nil {
+				return revokeErr
+			}
+			return nil
+		})
+		return AgentSetup{}, err
+	}
+	if len(legacyFiles) > 0 {
+		deleteLegacyAgentTokenFiles(a.projectPath)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return AgentSetup{}, fmt.Errorf("resolve launcher connector executable: %w", err)
+	}
+	mcpConfig, err := mcpConfigJSON(executable, a.projectPath, sessionID)
+	if err != nil {
+		return AgentSetup{}, err
+	}
+	config, _ := a.GetLauncherConfig()
+	instructions := buildAgentSetupInstructions(string(mcpConfig), credential.ExpiresAt, config.SelectedGroups, allowExecution)
+	return AgentSetup{
+		Instructions:   instructions,
+		ExpiresAt:      credential.ExpiresAt,
+		SessionID:      sessionID,
+		CredentialID:   credential.CredentialID,
+		MigratedLegacy: len(legacyFiles) > 0,
+	}, nil
+}
+
+func (a *App) GetAgentStorageStatus() AgentStorageStatus {
+	return storageStatus(a.sessionStore())
+}
+
+func (a *App) ListAgentSessions() (AgentSessionList, error) {
+	store := a.sessionStore()
+	status := storageStatus(store)
+	sessions, err := loadAgentSessionMetadata(a.projectPath)
+	if err != nil {
+		return AgentSessionList{Storage: status, LegacyFiles: len(listLegacyAgentTokenFiles(a.projectPath))}, err
+	}
+	infos := make([]AgentSessionInfo, 0, len(sessions))
+	for _, meta := range sessions {
+		info := AgentSessionInfo{
+			SessionID:        meta.SessionID,
+			CredentialID:     meta.CredentialID,
+			ExpiresAt:        meta.ExpiresAt,
+			ExecutionEnabled: meta.ExecutionEnabled,
+			CreatedAt:        meta.CreatedAt,
+		}
+		if status.Available {
+			if _, err := loadAgentSessionSecret(store, meta.SessionID); err == nil {
+				info.SecretPresent = true
+			}
+		}
+		infos = append(infos, info)
+	}
+	return AgentSessionList{
+		Sessions:    infos,
+		LegacyFiles: len(listLegacyAgentTokenFiles(a.projectPath)),
+		Storage:     status,
+	}, nil
+}
+
+func (a *App) CopyAgentSessionConfig(sessionID string) (string, error) {
+	if _, err := hex.DecodeString(sessionID); err != nil || len(sessionID) != 32 {
+		return "", fmt.Errorf("assistant session identifier is invalid")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve launcher connector executable: %w", err)
+	}
+	raw, err := mcpConfigJSON(executable, a.projectPath, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(string(raw), "LIGANDX_AGENT_TOKEN") || strings.Contains(string(raw), "signing_key") {
+		return "", fmt.Errorf("refusing to copy a configuration that would expose assistant secrets")
+	}
+	return string(raw), nil
+}
+
+func (a *App) CheckAgentSessionHealth(sessionID string) (AgentSessionHealth, error) {
+	store := a.sessionStore()
+	health := AgentSessionHealth{SessionID: sessionID, Status: "unhealthy"}
+	if err := store.Available(); err != nil {
+		health.Status = "storage_unavailable"
+		health.Detail = fmt.Sprintf("%s. Ligand-X itself still works; unlock %s to use this assistant session.", err.Error(), store.Name())
+		return health, nil
+	}
+	secret, err := loadAgentSessionSecret(store, sessionID)
+	if err != nil {
+		health.Status = "missing_secret"
+		health.Detail = "This session is missing from protected storage. Reconnect the assistant from Ligand-X Launcher."
+		return health, nil
+	}
+	headers, err := agentProofHeaders(secret, http.MethodGet, "/api/agent/v1/capabilities", nil)
+	if err != nil {
+		health.Detail = err.Error()
+		return health, nil
+	}
+	port := a.envPort("GATEWAY_PORT", 8000)
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/capabilities", port), nil)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		health.Status = "unreachable"
+		health.Detail = "Ligand-X must be running before an assistant session can be checked."
+		return health, nil
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		health.Status = "healthy"
+		health.Detail = "This assistant session can reach Ligand-X with a signed proof."
+	case http.StatusUnauthorized, http.StatusForbidden:
+		health.Status = "revoked_or_expired"
+		health.Detail = "The server rejected this session. Reconnect the assistant from Ligand-X Launcher."
+	default:
+		health.Detail = fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode)
+	}
+	return health, nil
+}
+
+func (a *App) RevokeAgentSession(sessionID string) error {
+	store := a.sessionStore()
+	sessions, _ := loadAgentSessionMetadata(a.projectPath)
+	var credentialID string
+	for _, meta := range sessions {
+		if meta.SessionID == sessionID {
+			credentialID = meta.CredentialID
+			break
+		}
+	}
+	if credentialID != "" {
+		err := a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
+			revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials/%s", port, credentialID), nil)
+			revokeReq.Header.Set("X-API-Key", apiKey)
+			revokeResp, revokeErr := client.Do(revokeReq)
+			if revokeErr != nil {
+				return fmt.Errorf("could not revoke assistant session: %w", revokeErr)
+			}
+			revokeResp.Body.Close()
+			if revokeResp.StatusCode != http.StatusNoContent && revokeResp.StatusCode != http.StatusNotFound {
+				return fmt.Errorf("gateway could not revoke assistant session (HTTP %d)", revokeResp.StatusCode)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return deleteStoredAgentSession(store, a.projectPath, sessionID)
+}
+
+// RevokeAgentAccess invalidates all dedicated assistant workspace tokens for
+// this local user without changing browser credentials or account passwords.
+func (a *App) RevokeAgentAccess() error {
+	store := a.sessionStore()
+	err := a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
+		revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials", port), nil)
+		revokeReq.Header.Set("X-API-Key", apiKey)
+		revokeResp, revokeErr := client.Do(revokeReq)
+		if revokeErr != nil {
+			return fmt.Errorf("could not revoke assistant access: %w", revokeErr)
+		}
+		revokeResp.Body.Close()
+		if revokeResp.StatusCode != http.StatusNoContent {
+			return fmt.Errorf("gateway could not revoke assistant access (HTTP %d)", revokeResp.StatusCode)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sessions, _ := loadAgentSessionMetadata(a.projectPath)
+	for _, meta := range sessions {
+		_ = deleteStoredAgentSession(store, a.projectPath, meta.SessionID)
+	}
+	deleteLegacyAgentTokenFiles(a.projectPath)
+	return nil
+}
+
 func (a *App) OpenFlower() {
 	a.OpenBrowser(fmt.Sprintf("http://localhost:%d/flower", a.envPort("FLOWER_PORT", 5555)))
 }
@@ -3672,22 +3990,10 @@ func (a *App) OrcaHostPathReady() bool {
 }
 
 // SetOrcaHostPath validates path and writes ORCA_HOST_PATH without touching
-// the rest of user settings. Also widens the folder's own permissions so the
-// QC container's fixed unprivileged runtime user can read it -- a typical
-// tarball extract is 0700, and the operator should never have to fix that by
-// hand (see relaxOrcaPermissions). Best-effort: a failure here is not
-// surfaced, since checkOrcaForServices' real probe is the actual gate before
-// any QC job runs.
+// the rest of user settings.
 func (a *App) SetOrcaHostPath(path string) error {
 	if err := validateOrcaHostPath(path); err != nil {
 		return err
-	}
-	if err := relaxOrcaPermissions(strings.TrimSpace(path)); err != nil && a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-			Service:   "launcher",
-			Message:   fmt.Sprintf("Could not widen ORCA folder permissions automatically: %v", err),
-			Timestamp: time.Now().Format("15:04:05"),
-		})
 	}
 	return a.setProductionEnvValue("ORCA_HOST_PATH", strings.TrimSpace(path))
 }
@@ -3941,9 +4247,6 @@ func (a *App) pullImageWithProgress(ctx context.Context, image, groupID, groupNa
 	var lastEmitTime time.Time
 
 	// Use Docker API directly for structured JSON stream
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
 	reader, err := a.dockerClient.ImagePull(ctx, image, client.ImagePullOptions{RegistryAuth: registryAuth})
 	if err != nil {
 		return fmt.Errorf("failed to pull %s: %v", image, err)
@@ -3952,10 +4255,6 @@ func (a *App) pullImageWithProgress(ctx context.Context, image, groupID, groupNa
 
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
 		var msg struct {
 			Status         string `json:"status"`
 			Error          string `json:"error"`
@@ -4033,16 +4332,7 @@ func (a *App) pullImageWithProgress(ctx context.Context, image, groupID, groupNa
 	}
 
 	if err := scanner.Err(); err != nil {
-		// If cancellation triggered, surface the cancellation error so the caller
-		// can exit early without treating it as a real download failure.
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		return fmt.Errorf("error reading pull stream: %v", err)
-	}
-
-	if ctx.Err() != nil {
-		return ctx.Err()
 	}
 
 	return nil
@@ -5060,10 +5350,7 @@ func servicesNeedOrca(services []string) bool {
 
 // checkOrcaForServices applies both ORCA preflights before any QC start or
 // restart: cheap host-folder shape first, then an actual isolated execution in
-// the exact pinned worker-qc image. Also re-applies relaxOrcaPermissions here
-// (not just in SetOrcaHostPath) so a path that reached .env.production some
-// other way -- a hand-edit, a migrated install, restored settings -- still
-// gets fixed automatically before the operator ever sees a permission error.
+// the exact pinned worker-qc image.
 func (a *App) checkOrcaForServices(services []string) error {
 	if !servicesNeedOrca(services) {
 		return nil
@@ -5075,13 +5362,6 @@ func (a *App) checkOrcaForServices(services []string) error {
 				"Choose the extracted Linux x86-64 ORCA folder that contains a file named 'orca' before starting: %v",
 			err,
 		)
-	}
-	if err := relaxOrcaPermissions(path); err != nil && a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
-			Service:   "launcher",
-			Message:   fmt.Sprintf("Could not widen ORCA folder permissions automatically: %v", err),
-			Timestamp: time.Now().Format("15:04:05"),
-		})
 	}
 	return a.probeOrcaRuntime(path)
 }
