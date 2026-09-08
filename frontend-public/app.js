@@ -142,20 +142,9 @@ async function preflight(onReady) {
   }
 
   if (dist && dist.needsInstall) {
-    let msg = dist.message || "Ligand-X needs to download its runtime files (~small) before the first launch.";
-    try {
-      const options = await App().ListRuntimeReleaseOptions();
-      const recommended = (options.releases || []).find((r) => r.recommended);
-      if (recommended) {
-        msg += ` This will install ${recommended.version}${recommended.summary ? " (" + recommended.summary + ")" : ""}.`;
-      }
-    } catch (e) {
-      // Best-effort: the plain download button still works without this detail.
-      console.warn("could not resolve recommended version for display", e);
-    }
     gate({
       icon: "📦", title: "Set up runtime files",
-      msg,
+      msg: dist.message || "Ligand-X needs to download its runtime files (~small) before the first launch.",
       action: { label: "Download runtime", fn: () => installRuntime(onReady) },
       secondary: { label: "Choose version", fn: () => openReleaseSelector(onReady, false) },
     });
@@ -531,9 +520,7 @@ function startPull(groupIds) {
   state.pulling = true;
   state._pullGroups = groupIds;
   el("pullError").textContent = "";
-  el("pullActions").hidden = false;
-  el("pullBack").textContent = "Stop";
-  el("pullRetry").hidden = true;
+  el("pullActions").hidden = true;
   el("pullLog").textContent = "";
   el("pullFill").style.width = "0%";
   el("pullGroup").textContent = "Preparing…";
@@ -544,36 +531,6 @@ function startPull(groupIds) {
   } catch (e) {
     pullFailed(String(e));
   }
-}
-
-async function stopPullAndReturnToServices() {
-  if (!state.pulling) {
-    await enterServices(true);
-    return;
-  }
-
-  // Stop UI updates immediately to avoid late events overwriting the services screen.
-  state.pulling = false;
-
-  try {
-    await App().StopPullServiceGroups();
-  } catch (e) { /* best-effort cancellation */ }
-
-  state._pullGroups = null;
-
-  // Reset pull screen visuals (screen will switch away anyway, but helps avoid flicker).
-  el("pullError").textContent = "";
-  el("pullFill").style.width = "0%";
-  el("pullGroup").textContent = "Preparing…";
-  el("pullCounter").textContent = "";
-  el("pullCaption").textContent = "";
-
-  // Keep the user's current in-progress selection when we re-enter the services screen.
-  // `enterServices(true)` rebuilds selection from `state.config.selectedGroups`.
-  if (!state.config) state.config = {};
-  state.config.selectedGroups = selectedGroupIds();
-
-  await enterServices(true);
 }
 
 function onPullProgress(p) {
@@ -601,10 +558,6 @@ async function onPullComplete(res) {
 
   // Failure paths.
   const reason = res && res.reason;
-  if (reason === "cancelled") {
-    // Cancellation is handled by the UI stop/back handler.
-    return;
-  }
   if (reason === "gpu_not_found") {
     // Drop GPU-requiring groups and bounce back to selection.
     pullFailed("Some selected modules need an NVIDIA GPU that wasn't found. Remove them or continue with the rest.");
@@ -626,8 +579,6 @@ function pullFailed(msg) {
   state.pulling = false;
   el("pullError").textContent = msg;
   el("pullActions").hidden = false;
-  el("pullBack").textContent = "Back";
-  el("pullRetry").hidden = false;
 }
 
 async function persistSelection() {
@@ -640,6 +591,82 @@ async function persistSelection() {
     await App().SaveLauncherConfig(cfg);
     state.config = cfg;
   } catch (e) { /* non-fatal: start can still proceed */ }
+}
+
+function assistantSessionButton(label, onclick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "link-btn";
+  button.textContent = label;
+  button.onclick = onclick;
+  return button;
+}
+
+async function refreshAssistantSessions() {
+  const list = el("assistantSessionList");
+  const legacy = el("assistantLegacyBanner");
+  const storage = el("assistantStorageStatus");
+  const status = el("assistantSetupStatus");
+  if (!list) return;
+  try {
+    const payload = await App().ListAgentSessions();
+    const available = payload.storage && payload.storage.available;
+    storage.hidden = available;
+    storage.textContent = available ? "" : ((payload.storage && payload.storage.message) || "Protected OS storage is unavailable.");
+    legacy.hidden = !(payload.legacyFiles > 0);
+    list.textContent = "";
+    const sessions = payload.sessions || [];
+    list.hidden = sessions.length === 0;
+    sessions.forEach((session) => {
+      const row = document.createElement("div");
+      row.className = "assistant-session";
+      const meta = document.createElement("div");
+      meta.className = "assistant-session-meta";
+      meta.textContent = `${session.sessionId} · ${session.executionEnabled ? "execution" : "planning"} · expires ${session.expiresAt || "unknown"}`;
+      const actions = document.createElement("div");
+      actions.className = "assistant-session-actions";
+      actions.append(
+        assistantSessionButton("Health check", async () => {
+          try {
+            const health = await App().CheckAgentSessionHealth(session.sessionId);
+            status.textContent = health.detail || health.status;
+            status.hidden = false;
+          } catch (e) {
+            status.textContent = String(e).replace(/^Error:\s*/, "");
+            status.hidden = false;
+          }
+        }),
+        assistantSessionButton("Copy config", async () => {
+          try {
+            const config = await App().CopyAgentSessionConfig(session.sessionId);
+            await navigator.clipboard.writeText(config);
+            status.textContent = "MCP config copied. It contains no secrets; the launcher injects credentials into the connector process.";
+            status.hidden = false;
+          } catch (e) {
+            status.textContent = String(e).replace(/^Error:\s*/, "");
+            status.hidden = false;
+          }
+        }),
+        assistantSessionButton("Revoke", async () => {
+          if (!window.confirm("Revoke this assistant session? The assistant must reconnect.")) return;
+          try {
+            await App().RevokeAgentSession(session.sessionId);
+            status.textContent = "Assistant session revoked.";
+            status.hidden = false;
+            await refreshAssistantSessions();
+          } catch (e) {
+            status.textContent = String(e).replace(/^Error:\s*/, "");
+            status.hidden = false;
+          }
+        }),
+      );
+      row.append(meta, actions);
+      list.appendChild(row);
+    });
+  } catch (e) {
+    storage.hidden = false;
+    storage.textContent = String(e).replace(/^Error:\s*/, "");
+  }
 }
 
 // ---------- running ----------
@@ -655,6 +682,8 @@ async function enterRunning(sub) {
     el("restartBtn").hidden = true;
     el("stopBtn").hidden = true;
     el("openApp").disabled = true;
+    el("connectAssistant").disabled = true;
+    el("revokeAssistant").disabled = true;
     el("runTip").hidden = false;
     renderStatusList([]);
     // Reflect any already-running stack.
@@ -745,6 +774,10 @@ async function refreshStatus() {
   const total = (status && status.totalServices) || services.length;
 
   el("openApp").disabled = running === 0;
+  el("connectAssistant").disabled = running === 0;
+  el("revokeAssistant").disabled = running === 0;
+  if (running > 0) refreshAssistantSessions();
+  if (running > 0) refreshAssistantSessions();
 
   if (running > 0 && running >= total && total > 0) {
     setRunHeader("●", "up", "Ligand-X is running", `${running} of ${total} services up.`);
@@ -1169,10 +1202,48 @@ function wireEvents() {
   el("svcBack").onclick = () => enterLicense();
   el("svcNext").onclick = confirmServices;
 
-  el("pullBack").onclick = () => stopPullAndReturnToServices();
+  el("pullBack").onclick = () => enterServices(true);
   el("pullRetry").onclick = () => startPull(state._pullGroups || selectedGroupIds());
 
   el("openApp").onclick = () => { try { App().OpenFrontend(); } catch (e) {} };
+  el("connectAssistant").onclick = async () => {
+    const button = el("connectAssistant");
+    const status = el("assistantSetupStatus");
+    status.hidden = true;
+    button.disabled = true;
+    try {
+      const setup = await App().CreateAgentSetupWithExecution(el("assistantExecution").checked);
+      await navigator.clipboard.writeText(setup.instructions);
+      status.textContent = setup.migratedLegacy
+        ? "Previous file-based access was revoked and replaced. Paste the new setup into a dedicated Claude Code, Codex, or Cursor session now (Ligand-X MCP only)."
+        : (el("assistantExecution").checked
+          ? "Execution-enabled setup copied. Paste it into a dedicated Claude Code, Codex, or Cursor session now; do not mix with other MCP servers. Access expires automatically."
+          : "Planning-only setup copied. Paste it into a dedicated Claude Code, Codex, or Cursor session now; do not mix with other MCP servers. Access expires automatically.");
+      status.hidden = false;
+      await refreshAssistantSessions();
+    } catch (e) {
+      status.textContent = String(e).replace(/^Error:\s*/, "");
+      status.hidden = false;
+      await refreshAssistantSessions();
+    } finally {
+      button.disabled = false;
+    }
+  };
+  el("revokeAssistant").onclick = async () => {
+    const button = el("revokeAssistant");
+    const status = el("assistantSetupStatus");
+    if (!window.confirm("Revoke all AI assistant access for this Ligand-X user? Existing assistant connections will stop working.")) return;
+    button.disabled = true;
+    try {
+      await App().RevokeAgentAccess();
+      status.textContent = "AI assistant access revoked.";
+      status.hidden = false;
+      await refreshAssistantSessions();
+    } catch (e) {
+      status.textContent = String(e).replace(/^Error:\s*/, "");
+      status.hidden = false;
+    } finally { button.disabled = false; }
+  };
   el("startBtn").onclick = startFromRunning;
   el("restartBtn").onclick = restartServices;
   el("stopBtn").onclick = stopServices;

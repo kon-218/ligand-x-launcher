@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -13,6 +16,13 @@ import (
 // (`-tags public`, embeds frontend-public/).
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "agent-mcp" {
+		if err := runAgentMCPConnector(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "Ligand-X MCP connector:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	app := NewApp()
 
 	err := wails.Run(&options.App{
