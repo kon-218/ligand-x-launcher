@@ -306,6 +306,9 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
+    - GATEWAY_URL=http://gateway:8000
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
     depends_on:
       rabbitmq:
         condition: service_healthy
