@@ -588,6 +588,7 @@ services:
     - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     volumes:
     - abfe_outputs:/app/data/abfe_outputs
+    - scientific_artifacts:/app/data/scientific_artifacts
     expose:
     - '8010'
     environment:
@@ -648,6 +649,7 @@ services:
     - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     volumes:
     - rbfe_outputs:/app/data/rbfe_outputs
+    - scientific_artifacts:/app/data/scientific_artifacts
     expose:
     - '8011'
     environment:
