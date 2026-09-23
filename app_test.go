@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -12,6 +11,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"ligandx-launcher/internal/envfile"
+	"ligandx-launcher/internal/runtimebundle"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,21 +23,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestRuntimeBundleReleaseURLsUseLauncherRepo(t *testing.T) {
-	checks := map[string]string{
-		"defaultRuntimeBundleURL": defaultRuntimeBundleURL,
-		"latestReleaseAPIURL":     latestReleaseAPIURL,
-	}
-	for name, value := range checks {
-		if !strings.Contains(value, "kon-218/ligand-x-launcher") {
-			t.Fatalf("%s should use ligand-x-launcher releases, got %q", name, value)
-		}
-		if strings.Contains(value, "kon-218/ligand-x/releases") {
-			t.Fatalf("%s still points at the core app release repo: %q", name, value)
-		}
-	}
-}
 
 func TestGetServiceGroups(t *testing.T) {
 	app := NewApp()
@@ -510,109 +496,6 @@ func TestFindProjectPathPrefersSourceCheckoutForDevBuild(t *testing.T) {
 	}
 	if got != sourceDir {
 		t.Fatalf("expected source checkout %q, got %q", sourceDir, got)
-	}
-}
-
-func TestRuntimeBundleExtractionAllowsOnlyRuntimeFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-	zipPath := filepath.Join(tmpDir, "runtime.zip")
-	buf := new(bytes.Buffer)
-	zw := zip.NewWriter(buf)
-	for name, content := range map[string]string{
-		"ligand-x-main/docker-compose.yml":        "services: {}\n",
-		"ligand-x-main/.env.production.template":  "POSTGRES_PASSWORD=CHANGE_ME\n",
-		"ligand-x-main/docker/nginx/ligandx.conf": "server { listen 80; }\n",
-		"ligand-x-main/config/rabbitmq.conf":      "loopback_users = none\n",
-		"ligand-x-main/config/flower_config.py":   "broker_api = ''\n",
-		"ligand-x-main/services/private.py":       "do not extract",
-	} {
-		w, err := zw.Create(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.Write([]byte(content)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(zipPath, buf.Bytes(), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	dest := filepath.Join(tmpDir, "runtime")
-	if err := extractRuntimeBundle(zipPath, dest); err != nil {
-		t.Fatalf("extractRuntimeBundle failed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dest, "docker-compose.yml")); err != nil {
-		t.Fatalf("expected compose file to be extracted: %v", err)
-	}
-	// Config files bind-mounted by docker-compose.yml must land on disk, or Docker
-	// auto-creates the missing source as a directory and the mount fails with
-	// "not a directory" (the proxy/rabbitmq/flower startup bug).
-	for _, rel := range []string{
-		filepath.Join("docker", "nginx", "ligandx.conf"),
-		filepath.Join("config", "rabbitmq.conf"),
-		filepath.Join("config", "flower_config.py"),
-	} {
-		if _, err := os.Stat(filepath.Join(dest, rel)); err != nil {
-			t.Fatalf("expected bind-mounted config %q to be extracted: %v", rel, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(dest, "services", "private.py")); !os.IsNotExist(err) {
-		t.Fatalf("unexpected private source extraction error state: %v", err)
-	}
-}
-
-func TestRuntimeBundleExtractionSelfHealsStaleDirectorySource(t *testing.T) {
-	tmpDir := t.TempDir()
-	zipPath := filepath.Join(tmpDir, "runtime.zip")
-	buf := new(bytes.Buffer)
-	zw := zip.NewWriter(buf)
-	w, err := zw.Create("ligand-x-main/docker/nginx/ligandx.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte("server { listen 80; }\n")); err != nil {
-		t.Fatal(err)
-	}
-	for name, content := range map[string]string{
-		"ligand-x-main/docker-compose.yml":       "services: {}\n",
-		"ligand-x-main/.env.production.template": "VERSION=v1.2.3\n",
-	} {
-		requiredWriter, createErr := zw.Create(name)
-		if createErr != nil {
-			t.Fatal(createErr)
-		}
-		if _, writeErr := requiredWriter.Write([]byte(content)); writeErr != nil {
-			t.Fatal(writeErr)
-		}
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(zipPath, buf.Bytes(), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	dest := filepath.Join(tmpDir, "runtime")
-	// Simulate a stale install: Docker auto-created the missing bind-mount source
-	// as a directory on a previous broken run.
-	staleConf := filepath.Join(dest, "docker", "nginx", "ligandx.conf")
-	if err := os.MkdirAll(staleConf, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := extractRuntimeBundle(zipPath, dest); err != nil {
-		t.Fatalf("extractRuntimeBundle failed on stale install: %v", err)
-	}
-	info, err := os.Stat(staleConf)
-	if err != nil {
-		t.Fatalf("expected config to be extracted over stale dir: %v", err)
-	}
-	if info.IsDir() {
-		t.Fatal("expected ligandx.conf to be a file after self-heal, still a directory")
 	}
 }
 
@@ -1417,7 +1300,7 @@ func TestWritePrivateFileReplacesExistingContentAndMode(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writePrivateFile(path, []byte("new")); err != nil {
+	if err := envfile.WritePrivate(path, []byte("new")); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -1440,21 +1323,21 @@ func signRuntimeManifestForTest(t *testing.T, bundle []byte, version string, exp
 	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
 	t.Cleanup(func() { runtimeBundlePublicKeyB64 = oldKey })
 	digest := sha256.Sum256(bundle)
-	manifest, err := json.Marshal(runtimeBundleManifest{
+	manifest, err := json.Marshal(runtimebundle.Manifest{
 		Schema:    "ligandx-runtime-manifest/1",
 		Version:   version,
-		Asset:     runtimeBundleAssetName,
+		Asset:     runtimebundle.AssetName,
 		SHA256:    fmt.Sprintf("%x", digest),
 		Size:      int64(len(bundle)),
 		IssuedAt:  time.Now().UTC().Format(time.RFC3339),
 		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
 		GitCommit: strings.Repeat("a", 40),
-		Artifacts: map[string]runtimeReleaseArtifact{
-			runtimeBundleAssetName: {SHA256: fmt.Sprintf("%x", digest), Size: int64(len(bundle))},
+		Artifacts: map[string]runtimebundle.Artifact{
+			runtimebundle.AssetName: {SHA256: fmt.Sprintf("%x", digest), Size: int64(len(bundle))},
 		},
-		PlatformSigning: runtimePlatformSigning{
-			Windows: runtimeWindowsSigning{Authenticode: false, Evidence: "workflow-verification"},
-			MacOS: runtimeMacOSSigning{
+		PlatformSigning: runtimebundle.PlatformSigning{
+			Windows: runtimebundle.WindowsSigning{Authenticode: false, Evidence: "workflow-verification"},
+			MacOS: runtimebundle.MacOSSigning{
 				DeveloperID: false,
 				Notarized:   false,
 				Evidence:    "workflow-verification",
@@ -1471,7 +1354,7 @@ func signRuntimeManifestForTest(t *testing.T, bundle []byte, version string, exp
 func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 	bundle := []byte("signed runtime bundle")
 	manifestBytes, signatureBytes := signRuntimeManifestForTest(t, bundle, "v1.2.3", time.Now().Add(time.Hour))
-	manifest, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v1.2.3")
+	manifest, err := runtimePolicy().VerifyManifest(manifestBytes, signatureBytes, "v1.2.3")
 	if err != nil {
 		t.Fatalf("valid manifest rejected: %v", err)
 	}
@@ -1480,7 +1363,7 @@ func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 		t.Fatalf("platform-signing evidence was not decoded: %+v", manifest.PlatformSigning)
 	}
 
-	if _, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v9.9.9"); err == nil {
+	if _, err := runtimePolicy().VerifyManifest(manifestBytes, signatureBytes, "v9.9.9"); err == nil {
 		t.Fatal("manifest for a different release tag was accepted")
 	}
 	trustedKey := runtimeBundlePublicKeyB64
@@ -1489,32 +1372,32 @@ func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(otherPublic)
-	if _, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v1.2.3"); err == nil {
+	if _, err := runtimePolicy().VerifyManifest(manifestBytes, signatureBytes, "v1.2.3"); err == nil {
 		t.Fatal("manifest signed by an untrusted signer was accepted")
 	}
 	runtimeBundlePublicKeyB64 = trustedKey
 	expiredManifest, expiredSignature := signRuntimeManifestForTest(
 		t, bundle, "v1.2.3", time.Now().Add(-time.Minute),
 	)
-	if _, err := verifyRuntimeBundleManifest(expiredManifest, expiredSignature, "v1.2.3"); err == nil {
+	if _, err := runtimePolicy().VerifyManifest(expiredManifest, expiredSignature, "v1.2.3"); err == nil {
 		t.Fatal("expired runtime manifest was accepted")
 	}
 
-	bundlePath := filepath.Join(t.TempDir(), runtimeBundleAssetName)
+	bundlePath := filepath.Join(t.TempDir(), runtimebundle.AssetName)
 	if err := os.WriteFile(bundlePath, bundle, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRuntimeBundleFile(bundlePath, manifest); err != nil {
+	if err := runtimebundle.VerifyFile(bundlePath, manifest); err != nil {
 		t.Fatalf("valid bundle rejected: %v", err)
 	}
 	tamperedManifest := bytes.Replace(manifestBytes, []byte("v1.2.3"), []byte("v9.9.9"), 1)
-	if _, err := verifyRuntimeBundleManifest(tamperedManifest, signatureBytes, ""); err == nil {
+	if _, err := runtimePolicy().VerifyManifest(tamperedManifest, signatureBytes, ""); err == nil {
 		t.Fatal("tampered signed manifest was accepted")
 	}
 	if err := os.WriteFile(bundlePath, append(bundle, byte(0)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRuntimeBundleFile(bundlePath, manifest); err == nil {
+	if err := runtimebundle.VerifyFile(bundlePath, manifest); err == nil {
 		t.Fatal("tampered bundle was accepted")
 	}
 }
@@ -1528,11 +1411,11 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
 	launcherVersion = "v2.0.0"
 	t.Cleanup(func() { runtimeBundlePublicKeyB64, launcherVersion = oldKey, oldVersion })
-	index := runtimeReleaseIndex{
+	index := runtimebundle.ReleaseIndex{
 		Schema:    "ligandx-release-index/1",
 		IssuedAt:  time.Now().UTC().Format(time.RFC3339),
 		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
-		Releases: []RuntimeRelease{
+		Releases: []runtimebundle.Release{
 			{Version: "v2.1.0", Status: "supported", Recommended: true, MinimumLauncher: "v2.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v2.1.0/ligand-x-runtime.zip", DownloadBytes: 1024},
 			{Version: "v1.9.0", Status: "supported", MinimumLauncher: "v3.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v1.9.0/ligand-x-runtime.zip", DownloadBytes: 1024},
 			{Version: "v1.8.0", Status: "revoked", MinimumLauncher: "v1.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v1.8.0/ligand-x-runtime.zip", DownloadBytes: 1024},
@@ -1543,7 +1426,7 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 	signature := []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload)))
-	verified, err := verifyRuntimeReleaseIndex(payload, signature)
+	verified, err := runtimePolicy().VerifyReleaseIndex(payload, signature)
 	if err != nil {
 		t.Fatalf("valid index rejected: %v", err)
 	}
@@ -1557,7 +1440,7 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 		t.Fatalf("revoked release remained selectable: %+v", verified.Releases[2])
 	}
 	payload[0] ^= 1
-	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil {
+	if _, err := runtimePolicy().VerifyReleaseIndex(payload, signature); err == nil {
 		t.Fatal("tampered release index was accepted")
 	}
 }
@@ -1575,7 +1458,7 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
 	t.Cleanup(func() { runtimeBundlePublicKeyB64 = oldKey })
 
-	sign := func(index runtimeReleaseIndex) ([]byte, []byte) {
+	sign := func(index runtimebundle.ReleaseIndex) ([]byte, []byte) {
 		t.Helper()
 		payload, err := json.Marshal(index)
 		if err != nil {
@@ -1583,10 +1466,10 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 		}
 		return payload, []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload)))
 	}
-	base := func(recommended ...bool) runtimeReleaseIndex {
-		releases := make([]RuntimeRelease, len(recommended))
+	base := func(recommended ...bool) runtimebundle.ReleaseIndex {
+		releases := make([]runtimebundle.Release, len(recommended))
 		for i, rec := range recommended {
-			releases[i] = RuntimeRelease{
+			releases[i] = runtimebundle.Release{
 				Version:         fmt.Sprintf("v2.1.%d", i),
 				Status:          "supported",
 				Recommended:     rec,
@@ -1595,7 +1478,7 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 				DownloadBytes:   1024,
 			}
 		}
-		return runtimeReleaseIndex{
+		return runtimebundle.ReleaseIndex{
 			Schema:    "ligandx-release-index/1",
 			IssuedAt:  time.Now().UTC().Format(time.RFC3339),
 			ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
@@ -1604,7 +1487,7 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	}
 
 	payload, signature := sign(base(false, false))
-	index, err := verifyRuntimeReleaseIndex(payload, signature)
+	index, err := runtimePolicy().VerifyReleaseIndex(payload, signature)
 	if err != nil {
 		t.Fatalf("zero recommended releases must still list, got %v", err)
 	}
@@ -1614,7 +1497,7 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	}
 
 	payload, signature = sign(base(true, true))
-	index, err = verifyRuntimeReleaseIndex(payload, signature)
+	index, err = runtimePolicy().VerifyReleaseIndex(payload, signature)
 	if err != nil {
 		t.Fatalf("two recommended releases must still list, got %v", err)
 	}
@@ -1628,137 +1511,12 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	}
 
 	payload, signature = sign(base(true, false))
-	index, err = verifyRuntimeReleaseIndex(payload, signature)
+	index, err = runtimePolicy().VerifyReleaseIndex(payload, signature)
 	if err != nil {
 		t.Fatalf("single recommended release was rejected: %v", err)
 	}
 	if index.Warning != "" {
 		t.Fatalf("well-formed index must not warn, got %q", index.Warning)
-	}
-}
-
-func TestRuntimeRollbackPolicyRejectsOlderVersion(t *testing.T) {
-	runtimeDir := t.TempDir()
-	if err := writePrivateFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"), []byte("v2.1.0\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := enforceRuntimeRollbackPolicy(runtimeDir, "v2.0.9"); err == nil {
-		t.Fatal("runtime downgrade was accepted")
-	}
-	if err := enforceRuntimeRollbackPolicy(runtimeDir, "v2.1.1"); err != nil {
-		t.Fatalf("runtime upgrade was rejected: %v", err)
-	}
-}
-
-func TestRuntimeStageActivationCanRestorePreviousFiles(t *testing.T) {
-	stage, destination, backup := t.TempDir(), t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(stage, "docker-compose.yml"), []byte("new compose"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stage, ".env.production.template"), []byte("VERSION=v2\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(destination, "docker-compose.yml"), []byte("old compose"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	rollback, err := activateRuntimeStage(stage, destination, backup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if data, _ := os.ReadFile(filepath.Join(destination, "docker-compose.yml")); string(data) != "new compose" {
-		t.Fatalf("stage was not activated: %q", data)
-	}
-	rollback()
-	if data, _ := os.ReadFile(filepath.Join(destination, "docker-compose.yml")); string(data) != "old compose" {
-		t.Fatalf("previous runtime was not restored: %q", data)
-	}
-	if _, err := os.Stat(filepath.Join(destination, ".env.production.template")); !os.IsNotExist(err) {
-		t.Fatal("new-only staged file survived rollback")
-	}
-}
-
-func TestRuntimeDownloadRejectsUnapprovedHost(t *testing.T) {
-	if _, err := approvedRuntimeDownloadURL("https://attacker.example/runtime.zip"); err == nil {
-		t.Fatal("unapproved runtime host was accepted")
-	}
-}
-
-func TestRuntimeBundleRejectsTooManyEntries(t *testing.T) {
-	zipPath := filepath.Join(t.TempDir(), "runtime.zip")
-	file, err := os.Create(zipPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer := zip.NewWriter(file)
-	for index := 0; index < runtimeBundleMaxFiles+1; index++ {
-		entry, createErr := writer.Create(fmt.Sprintf("ignored-%03d", index))
-		if createErr != nil {
-			t.Fatal(createErr)
-		}
-		if _, writeErr := entry.Write([]byte("x")); writeErr != nil {
-			t.Fatal(writeErr)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := extractRuntimeBundle(zipPath, t.TempDir()); err == nil {
-		t.Fatal("oversized entry-count archive was accepted")
-	}
-}
-
-func TestRuntimeBundleRejectsSymlinkEntry(t *testing.T) {
-	zipPath := filepath.Join(t.TempDir(), "runtime.zip")
-	file, err := os.Create(zipPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer := zip.NewWriter(file)
-	header := &zip.FileHeader{Name: "docker-compose.yml"}
-	header.SetMode(os.ModeSymlink | 0777)
-	entry, err := writer.CreateHeader(header)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := entry.Write([]byte("target")); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := extractRuntimeBundle(zipPath, t.TempDir()); err == nil {
-		t.Fatal("symbolic-link archive entry was accepted")
-	}
-}
-
-func TestRuntimeBundleTargetRejectsExistingSymlink(t *testing.T) {
-	if goruntime.GOOS == "windows" {
-		t.Skip("symlink creation requires platform-specific privileges on Windows")
-	}
-	base := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "outside")
-	if err := os.WriteFile(outside, []byte("unchanged"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(base, "docker-compose.yml")
-	if err := os.Symlink(outside, target); err != nil {
-		t.Fatal(err)
-	}
-	if err := rejectRuntimeSymlinkPath(base, target); err == nil {
-		t.Fatal("existing target symlink was accepted")
-	}
-	data, err := os.ReadFile(outside)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "unchanged" {
-		t.Fatal("symlink target was modified")
 	}
 }
 
@@ -1992,7 +1750,7 @@ func TestEnsureProductionEnvFitsShippedTemplateToSmallHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := parseEnvFile(string(written))
+	env := envfile.Parse(string(written))
 	for k, v := range env {
 		if !strings.HasSuffix(k, "_CPU_LIMIT") && !strings.HasSuffix(k, "_CPU_RES") {
 			continue
@@ -2073,13 +1831,13 @@ func TestSetEnvFileValuesRewritesTheDefinitionComposeReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]; got != "8" {
+	if got := envfile.Parse(string(data))["WORKER_CPU_CPU_LIMIT"]; got != "8" {
 		t.Errorf("effective WORKER_CPU_CPU_LIMIT = %q, want 8 — the write landed on a line compose ignores:\n%s", got, data)
 	}
 	if n := countEnvDefinitions(string(data), "WORKER_CPU_CPU_LIMIT"); n != 1 {
 		t.Errorf("expected exactly one live definition afterwards, got %d:\n%s", n, data)
 	}
-	if got := parseEnvFile(string(data))["APP_PORT"]; got != "8080" {
+	if got := envfile.Parse(string(data))["APP_PORT"]; got != "8080" {
 		t.Errorf("unrelated key was disturbed: APP_PORT = %q", got)
 	}
 }
@@ -2116,7 +1874,7 @@ func TestSetEnvFileValuesMatchesKeysWithSurroundingSpaces(t *testing.T) {
 			if n := countEnvDefinitions(string(data), "VERSION"); n != 1 {
 				t.Errorf("spaced key was not matched, duplicate appended (%d definitions):\n%s", n, data)
 			}
-			if got := parseEnvFile(string(data))["VERSION"]; got != "v2026.08.05" {
+			if got := envfile.Parse(string(data))["VERSION"]; got != "v2026.08.05" {
 				t.Errorf("effective VERSION = %q, want v2026.08.05", got)
 			}
 		})
@@ -2143,7 +1901,7 @@ func TestSetEnvFileValueSingleKeyHonoursLastWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseEnvFile(string(data))["VERSION"]; got != "v2026.08.05" {
+	if got := envfile.Parse(string(data))["VERSION"]; got != "v2026.08.05" {
 		t.Errorf("effective VERSION = %q, want v2026.08.05:\n%s", got, data)
 	}
 	if n := countEnvDefinitions(string(data), "VERSION"); n != 1 {
@@ -2163,7 +1921,7 @@ func TestDuplicateEnvKeysNamesEveryRedefinedKey(t *testing.T) {
 		"WORKER_CPU_CPU_LIMIT=16",
 		"#VERSION=commented-out-does-not-count",
 	}, "\n")
-	got := duplicateEnvKeys(content)
+	got := envfile.DuplicateKeys(content)
 	want := []string{"VERSION", "WORKER_CPU_CPU_LIMIT"}
 	if len(got) != len(want) {
 		t.Fatalf("duplicateEnvKeys = %v, want %v", got, want)
@@ -2173,7 +1931,7 @@ func TestDuplicateEnvKeysNamesEveryRedefinedKey(t *testing.T) {
 			t.Errorf("duplicateEnvKeys[%d] = %q, want %q", i, got[i], k)
 		}
 	}
-	if dups := duplicateEnvKeys("A=1\nB=2\n"); len(dups) != 0 {
+	if dups := envfile.DuplicateKeys("A=1\nB=2\n"); len(dups) != 0 {
 		t.Errorf("clean file reported duplicates: %v", dups)
 	}
 }
@@ -2245,7 +2003,7 @@ func TestEnsureProductionEnvClampsTheEffectiveDuplicateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]
+	got := envfile.Parse(string(data))["WORKER_CPU_CPU_LIMIT"]
 	v, err := strconv.ParseFloat(got, 64)
 	if err != nil {
 		t.Fatalf("WORKER_CPU_CPU_LIMIT=%q is not a number", got)
@@ -2376,7 +2134,7 @@ func TestVerifyFittedModelClampsALimitThatIsNotInTheEnvFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseEnvFile(string(data))["WORKER_REINVENT_CPU_LIMIT"]; got != "6" {
+	if got := envfile.Parse(string(data))["WORKER_REINVENT_CPU_LIMIT"]; got != "6" {
 		t.Errorf("WORKER_REINVENT_CPU_LIMIT = %q, want 6 — the inline default was never brought under the ceiling", got)
 	}
 }
@@ -2414,7 +2172,7 @@ func TestVerifyFittedModelUsesTheSameCeilingsAsTheFitting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseEnvFile(string(data))["GATEWAY_CPU_LIMIT"]; got != "8" {
+	if got := envfile.Parse(string(data))["GATEWAY_CPU_LIMIT"]; got != "8" {
 		t.Errorf("GATEWAY_CPU_LIMIT = %q, want 8 (the daemon's count, not the worker headroom)", got)
 	}
 }
@@ -2689,7 +2447,7 @@ func TestFitResourceLimitsAlwaysReportsWhatItDetected(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte(env), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.fitResourceLimits(parseEnvFile(env)); err != nil {
+	if err := app.fitResourceLimits(envfile.Parse(env)); err != nil {
 		t.Fatal(err)
 	}
 	logged, err := os.ReadFile(app.composeLogPath())
@@ -2746,7 +2504,7 @@ func TestResetResourceLimitsRestoresTemplateValuesAndRefits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := parseEnvFile(string(data))
+	env := envfile.Parse(string(data))
 	if env["WORKER_CPU_CPU_LIMIT"] != "4" || env["WORKER_GPU_LONG_CPU_LIMIT"] != "4" {
 		t.Errorf("resource limits not restored from the template: %v", env)
 	}
@@ -2791,7 +2549,7 @@ func TestResetResourceLimitsFitsATemplateTooBigForThisMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]
+	got := envfile.Parse(string(data))["WORKER_CPU_CPU_LIMIT"]
 	if got != "3" { // floor(4 * 0.75)
 		t.Errorf("WORKER_CPU_CPU_LIMIT = %q, want 3 — reset restored the template without re-fitting", got)
 	}
@@ -2815,7 +2573,7 @@ func TestShippedTemplateStartsOnTheSmallestSupportedMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range parseEnvFile(string(data)) {
+	for k, v := range envfile.Parse(string(data)) {
 		if !strings.HasSuffix(k, "_CPU_LIMIT") && !strings.HasSuffix(k, "_CPU_RES") {
 			continue
 		}
@@ -2847,7 +2605,7 @@ func TestTemplatesAgreeOnResourceKeys(t *testing.T) {
 	if err != nil {
 		t.Skipf("sibling repo not checked out: %v", err)
 	}
-	a, b := parseEnvFile(string(ours)), parseEnvFile(string(theirs))
+	a, b := envfile.Parse(string(ours)), envfile.Parse(string(theirs))
 	for _, k := range sortedKeys(a) {
 		if !isResourceEnvKey(k) {
 			continue
@@ -2905,7 +2663,7 @@ func TestFitResourceLimitsPreservesUserChosenConcurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cur := parseEnvFile(env)
+	cur := envfile.Parse(env)
 	if err := app.fitResourceLimits(cur); err != nil {
 		t.Fatal(err)
 	}
@@ -2926,7 +2684,7 @@ func TestFitResourceLimitsPreservesUserChosenConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cur = parseEnvFile(content)
+	cur = envfile.Parse(content)
 	if err := app.fitResourceLimits(cur); err != nil {
 		t.Fatal(err)
 	}
@@ -3031,7 +2789,7 @@ func TestEnsureProductionEnvDerivesCORSFromAppPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := parseEnvFile(content)["CORS_ORIGINS"]
+	got := envfile.Parse(content)["CORS_ORIGINS"]
 	want := "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8081,http://127.0.0.1:8081"
 	if got != want {
 		t.Errorf("CORS_ORIGINS did not follow APP_PORT:\n got %q\nwant %q", got, want)
@@ -3124,7 +2882,7 @@ func TestEnsureProductionEnvSeedsProVersionForUpgradingInstalls(t *testing.T) {
 			t.Fatal(err)
 		}
 		content, _ := app.GetEnvContent("prod")
-		if got := parseEnvFile(content)["PRO_VERSION"]; got != "v2026.06.21" {
+		if got := envfile.Parse(content)["PRO_VERSION"]; got != "v2026.06.21" {
 			t.Errorf("PRO_VERSION not seeded: got %q, want v2026.06.21", got)
 		}
 	})
@@ -3144,54 +2902,21 @@ func TestEnsureProductionEnvSeedsProVersionForUpgradingInstalls(t *testing.T) {
 			t.Fatal(err)
 		}
 		content, _ := app.GetEnvContent("prod")
-		if got := parseEnvFile(content)["PRO_VERSION"]; got != "v2026.07.01" {
+		if got := envfile.Parse(content)["PRO_VERSION"]; got != "v2026.07.01" {
 			t.Errorf("user's PRO_VERSION was overwritten: got %q", got)
 		}
 	})
 }
 
-// TestShouldAdvanceVersionMovesStalePinsForward is the fix for the case that
-// made the whole v2026.08.05 release inert for existing users: their
-// .env.production held VERSION=v2026.06.21, a valid pin, so the old
-// "only rewrite broken values" rule preserved it through both
-// ensureProductionEnv and a full runtime-bundle install. They would take the
-// new launcher and the new bundle and still run the previous images.
-func TestShouldAdvanceVersionMovesStalePinsForward(t *testing.T) {
-	cases := []struct {
-		name    string
-		current string
-		release string
-		want    bool
-		why     string
-	}{
-		{"the reported case", "v2026.06.21", "v2026.08.05", true, "stale pin must advance"},
-		{"equal", "v2026.08.05", "v2026.08.05", false, "nothing to do"},
-		{"pin ahead of runtime", "v2026.09.01", "v2026.08.05", false, "never downgrade"},
-		{"empty", "", "v2026.08.05", true, "no pin at all"},
-		{"placeholder", "CHANGE_ME", "v2026.08.05", true, "broken pin"},
-		{"latest", "latest", "v2026.08.05", true, "mutable pin is rejected elsewhere"},
-		{"unparseable current", "sha-abc1234", "v2026.08.05", false, "digest pins are deliberate"},
-		{"unparseable release", "v2026.06.21", "nightly", false, "refuse to move onto a non-release"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldAdvanceVersion(tc.current, tc.release); got != tc.want {
-				t.Errorf("shouldAdvanceVersion(%q, %q) = %v, want %v — %s",
-					tc.current, tc.release, got, tc.want, tc.why)
-			}
-		})
-	}
-}
-
 func TestInstalledRuntimeVersionReadsMarker(t *testing.T) {
 	dir := t.TempDir()
-	if v := installedRuntimeVersion(dir); v != "" {
+	if v := runtimebundle.InstalledVersion(dir); v != "" {
 		t.Errorf("expected empty for a dir with no marker, got %q", v)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".ligandx-runtime-version"), []byte("v2026.08.05\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if v := installedRuntimeVersion(dir); v != "v2026.08.05" {
+	if v := runtimebundle.InstalledVersion(dir); v != "v2026.08.05" {
 		t.Errorf("got %q, want v2026.08.05 (trailing newline must be trimmed)", v)
 	}
 	// GetDistributionStatus surfaces it so the UI can show what is installed.

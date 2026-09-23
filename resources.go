@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"ligandx-launcher/internal/envfile"
 	"math"
 	"os"
 	"os/exec"
@@ -643,7 +644,7 @@ func (a *App) ResetResourceLimits() error {
 		return fmt.Errorf("cannot read .env.production.template to reset from: %w", err)
 	}
 	defaults := map[string]string{}
-	for key, value := range parseEnvFile(string(data)) {
+	for key, value := range envfile.Parse(string(data)) {
 		if isResourceEnvKey(key) {
 			defaults[key] = value
 		}
@@ -662,7 +663,7 @@ func (a *App) ResetResourceLimits() error {
 	if err != nil {
 		return err
 	}
-	return a.fitResourceLimits(parseEnvFile(content))
+	return a.fitResourceLimits(envfile.Parse(content))
 }
 
 // hostResources returns the detected ceilings, using the test hook when set.

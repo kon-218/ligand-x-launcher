@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"ligandx-launcher/internal/diskfree"
+	"ligandx-launcher/internal/envfile"
 	"net"
 	"os"
 	"strconv"
@@ -43,7 +44,7 @@ func (a *App) envPort(key string, fallback int) int {
 	if err != nil {
 		return fallback
 	}
-	return portOrFallback(parseEnvFile(content)[key], fallback)
+	return portOrFallback(envfile.Parse(content)[key], fallback)
 }
 
 func portOrFallback(raw string, fallback int) int {
@@ -63,7 +64,7 @@ func (a *App) fitPublishedPorts() error {
 	if err != nil {
 		return err
 	}
-	cur := parseEnvFile(content)
+	cur := envfile.Parse(content)
 	bindAddr := strings.TrimSpace(cur["LIGANDX_BIND_ADDRESS"])
 	if bindAddr == "" {
 		bindAddr = "127.0.0.1"

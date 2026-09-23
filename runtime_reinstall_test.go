@@ -1,6 +1,7 @@
 package main
 
 import (
+	"ligandx-launcher/internal/envfile"
 	"os"
 	"path/filepath"
 	"testing"
@@ -106,7 +107,7 @@ func TestVerifyFittedModelClampsComposeInlineOnlyDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := parseEnvFile(content)["WORKER_KINETICS_CPU_LIMIT"]
+	got := envfile.Parse(content)["WORKER_KINETICS_CPU_LIMIT"]
 	if got != "6" {
 		t.Errorf("WORKER_KINETICS_CPU_LIMIT = %q, want %q (floor(8 * 0.75))", got, "6")
 	}

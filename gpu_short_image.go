@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"ligandx-launcher/internal/envfile"
+	"strings"
+)
 
 // proGPUShortGroups lists the service groups that submit work to the gpu-short
 // queue whose task implementations ship only in the Pro worker image.
@@ -49,7 +52,7 @@ func (a *App) productionProVersion() string {
 	if err != nil {
 		return "latest"
 	}
-	parsed := parseEnvFile(content)
+	parsed := envfile.Parse(content)
 	if proVersion := strings.TrimSpace(parsed["PRO_VERSION"]); proVersion != "" {
 		return proVersion
 	}
