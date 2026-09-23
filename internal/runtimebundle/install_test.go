@@ -271,3 +271,80 @@ func TestShouldAdvanceVersionMovesStalePinsForward(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeBundleExtractionIncludesGPUOverlay(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "runtime.zip")
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+
+	// Create a zip with all the files the Core bundle builder stages
+	files := map[string]string{
+		"ligand-x-main/docker-compose.yml":        "services: {}\n",
+		"ligand-x-main/.env.production.template":  "POSTGRES_PASSWORD=CHANGE_ME\n",
+		"ligand-x-main/docker-compose.gpu.yml":    "services: {gpu: {}}\n",
+		"ligand-x-main/LICENSE":                   "MIT License\n",
+		"ligand-x-main/README.md":                 "# Ligand-X\n",
+		"ligand-x-main/docker/nginx/ligandx.conf": "server { listen 80; }\n",
+		"ligand-x-main/config/rabbitmq.conf":      "loopback_users = none\n",
+		"ligand-x-main/config/flower_config.py":   "broker_api = ''\n",
+	}
+
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(tmpDir, "runtime")
+	if err := Extract(zipPath, dest); err != nil {
+		t.Fatalf("extractRuntimeBundle failed: %v", err)
+	}
+
+	// Verify the GPU overlay file was extracted
+	gpuOverlayPath := filepath.Join(dest, "docker-compose.gpu.yml")
+	if _, err := os.Stat(gpuOverlayPath); err != nil {
+		t.Fatalf("expected GPU overlay file to be extracted at %s: %v", gpuOverlayPath, err)
+	}
+	data, err := os.ReadFile(gpuOverlayPath)
+	if err != nil {
+		t.Fatalf("failed to read GPU overlay: %v", err)
+	}
+	if string(data) != "services: {gpu: {}}\n" {
+		t.Fatalf("GPU overlay content mismatch: got %q", data)
+	}
+
+	// Verify all other expected files were also extracted
+	expectedFiles := []string{
+		"docker-compose.yml",
+		".env.production.template",
+		"LICENSE",
+		"README.md",
+		filepath.Join("docker", "nginx", "ligandx.conf"),
+		filepath.Join("config", "rabbitmq.conf"),
+		filepath.Join("config", "flower_config.py"),
+	}
+
+	for _, rel := range expectedFiles {
+		if _, err := os.Stat(filepath.Join(dest, rel)); err != nil {
+			t.Fatalf("expected file %q to be extracted: %v", rel, err)
+		}
+	}
+}
+
+func TestEntryAllowedAcceptsGPUOverlay(t *testing.T) {
+	if !EntryAllowed("docker-compose.gpu.yml") {
+		t.Fatal("EntryAllowed should accept docker-compose.gpu.yml")
+	}
+}
