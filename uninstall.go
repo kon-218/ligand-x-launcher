@@ -281,11 +281,6 @@ func (a *App) Uninstall(opts UninstallOptions) (UninstallReport, error) {
 
 	a.emitAndLog("launcher", "Uninstalling Ligand-X…")
 
-	// The tunnel is a child process, not a container, so nothing below would
-	// reach it — it would outlive the uninstall and keep publishing a hostname
-	// for a stack that no longer exists.
-	a.shutdownTunnel()
-
 	if a.dockerClient == nil {
 		a.initDockerClient()
 	}

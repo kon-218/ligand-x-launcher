@@ -49,20 +49,25 @@ xcode-select --install
 
 No additional setup needed (uses WebView2).
 
+## Repository layout
+
+| Path | What it is |
+|------|------------|
+| `*.go` (root) | The Wails `main` package: app lifecycle and every method bound to the frontend |
+| `internal/` | Self-contained Go packages the app uses (no Wails bindings) |
+| `frontend-public/` | The shipped launcher UI (built with `-tags public`) |
+| `frontend/` | Developer/operator dashboard (default build); not shipped in releases |
+| `docker-compose.yml`, `docker-compose.gpu.yml`, `.env.production.template`, `config/`, `docker/` | Generated snapshot of the runtime topology from the core repository — regenerate with `make sync-runtime-topology`, never hand-edit. Release validation runs Compose from the repository root, so these stay here |
+| `scripts/` | Runtime-topology sync/check, staging validation and documentation checks |
+| `build/` | Icons and platform packaging assets used by Wails and the release workflow |
+
 ## Development mode
 
 Hot reload for the frontend, Go rebuilds on backend changes:
 
 ```bash
-cd launcher
-wails dev
-```
-
-Or use the convenience script:
-
-```bash
-cd launcher
-./scripts/build-dev.sh
+make dev          # developer dashboard (frontend/)
+make dev-public   # the shipped launcher UI (frontend-public/)
 ```
 
 This provides:
@@ -73,13 +78,14 @@ This provides:
 
 The first build may take a minute on Linux due to dependencies being compiled. Subsequent rebuilds are much faster.
 
-> On Ubuntu 24.04, you may need to create a webkit symlink first (see [Troubleshooting](#troubleshooting)).
+On Linux the Makefile adds Wails' `webkit2_41` build tag automatically when
+`webkit2gtk-4.1` is installed (Ubuntu 24.04+), so no pkg-config symlink is needed.
 
-### Testing Docker integration
+## Testing
 
 ```bash
-cd launcher
-go run . -test-docker
+make test   # documentation check, then go test for both the dev and public builds
+make vet
 ```
 
 ## Building
@@ -87,24 +93,34 @@ go run . -test-docker
 ### Current platform
 
 ```bash
-cd launcher
-wails build
-# or: ./scripts/build-current.sh
+make build          # developer launcher -> build/bin/ligandx-launcher
+make build-public   # public launcher    -> build/bin/ligandx
 ```
 
-The binary lands in `build/bin/`.
+`make build-public` embeds the runtime-bundle signing public key; without it the
+launcher refuses every runtime bundle. Override `LIGANDX_RUNTIME_PUBKEY` to test
+against a different signing key.
 
 ### Specific platforms
 
 ```bash
-wails build -platform windows/amd64
-wails build -platform linux/amd64
-wails build -platform darwin/amd64
-wails build -platform darwin/arm64   # Apple Silicon
-wails build -nsis                    # Windows NSIS installer
+wails build -tags public -platform windows/amd64
+wails build -tags public -platform darwin/universal
+wails build -tags public,webkit2_41 -platform linux/amd64
 ```
 
-Cross-platform builds can also be produced with `./scripts/build-all.sh` (outputs to `dist/`).
+Cross-compilation support depends on the host; the release workflow builds each
+platform natively. Wails uses a pure-Go WebView2 loader on Windows, so Linux can
+also produce a portable Windows executable for testing without CGO:
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags "public production" \
+  -ldflags="-H windowsgui -s -w -X main.runtimeBundlePublicKeyB64=<key>" \
+  -o ligandx-windows-amd64.exe .
+```
+
+Local builds are test outputs only. Release artifacts are built, signed and
+published exclusively by the release workflow described below.
 
 ## Releases (CI)
 
@@ -134,8 +150,6 @@ assets are:
 If you update the app icon ([`build/appicon.svg`](build/appicon.svg)):
 
 ```bash
-cd launcher
-
 # From SVG source (requires ImageMagick)
 convert -background none build/appicon.svg -resize 1024x1024 build/appicon.png
 convert -background none build/appicon.svg -resize 1024x1024 build/darwin/appicon.png
@@ -150,14 +164,8 @@ wails generate icons build/appicon.png
 
 #### "webkit2gtk-4.0 was not found" (Ubuntu 24.04)
 
-Ubuntu 24.04 only provides webkit2gtk-4.1, but Wails v2.11 is hardcoded to look for 4.0. Create a symlink:
-
-```bash
-sudo ln -s /usr/lib/x86_64-linux-gnu/pkgconfig/webkit2gtk-4.1.pc \
-           /usr/lib/x86_64-linux-gnu/pkgconfig/webkit2gtk-4.0.pc
-```
-
-**Alternative:** use the GitHub Actions CI to build (it handles this automatically).
+Ubuntu 24.04 only provides webkit2gtk-4.1. Build through the Makefile, which
+passes Wails' `webkit2_41` tag, or pass `-tags webkit2_41` to `wails` yourself.
 
 #### "gtk+-3.0 was not found" (Linux)
 

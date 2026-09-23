@@ -4,8 +4,6 @@
 - [FAQ](FAQ.md)
 - [Runtime security](security.md)
 - [Contributor setup](../CONTRIBUTING.md)
-- [Manual Windows build](manual-windows-build.md)
-- [Image asset requirements](images/README.md)
 
 The shipped public interface is `frontend-public/`. `frontend/` is a development
 dashboard and must not be used as evidence that a control exists in a public

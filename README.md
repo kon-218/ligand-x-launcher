@@ -83,7 +83,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for platform setup. The `frontend/` dashb
 - [FAQ](docs/FAQ.md)
 - [Runtime security](docs/security.md)
 - [Contributing](CONTRIBUTING.md)
-- [Manual Windows build](docs/manual-windows-build.md)
 
 ## License
 

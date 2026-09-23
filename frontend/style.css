@@ -131,11 +131,10 @@ h2 { margin: 0; color: var(--text-secondary); font-size: 11px; text-transform: u
 .inspector-section { padding: 10px; margin-bottom: 8px; }
 .inspector-section dl { display: grid; grid-template-columns: 70px 1fr; gap: 5px; margin: 10px 0 0; }
 dt { color: var(--text-muted); } dd { margin: 0; font-family: var(--font-mono); }
-.status-indicator, .tunnel-info { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--text-secondary); }
-.status-dot, .tunnel-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
-.status-dot.running, .tunnel-dot.running { background: var(--accent-success); }
-.status-dot.stopped, .tunnel-dot.stopped { background: var(--accent-danger); }
-.tunnel-dot.external { background: var(--accent-warning); }
+.status-indicator { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--text-secondary); }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
+.status-dot.running { background: var(--accent-success); }
+.status-dot.stopped { background: var(--accent-danger); }
 .inspector-meter { display: grid; grid-template-columns: 36px 36px 1fr; align-items: center; gap: 8px; height: 28px; color: var(--text-secondary); }
 .inspector-meter b { font-family: var(--font-mono); font-weight: 500; }
 .mini-sparkline { height: 16px; }

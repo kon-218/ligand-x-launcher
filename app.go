@@ -383,10 +383,6 @@ type App struct {
 	activePullCancel context.CancelFunc
 	activePullGen    uint64
 
-	// Cloudflare tunnel (see tunnel.go)
-	tunnelCmd *exec.Cmd
-	tunnelMux sync.Mutex
-
 	// Docker-daemon capacity, used to fit resource limits (see resources.go).
 	// hostResourcesFn overrides detection: nil in production, set by tests so
 	// fitting is deterministic instead of depending on the build machine.
@@ -433,7 +429,6 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) shutdown(ctx context.Context) {
 	_ = a.StopPullServiceGroups()
 	a.stopAllLogStreams()
-	a.shutdownTunnel()
 	if a.dockerClient != nil {
 		a.dockerClient.Close()
 	}
