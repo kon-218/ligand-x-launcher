@@ -34,7 +34,6 @@ async function init() {
     // Run all backend initialization in parallel — none of these should block the UI
     checkDocker();
     updateStatus();
-    checkTunnel();
     updateProjectPath();
     initializeWizard();
     renderServicesTab();
@@ -48,7 +47,6 @@ async function init() {
     window.runtime.EventsOn('pullComplete', handlePullComplete);
     window.runtime.EventsOn('reinventModelProgress', handleReinventModelProgress);
     window.runtime.EventsOn('reinventModelComplete', handleReinventModelComplete);
-    window.runtime.EventsOn('tunnel-status', updateTunnelUI);
 
     // Start streaming logs for the default selection (All Services)
     changeLogService();
@@ -171,78 +169,6 @@ async function updateStatus() {
     }
 }
 
-// ── Tunnel / Remote Access ──────────────────────────────────────────────────
-
-let _tunnelRunning = false; // cached so toggleTunnel knows which action to take
-
-async function checkTunnel() {
-    try {
-        const status = await window.go.main.App.GetTunnelStatus();
-        updateTunnelUI(status);
-    } catch (err) {
-        // Backend not ready yet or non-devtunnel build — hide the row silently.
-        const row = document.getElementById('tunnelRow');
-        if (row) row.style.display = 'none';
-    }
-}
-
-function updateTunnelUI(status) {
-    const row = document.getElementById('tunnelRow');
-    if (!row) return;
-
-    // Non-devtunnel builds: status.enabled is false — hide the row entirely.
-    if (!status.enabled) {
-        row.style.display = 'none';
-        return;
-    }
-    row.style.display = '';
-
-    const dot = document.getElementById('tunnelDot');
-    const text = document.getElementById('tunnelStatusText');
-    const openBtn = document.getElementById('tunnelOpenBtn');
-    const toggleBtn = document.getElementById('tunnelToggleBtn');
-
-    _tunnelRunning = status.running;
-
-    dot.classList.remove('running', 'external', 'stopped', 'error');
-    if (status.running && status.managed) {
-        dot.classList.add('running');
-    } else if (status.running && !status.managed) {
-        dot.classList.add('external');
-    } else {
-        dot.classList.add('stopped');
-    }
-
-    text.textContent = status.message || (status.running ? 'Tunnel running' : 'Tunnel stopped');
-
-    if (openBtn) openBtn.disabled = !status.running;
-    if (toggleBtn) {
-        toggleBtn.textContent = status.running ? 'Stop Tunnel' : 'Start Tunnel';
-        toggleBtn.disabled = false;
-    }
-}
-
-async function toggleTunnel() {
-    const toggleBtn = document.getElementById('tunnelToggleBtn');
-    if (toggleBtn) toggleBtn.disabled = true;
-    try {
-        if (_tunnelRunning) {
-            await window.go.main.App.StopTunnel();
-        } else {
-            await window.go.main.App.StartTunnel();
-        }
-    } catch (err) {
-        console.error('Tunnel toggle failed:', err);
-    }
-    // Status update arrives via tunnel-status event; re-enable button on error path.
-    await checkTunnel();
-}
-
-async function openTunnelURL() {
-    await window.go.main.App.OpenTunnelURL();
-}
-
-// ───────────────────────────────────────────────────────────────────────────
 
 async function updateProjectPath() {
     try {
@@ -1603,32 +1529,6 @@ function updateDockerStatus(running, message) {
         const btn = document.getElementById(id);
         if (btn) btn.disabled = !running;
     });
-}
-
-function updateTunnelUI(status) {
-    const row = document.getElementById('tunnelRow');
-    if (!row) return;
-    if (!status.enabled) {
-        row.style.display = 'none';
-        return;
-    }
-    row.style.display = '';
-    const dot = document.getElementById('tunnelDot');
-    const text = document.getElementById('tunnelStatusText');
-    const openBtn = document.getElementById('tunnelOpenBtn');
-    const toggleBtn = document.getElementById('tunnelToggleBtn');
-    _tunnelRunning = status.running;
-    if (dot) {
-        dot.classList.remove('running', 'external', 'stopped', 'error');
-        dot.classList.add(status.running ? (status.managed ? 'running' : 'external') : 'stopped');
-    }
-    if (text) text.textContent = status.message || (status.running ? 'Tunnel running' : 'Tunnel stopped');
-    if (openBtn) openBtn.disabled = !status.running;
-    if (toggleBtn) {
-        const label = toggleBtn.querySelector('span');
-        if (label) label.textContent = status.running ? 'Tunnel on' : 'Tunnel';
-        toggleBtn.disabled = false;
-    }
 }
 
 async function renderServicesTab() {

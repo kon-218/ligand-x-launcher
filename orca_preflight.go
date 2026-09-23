@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"ligandx-launcher/internal/envfile"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,12 +86,12 @@ func (a *App) pinnedWorkerQCImage() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot read the production image pin: %w", err)
 	}
-	parsed := parseEnvFile(content)
+	parsed := envfile.Parse(content)
 	version := strings.TrimSpace(parsed["PRO_VERSION"])
 	if version == "" {
 		version = strings.TrimSpace(parsed["VERSION"])
 	}
-	if !isPinnedImageVersion(version) {
+	if !envfile.IsPinnedVersion(version) {
 		return "", fmt.Errorf(
 			"PRO_VERSION (or VERSION when PRO_VERSION is unset) must name a pinned release, not %q",
 			version,

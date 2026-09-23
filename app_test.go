@@ -1,17 +1,20 @@
 package main
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
+	"ligandx-launcher/internal/agentsession"
+	"ligandx-launcher/internal/envfile"
+	"ligandx-launcher/internal/license"
+	"ligandx-launcher/internal/runtimebundle"
+	"ligandx-launcher/internal/secretstore"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,21 +25,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestRuntimeBundleReleaseURLsUseLauncherRepo(t *testing.T) {
-	checks := map[string]string{
-		"defaultRuntimeBundleURL": defaultRuntimeBundleURL,
-		"latestReleaseAPIURL":     latestReleaseAPIURL,
-	}
-	for name, value := range checks {
-		if !strings.Contains(value, "kon-218/ligand-x-launcher") {
-			t.Fatalf("%s should use ligand-x-launcher releases, got %q", name, value)
-		}
-		if strings.Contains(value, "kon-218/ligand-x/releases") {
-			t.Fatalf("%s still points at the core app release repo: %q", name, value)
-		}
-	}
-}
 
 func TestGetServiceGroups(t *testing.T) {
 	app := NewApp()
@@ -513,109 +501,6 @@ func TestFindProjectPathPrefersSourceCheckoutForDevBuild(t *testing.T) {
 	}
 }
 
-func TestRuntimeBundleExtractionAllowsOnlyRuntimeFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-	zipPath := filepath.Join(tmpDir, "runtime.zip")
-	buf := new(bytes.Buffer)
-	zw := zip.NewWriter(buf)
-	for name, content := range map[string]string{
-		"ligand-x-main/docker-compose.yml":        "services: {}\n",
-		"ligand-x-main/.env.production.template":  "POSTGRES_PASSWORD=CHANGE_ME\n",
-		"ligand-x-main/docker/nginx/ligandx.conf": "server { listen 80; }\n",
-		"ligand-x-main/config/rabbitmq.conf":      "loopback_users = none\n",
-		"ligand-x-main/config/flower_config.py":   "broker_api = ''\n",
-		"ligand-x-main/services/private.py":       "do not extract",
-	} {
-		w, err := zw.Create(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.Write([]byte(content)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(zipPath, buf.Bytes(), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	dest := filepath.Join(tmpDir, "runtime")
-	if err := extractRuntimeBundle(zipPath, dest); err != nil {
-		t.Fatalf("extractRuntimeBundle failed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dest, "docker-compose.yml")); err != nil {
-		t.Fatalf("expected compose file to be extracted: %v", err)
-	}
-	// Config files bind-mounted by docker-compose.yml must land on disk, or Docker
-	// auto-creates the missing source as a directory and the mount fails with
-	// "not a directory" (the proxy/rabbitmq/flower startup bug).
-	for _, rel := range []string{
-		filepath.Join("docker", "nginx", "ligandx.conf"),
-		filepath.Join("config", "rabbitmq.conf"),
-		filepath.Join("config", "flower_config.py"),
-	} {
-		if _, err := os.Stat(filepath.Join(dest, rel)); err != nil {
-			t.Fatalf("expected bind-mounted config %q to be extracted: %v", rel, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(dest, "services", "private.py")); !os.IsNotExist(err) {
-		t.Fatalf("unexpected private source extraction error state: %v", err)
-	}
-}
-
-func TestRuntimeBundleExtractionSelfHealsStaleDirectorySource(t *testing.T) {
-	tmpDir := t.TempDir()
-	zipPath := filepath.Join(tmpDir, "runtime.zip")
-	buf := new(bytes.Buffer)
-	zw := zip.NewWriter(buf)
-	w, err := zw.Create("ligand-x-main/docker/nginx/ligandx.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte("server { listen 80; }\n")); err != nil {
-		t.Fatal(err)
-	}
-	for name, content := range map[string]string{
-		"ligand-x-main/docker-compose.yml":       "services: {}\n",
-		"ligand-x-main/.env.production.template": "VERSION=v1.2.3\n",
-	} {
-		requiredWriter, createErr := zw.Create(name)
-		if createErr != nil {
-			t.Fatal(createErr)
-		}
-		if _, writeErr := requiredWriter.Write([]byte(content)); writeErr != nil {
-			t.Fatal(writeErr)
-		}
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(zipPath, buf.Bytes(), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	dest := filepath.Join(tmpDir, "runtime")
-	// Simulate a stale install: Docker auto-created the missing bind-mount source
-	// as a directory on a previous broken run.
-	staleConf := filepath.Join(dest, "docker", "nginx", "ligandx.conf")
-	if err := os.MkdirAll(staleConf, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := extractRuntimeBundle(zipPath, dest); err != nil {
-		t.Fatalf("extractRuntimeBundle failed on stale install: %v", err)
-	}
-	info, err := os.Stat(staleConf)
-	if err != nil {
-		t.Fatalf("expected config to be extracted over stale dir: %v", err)
-	}
-	if info.IsDir() {
-		t.Fatal("expected ligandx.conf to be a file after self-heal, still a directory")
-	}
-}
-
 func TestEnsureProductionEnvReplacesUnsafeDefaults(t *testing.T) {
 	tmpDir := t.TempDir()
 	app := NewApp()
@@ -775,24 +660,6 @@ func TestRegistryAuthIncludesPrivateImageInFreeGroup(t *testing.T) {
 	want := "ghcr.io/kon-218/ligand-x-pro/worker-gpu-short"
 	if len(repositories) != 1 || repositories[0] != want {
 		t.Fatalf("selectedProRepositories() = %v, want [%s]", repositories, want)
-	}
-}
-
-func TestEncodeRegistryAuth(t *testing.T) {
-	encoded, err := encodeRegistryAuth(registryCredentials{
-		Host:     "ghcr.io",
-		Username: "oauth2",
-		Token:    "short-lived-token",
-	})
-	if err != nil {
-		t.Fatalf("encodeRegistryAuth failed: %v", err)
-	}
-	raw, err := base64.URLEncoding.DecodeString(encoded)
-	if err != nil {
-		t.Fatalf("encoded auth is not base64url: %v", err)
-	}
-	if !strings.Contains(string(raw), "short-lived-token") {
-		t.Fatalf("encoded auth missing token: %s", string(raw))
 	}
 }
 
@@ -984,245 +851,6 @@ func TestSetOrcaHostPathRejectsInvalid(t *testing.T) {
 	}
 }
 
-// TestEmbeddedPublicKeyMatchesPemFile prevents drift between the launcher's
-// compiled-in public key and the canonical PEM under lib/licensing/. If
-// either is rotated alone, every signed license silently fails verification
-// at one verifier or the other.
-func TestEmbeddedPublicKeyMatchesPemFile(t *testing.T) {
-	publicRoot := os.Getenv("LIGANDX_PUBLIC_ROOT")
-	if publicRoot == "" {
-		publicRoot = filepath.Join("..", "ligand-x")
-	}
-	pemPath := filepath.Join(publicRoot, "lib", "licensing", "public_key.pem")
-	onDisk, err := os.ReadFile(pemPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			t.Skip("cross-repository validation skipped: ligand-x is unavailable; embedded public-key drift was not verified (set LIGANDX_PUBLIC_ROOT to its checkout)")
-		}
-		t.Fatalf("read %s: %v", pemPath, err)
-	}
-	// Compare PEM blocks structurally — trailing whitespace differences in
-	// the source files are not meaningful, but key bytes must match.
-	diskBlock, _ := pem.Decode(onDisk)
-	embedBlock, _ := pem.Decode([]byte(licensePublicKeyPEM))
-	if diskBlock == nil || embedBlock == nil {
-		t.Fatalf("failed to PEM-decode launcher (%v) or %s (%v)", embedBlock, pemPath, diskBlock)
-	}
-	if !bytes.Equal(diskBlock.Bytes, embedBlock.Bytes) {
-		t.Fatalf("public key drift between launcher embed and %s", pemPath)
-	}
-}
-
-// signTestLicense produces a signed bundle for the table-driven verifier
-// tests. Uses a fresh keypair per call so production keys are never needed.
-func signTestLicense(t *testing.T, payload map[string]interface{}) (bundleBytes []byte, publicPEM []byte) {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("keygen: %v", err)
-	}
-	canonical, err := canonicalLicensePayload(payload)
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
-	sig := ed25519.Sign(priv, canonical)
-
-	bundle := map[string]interface{}{
-		"schema":    "ligandx-license/1",
-		"algorithm": "Ed25519",
-		"payload":   payload,
-		"signature": base64.StdEncoding.EncodeToString(sig),
-	}
-	bundleBytes, err = json.Marshal(bundle)
-	if err != nil {
-		t.Fatalf("marshal bundle: %v", err)
-	}
-
-	pubDer, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("marshal pub: %v", err)
-	}
-	publicPEM = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDer})
-	return bundleBytes, publicPEM
-}
-
-func TestVerifyLicenseValid(t *testing.T) {
-	bundle, pub := signTestLicense(t, map[string]interface{}{
-		"edition":      "pro",
-		"license_id":   "LX-TEST-1",
-		"entitlements": []interface{}{"qc", "admet"},
-		"expires_at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-		"customer":     map[string]interface{}{"name": "Acme"},
-	})
-	got, err := verifyLicenseDataWithPublicKey(bundle, pub)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !got.Valid || got.Edition != "pro" {
-		t.Fatalf("expected valid pro, got %+v", got)
-	}
-	if got.CustomerName != "Acme" {
-		t.Fatalf("expected customer Acme, got %q", got.CustomerName)
-	}
-	if !got.HasEntitlement("qc") || got.HasEntitlement("boltz2") {
-		t.Fatalf("entitlement check wrong: %+v", got.Entitlements)
-	}
-}
-
-func TestVerifyLicenseRejectsTamperedPayload(t *testing.T) {
-	bundle, pub := signTestLicense(t, map[string]interface{}{
-		"edition":      "pro",
-		"license_id":   "LX-TEST-2",
-		"entitlements": []interface{}{"qc"},
-		"expires_at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-	tampered := bytes.Replace(bundle, []byte(`"qc"`), []byte(`"boltz2"`), 1)
-	got, _ := verifyLicenseDataWithPublicKey(tampered, pub)
-	if got.Valid {
-		t.Fatalf("expected tampered payload to fail, got valid")
-	}
-	if got.Reason != "invalid_signature" {
-		t.Fatalf("expected invalid_signature, got %q", got.Reason)
-	}
-}
-
-func TestVerifyLicenseRejectsWrongKey(t *testing.T) {
-	bundle, _ := signTestLicense(t, map[string]interface{}{
-		"edition":      "pro",
-		"license_id":   "LX-TEST-3",
-		"entitlements": []interface{}{"qc"},
-		"expires_at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-	_, otherPub := signTestLicense(t, map[string]interface{}{"edition": "pro"})
-	got, _ := verifyLicenseDataWithPublicKey(bundle, otherPub)
-	if got.Valid {
-		t.Fatalf("expected verification under wrong key to fail")
-	}
-}
-
-func TestVerifyLicenseExpiredNoGrace(t *testing.T) {
-	bundle, pub := signTestLicense(t, map[string]interface{}{
-		"edition":      "pro",
-		"license_id":   "LX-TEST-4",
-		"entitlements": []interface{}{"qc"},
-		"expires_at":   time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339),
-	})
-	got, _ := verifyLicenseDataWithPublicKey(bundle, pub)
-	if got.Valid {
-		t.Fatalf("expected expired license to be invalid")
-	}
-	if got.Reason != "license_expired" {
-		t.Fatalf("expected license_expired, got %q", got.Reason)
-	}
-}
-
-func TestVerifyLicenseExpiredWithinGrace(t *testing.T) {
-	bundle, pub := signTestLicense(t, map[string]interface{}{
-		"edition":      "pro",
-		"license_id":   "LX-TEST-5",
-		"entitlements": []interface{}{"qc"},
-		"expires_at":   time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339),
-		"grace_until":  time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-	got, err := verifyLicenseDataWithPublicKey(bundle, pub)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !got.Valid {
-		t.Fatalf("expected grace-period license to be valid, got %+v", got)
-	}
-}
-
-func TestVerifyLicenseUnknownEntitlement(t *testing.T) {
-	bundle, pub := signTestLicense(t, map[string]interface{}{
-		"edition":      "pro",
-		"license_id":   "LX-TEST-6",
-		"entitlements": []interface{}{"definitely-not-a-real-module"},
-		"expires_at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-	got, _ := verifyLicenseDataWithPublicKey(bundle, pub)
-	if got.Valid {
-		t.Fatalf("expected unknown entitlement to invalidate license")
-	}
-	if got.Reason != "unknown_entitlement" {
-		t.Fatalf("expected unknown_entitlement, got %q", got.Reason)
-	}
-}
-
-func TestVerifyLicenseProRequiresEntitlements(t *testing.T) {
-	bundle, pub := signTestLicense(t, map[string]interface{}{
-		"edition":      "pro",
-		"license_id":   "LX-TEST-7",
-		"entitlements": []interface{}{},
-		"expires_at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-	got, _ := verifyLicenseDataWithPublicKey(bundle, pub)
-	if got.Valid {
-		t.Fatalf("expected empty Pro entitlements to invalidate")
-	}
-	if got.Reason != "pro_license_requires_entitlements" {
-		t.Fatalf("got reason %q", got.Reason)
-	}
-}
-
-func TestVerifyLicenseAcademicGrantsAll(t *testing.T) {
-	bundle, pub := signTestLicense(t, map[string]interface{}{
-		"edition":    "academic",
-		"license_id": "LX-TEST-8",
-		"expires_at": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-	got, err := verifyLicenseDataWithPublicKey(bundle, pub)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !got.Valid || got.Edition != "academic" {
-		t.Fatalf("expected academic valid, got %+v", got)
-	}
-	for entitlement := range proEntitlements {
-		if !got.HasEntitlement(entitlement) {
-			t.Fatalf("academic should grant %q", entitlement)
-		}
-	}
-}
-
-func TestVerifyLicenseWithVersionRangeGreaterThan(t *testing.T) {
-	bundle, pub := signTestLicense(t, map[string]interface{}{
-		"edition":       "academic",
-		"license_id":    "LX-TEST-HTML-ESCAPE",
-		"expires_at":    time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-		"version_range": ">=0.0.0",
-	})
-	got, err := verifyLicenseDataWithPublicKey(bundle, pub)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !got.Valid || got.Reason != "ok" {
-		t.Fatalf("expected version_range license to verify, got %+v", got)
-	}
-}
-
-func TestHasEntitlementSemantics(t *testing.T) {
-	free := LicenseSummary{Edition: "free", Valid: true}
-	if free.HasEntitlement("qc") {
-		t.Fatal("free should not have qc")
-	}
-
-	expired := LicenseSummary{Edition: "pro", Valid: false, Entitlements: []string{"qc"}}
-	if expired.HasEntitlement("qc") {
-		t.Fatal("invalid pro should not have entitlement")
-	}
-
-	pro := LicenseSummary{Edition: "pro", Valid: true, Entitlements: []string{"qc"}}
-	if !pro.HasEntitlement("qc") || pro.HasEntitlement("boltz2") {
-		t.Fatal("pro entitlement scoping wrong")
-	}
-
-	academic := LicenseSummary{Edition: "academic", Valid: true}
-	if !academic.HasEntitlement("anything") {
-		t.Fatal("academic should grant any pro entitlement")
-	}
-}
-
 func TestValidateUnlockedServicesBlocksLockedGroup(t *testing.T) {
 	app := NewApp()
 	app.projectPath = t.TempDir()
@@ -1238,64 +866,6 @@ func TestValidateUnlockedServicesBlocksLockedGroup(t *testing.T) {
 	}
 }
 
-func TestRegistryCredentialsFromLicenseRequiresValidSignedBridgeMode(t *testing.T) {
-	validPayload := map[string]interface{}{
-		"edition":       "academic",
-		"license_id":    "LX-BRIDGE-TEST",
-		"expires_at":    time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-		"registry_mode": "bridge",
-		"registry": map[string]interface{}{
-			"host": "ghcr.io", "username": "reader", "token": "tok",
-		},
-	}
-	bundle, pub := signTestLicense(t, validPayload)
-	creds, ok := registryCredentialsFromLicenseData(bundle, pub)
-	if !ok {
-		t.Fatal("expected valid signed bridge credentials to be accepted")
-	}
-	if creds.Host != "ghcr.io" || creds.Username != "reader" || creds.Token != "tok" {
-		t.Fatalf("unexpected bridge credentials: %+v", creds)
-	}
-
-	withoutMode := map[string]interface{}{}
-	for key, value := range validPayload {
-		withoutMode[key] = value
-	}
-	delete(withoutMode, "registry_mode")
-	bundle, pub = signTestLicense(t, withoutMode)
-	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
-		t.Fatal("expected credentials without registry_mode=bridge to be ignored")
-	}
-
-	bundle, pub = signTestLicense(t, validPayload)
-	tampered := bytes.Replace(bundle, []byte(`"tok"`), []byte(`"other"`), 1)
-	if _, ok := registryCredentialsFromLicenseData(tampered, pub); ok {
-		t.Fatal("expected tampered bridge credentials to be rejected")
-	}
-
-	expiredPayload := map[string]interface{}{}
-	for key, value := range validPayload {
-		expiredPayload[key] = value
-	}
-	expiredPayload["expires_at"] = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
-	bundle, pub = signTestLicense(t, expiredPayload)
-	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
-		t.Fatal("expected expired bridge credentials to be rejected")
-	}
-
-	wrongHostPayload := map[string]interface{}{}
-	for key, value := range validPayload {
-		wrongHostPayload[key] = value
-	}
-	wrongHostPayload["registry"] = map[string]interface{}{
-		"host": "example.com", "username": "reader", "token": "tok",
-	}
-	bundle, pub = signTestLicense(t, wrongHostPayload)
-	if _, ok := registryCredentialsFromLicenseData(bundle, pub); ok {
-		t.Fatal("expected non-GHCR bridge credentials to be rejected")
-	}
-}
-
 func TestPublicBuildAcceptsSignedBridgeCredentials(t *testing.T) {
 	t.Setenv("LIGANDX_REGISTRY_TOKEN_URL", "")
 	t.Setenv("LIGANDX_VENDOR_ACCESS_TOKEN", "")
@@ -1306,8 +876,8 @@ func TestPublicBuildAcceptsSignedBridgeCredentials(t *testing.T) {
 	for _, group := range groups {
 		groupMap[group.ID] = group
 	}
-	want := registryCredentials{Host: "ghcr.io", Username: "reader", Token: "tok"}
-	loader := func() (registryCredentials, bool) { return want, true }
+	want := license.RegistryCredentials{Host: "ghcr.io", Username: "reader", Token: "tok"}
+	loader := func() (license.RegistryCredentials, bool) { return want, true }
 
 	got, ok, err := app.registryCredentialsForProImagesForBuild(
 		[]string{"admet"},
@@ -1412,24 +982,6 @@ func TestPrivatePersistenceUsesOwnerOnlyMode(t *testing.T) {
 	requirePrivateMode(t, app.composeLogPath())
 }
 
-func TestWritePrivateFileReplacesExistingContentAndMode(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "secret")
-	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := writePrivateFile(path, []byte("new")); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "new" {
-		t.Fatalf("unexpected private file content %q", data)
-	}
-	requirePrivateMode(t, path)
-}
-
 func signRuntimeManifestForTest(t *testing.T, bundle []byte, version string, expiresAt time.Time) ([]byte, []byte) {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -1440,21 +992,21 @@ func signRuntimeManifestForTest(t *testing.T, bundle []byte, version string, exp
 	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
 	t.Cleanup(func() { runtimeBundlePublicKeyB64 = oldKey })
 	digest := sha256.Sum256(bundle)
-	manifest, err := json.Marshal(runtimeBundleManifest{
+	manifest, err := json.Marshal(runtimebundle.Manifest{
 		Schema:    "ligandx-runtime-manifest/1",
 		Version:   version,
-		Asset:     runtimeBundleAssetName,
+		Asset:     runtimebundle.AssetName,
 		SHA256:    fmt.Sprintf("%x", digest),
 		Size:      int64(len(bundle)),
 		IssuedAt:  time.Now().UTC().Format(time.RFC3339),
 		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
 		GitCommit: strings.Repeat("a", 40),
-		Artifacts: map[string]runtimeReleaseArtifact{
-			runtimeBundleAssetName: {SHA256: fmt.Sprintf("%x", digest), Size: int64(len(bundle))},
+		Artifacts: map[string]runtimebundle.Artifact{
+			runtimebundle.AssetName: {SHA256: fmt.Sprintf("%x", digest), Size: int64(len(bundle))},
 		},
-		PlatformSigning: runtimePlatformSigning{
-			Windows: runtimeWindowsSigning{Authenticode: false, Evidence: "workflow-verification"},
-			MacOS: runtimeMacOSSigning{
+		PlatformSigning: runtimebundle.PlatformSigning{
+			Windows: runtimebundle.WindowsSigning{Authenticode: false, Evidence: "workflow-verification"},
+			MacOS: runtimebundle.MacOSSigning{
 				DeveloperID: false,
 				Notarized:   false,
 				Evidence:    "workflow-verification",
@@ -1471,7 +1023,7 @@ func signRuntimeManifestForTest(t *testing.T, bundle []byte, version string, exp
 func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 	bundle := []byte("signed runtime bundle")
 	manifestBytes, signatureBytes := signRuntimeManifestForTest(t, bundle, "v1.2.3", time.Now().Add(time.Hour))
-	manifest, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v1.2.3")
+	manifest, err := runtimePolicy().VerifyManifest(manifestBytes, signatureBytes, "v1.2.3")
 	if err != nil {
 		t.Fatalf("valid manifest rejected: %v", err)
 	}
@@ -1480,7 +1032,7 @@ func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 		t.Fatalf("platform-signing evidence was not decoded: %+v", manifest.PlatformSigning)
 	}
 
-	if _, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v9.9.9"); err == nil {
+	if _, err := runtimePolicy().VerifyManifest(manifestBytes, signatureBytes, "v9.9.9"); err == nil {
 		t.Fatal("manifest for a different release tag was accepted")
 	}
 	trustedKey := runtimeBundlePublicKeyB64
@@ -1489,32 +1041,32 @@ func TestRuntimeManifestAuthenticatesBundleAndRejectsTampering(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(otherPublic)
-	if _, err := verifyRuntimeBundleManifest(manifestBytes, signatureBytes, "v1.2.3"); err == nil {
+	if _, err := runtimePolicy().VerifyManifest(manifestBytes, signatureBytes, "v1.2.3"); err == nil {
 		t.Fatal("manifest signed by an untrusted signer was accepted")
 	}
 	runtimeBundlePublicKeyB64 = trustedKey
 	expiredManifest, expiredSignature := signRuntimeManifestForTest(
 		t, bundle, "v1.2.3", time.Now().Add(-time.Minute),
 	)
-	if _, err := verifyRuntimeBundleManifest(expiredManifest, expiredSignature, "v1.2.3"); err == nil {
+	if _, err := runtimePolicy().VerifyManifest(expiredManifest, expiredSignature, "v1.2.3"); err == nil {
 		t.Fatal("expired runtime manifest was accepted")
 	}
 
-	bundlePath := filepath.Join(t.TempDir(), runtimeBundleAssetName)
+	bundlePath := filepath.Join(t.TempDir(), runtimebundle.AssetName)
 	if err := os.WriteFile(bundlePath, bundle, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRuntimeBundleFile(bundlePath, manifest); err != nil {
+	if err := runtimebundle.VerifyFile(bundlePath, manifest); err != nil {
 		t.Fatalf("valid bundle rejected: %v", err)
 	}
 	tamperedManifest := bytes.Replace(manifestBytes, []byte("v1.2.3"), []byte("v9.9.9"), 1)
-	if _, err := verifyRuntimeBundleManifest(tamperedManifest, signatureBytes, ""); err == nil {
+	if _, err := runtimePolicy().VerifyManifest(tamperedManifest, signatureBytes, ""); err == nil {
 		t.Fatal("tampered signed manifest was accepted")
 	}
 	if err := os.WriteFile(bundlePath, append(bundle, byte(0)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRuntimeBundleFile(bundlePath, manifest); err == nil {
+	if err := runtimebundle.VerifyFile(bundlePath, manifest); err == nil {
 		t.Fatal("tampered bundle was accepted")
 	}
 }
@@ -1528,11 +1080,11 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
 	launcherVersion = "v2.0.0"
 	t.Cleanup(func() { runtimeBundlePublicKeyB64, launcherVersion = oldKey, oldVersion })
-	index := runtimeReleaseIndex{
+	index := runtimebundle.ReleaseIndex{
 		Schema:    "ligandx-release-index/1",
 		IssuedAt:  time.Now().UTC().Format(time.RFC3339),
 		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
-		Releases: []RuntimeRelease{
+		Releases: []runtimebundle.Release{
 			{Version: "v2.1.0", Status: "supported", Recommended: true, MinimumLauncher: "v2.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v2.1.0/ligand-x-runtime.zip", DownloadBytes: 1024},
 			{Version: "v1.9.0", Status: "supported", MinimumLauncher: "v3.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v1.9.0/ligand-x-runtime.zip", DownloadBytes: 1024},
 			{Version: "v1.8.0", Status: "revoked", MinimumLauncher: "v1.0.0", BundleURL: "https://github.com/kon-218/ligand-x-launcher/releases/download/v1.8.0/ligand-x-runtime.zip", DownloadBytes: 1024},
@@ -1543,7 +1095,7 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 	signature := []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload)))
-	verified, err := verifyRuntimeReleaseIndex(payload, signature)
+	verified, err := runtimePolicy().VerifyReleaseIndex(payload, signature)
 	if err != nil {
 		t.Fatalf("valid index rejected: %v", err)
 	}
@@ -1557,7 +1109,7 @@ func TestSignedReleaseIndexControlsSelectableStableVersions(t *testing.T) {
 		t.Fatalf("revoked release remained selectable: %+v", verified.Releases[2])
 	}
 	payload[0] ^= 1
-	if _, err := verifyRuntimeReleaseIndex(payload, signature); err == nil {
+	if _, err := runtimePolicy().VerifyReleaseIndex(payload, signature); err == nil {
 		t.Fatal("tampered release index was accepted")
 	}
 }
@@ -1575,7 +1127,7 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	runtimeBundlePublicKeyB64 = base64.StdEncoding.EncodeToString(publicKey)
 	t.Cleanup(func() { runtimeBundlePublicKeyB64 = oldKey })
 
-	sign := func(index runtimeReleaseIndex) ([]byte, []byte) {
+	sign := func(index runtimebundle.ReleaseIndex) ([]byte, []byte) {
 		t.Helper()
 		payload, err := json.Marshal(index)
 		if err != nil {
@@ -1583,10 +1135,10 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 		}
 		return payload, []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload)))
 	}
-	base := func(recommended ...bool) runtimeReleaseIndex {
-		releases := make([]RuntimeRelease, len(recommended))
+	base := func(recommended ...bool) runtimebundle.ReleaseIndex {
+		releases := make([]runtimebundle.Release, len(recommended))
 		for i, rec := range recommended {
-			releases[i] = RuntimeRelease{
+			releases[i] = runtimebundle.Release{
 				Version:         fmt.Sprintf("v2.1.%d", i),
 				Status:          "supported",
 				Recommended:     rec,
@@ -1595,7 +1147,7 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 				DownloadBytes:   1024,
 			}
 		}
-		return runtimeReleaseIndex{
+		return runtimebundle.ReleaseIndex{
 			Schema:    "ligandx-release-index/1",
 			IssuedAt:  time.Now().UTC().Format(time.RFC3339),
 			ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
@@ -1604,7 +1156,7 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	}
 
 	payload, signature := sign(base(false, false))
-	index, err := verifyRuntimeReleaseIndex(payload, signature)
+	index, err := runtimePolicy().VerifyReleaseIndex(payload, signature)
 	if err != nil {
 		t.Fatalf("zero recommended releases must still list, got %v", err)
 	}
@@ -1614,7 +1166,7 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	}
 
 	payload, signature = sign(base(true, true))
-	index, err = verifyRuntimeReleaseIndex(payload, signature)
+	index, err = runtimePolicy().VerifyReleaseIndex(payload, signature)
 	if err != nil {
 		t.Fatalf("two recommended releases must still list, got %v", err)
 	}
@@ -1628,137 +1180,12 @@ func TestSignedReleaseIndexNormalisesRecommendation(t *testing.T) {
 	}
 
 	payload, signature = sign(base(true, false))
-	index, err = verifyRuntimeReleaseIndex(payload, signature)
+	index, err = runtimePolicy().VerifyReleaseIndex(payload, signature)
 	if err != nil {
 		t.Fatalf("single recommended release was rejected: %v", err)
 	}
 	if index.Warning != "" {
 		t.Fatalf("well-formed index must not warn, got %q", index.Warning)
-	}
-}
-
-func TestRuntimeRollbackPolicyRejectsOlderVersion(t *testing.T) {
-	runtimeDir := t.TempDir()
-	if err := writePrivateFile(filepath.Join(runtimeDir, ".ligandx-runtime-version"), []byte("v2.1.0\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := enforceRuntimeRollbackPolicy(runtimeDir, "v2.0.9"); err == nil {
-		t.Fatal("runtime downgrade was accepted")
-	}
-	if err := enforceRuntimeRollbackPolicy(runtimeDir, "v2.1.1"); err != nil {
-		t.Fatalf("runtime upgrade was rejected: %v", err)
-	}
-}
-
-func TestRuntimeStageActivationCanRestorePreviousFiles(t *testing.T) {
-	stage, destination, backup := t.TempDir(), t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(stage, "docker-compose.yml"), []byte("new compose"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stage, ".env.production.template"), []byte("VERSION=v2\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(destination, "docker-compose.yml"), []byte("old compose"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	rollback, err := activateRuntimeStage(stage, destination, backup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if data, _ := os.ReadFile(filepath.Join(destination, "docker-compose.yml")); string(data) != "new compose" {
-		t.Fatalf("stage was not activated: %q", data)
-	}
-	rollback()
-	if data, _ := os.ReadFile(filepath.Join(destination, "docker-compose.yml")); string(data) != "old compose" {
-		t.Fatalf("previous runtime was not restored: %q", data)
-	}
-	if _, err := os.Stat(filepath.Join(destination, ".env.production.template")); !os.IsNotExist(err) {
-		t.Fatal("new-only staged file survived rollback")
-	}
-}
-
-func TestRuntimeDownloadRejectsUnapprovedHost(t *testing.T) {
-	if _, err := approvedRuntimeDownloadURL("https://attacker.example/runtime.zip"); err == nil {
-		t.Fatal("unapproved runtime host was accepted")
-	}
-}
-
-func TestRuntimeBundleRejectsTooManyEntries(t *testing.T) {
-	zipPath := filepath.Join(t.TempDir(), "runtime.zip")
-	file, err := os.Create(zipPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer := zip.NewWriter(file)
-	for index := 0; index < runtimeBundleMaxFiles+1; index++ {
-		entry, createErr := writer.Create(fmt.Sprintf("ignored-%03d", index))
-		if createErr != nil {
-			t.Fatal(createErr)
-		}
-		if _, writeErr := entry.Write([]byte("x")); writeErr != nil {
-			t.Fatal(writeErr)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := extractRuntimeBundle(zipPath, t.TempDir()); err == nil {
-		t.Fatal("oversized entry-count archive was accepted")
-	}
-}
-
-func TestRuntimeBundleRejectsSymlinkEntry(t *testing.T) {
-	zipPath := filepath.Join(t.TempDir(), "runtime.zip")
-	file, err := os.Create(zipPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer := zip.NewWriter(file)
-	header := &zip.FileHeader{Name: "docker-compose.yml"}
-	header.SetMode(os.ModeSymlink | 0777)
-	entry, err := writer.CreateHeader(header)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := entry.Write([]byte("target")); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := extractRuntimeBundle(zipPath, t.TempDir()); err == nil {
-		t.Fatal("symbolic-link archive entry was accepted")
-	}
-}
-
-func TestRuntimeBundleTargetRejectsExistingSymlink(t *testing.T) {
-	if goruntime.GOOS == "windows" {
-		t.Skip("symlink creation requires platform-specific privileges on Windows")
-	}
-	base := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "outside")
-	if err := os.WriteFile(outside, []byte("unchanged"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(base, "docker-compose.yml")
-	if err := os.Symlink(outside, target); err != nil {
-		t.Fatal(err)
-	}
-	if err := rejectRuntimeSymlinkPath(base, target); err == nil {
-		t.Fatal("existing target symlink was accepted")
-	}
-	data, err := os.ReadFile(outside)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "unchanged" {
-		t.Fatal("symlink target was modified")
 	}
 }
 
@@ -1782,35 +1209,6 @@ func TestPasswordUpdateAndLicenseImportPersistenceStayPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	requirePrivateMode(t, app.licensePath())
-}
-
-func TestRegistryTokenResponseMustBeShortLivedAndExactlyScoped(t *testing.T) {
-	repositories := []string{"ghcr.io/kon-218/ligand-x-pro/admet"}
-	valid := registryTokenResponse{
-		Host:         "ghcr.io",
-		Username:     "oauth2",
-		Token:        "short-lived-token",
-		ExpiresAt:    time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339),
-		Repositories: repositories,
-	}
-	if _, err := validateRegistryTokenResponse(valid, repositories); err != nil {
-		t.Fatalf("valid scoped token response rejected: %v", err)
-	}
-	wrongScope := valid
-	wrongScope.Repositories = []string{"ghcr.io/kon-218/ligand-x-pro/qc"}
-	if _, err := validateRegistryTokenResponse(wrongScope, repositories); err == nil {
-		t.Fatal("unexpected repository scope was accepted")
-	}
-	expired := valid
-	expired.ExpiresAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
-	if _, err := validateRegistryTokenResponse(expired, repositories); err == nil {
-		t.Fatal("expired registry token was accepted")
-	}
-	wrongHost := valid
-	wrongHost.Host = "registry.attacker.example"
-	if _, err := validateRegistryTokenResponse(wrongHost, repositories); err == nil {
-		t.Fatal("non-GHCR registry token was accepted")
-	}
 }
 
 // --- Resource fitting (resources.go) -------------------------------------
@@ -1992,7 +1390,7 @@ func TestEnsureProductionEnvFitsShippedTemplateToSmallHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := parseEnvFile(string(written))
+	env := envfile.Parse(string(written))
 	for k, v := range env {
 		if !strings.HasSuffix(k, "_CPU_LIMIT") && !strings.HasSuffix(k, "_CPU_RES") {
 			continue
@@ -2073,13 +1471,13 @@ func TestSetEnvFileValuesRewritesTheDefinitionComposeReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]; got != "8" {
+	if got := envfile.Parse(string(data))["WORKER_CPU_CPU_LIMIT"]; got != "8" {
 		t.Errorf("effective WORKER_CPU_CPU_LIMIT = %q, want 8 — the write landed on a line compose ignores:\n%s", got, data)
 	}
 	if n := countEnvDefinitions(string(data), "WORKER_CPU_CPU_LIMIT"); n != 1 {
 		t.Errorf("expected exactly one live definition afterwards, got %d:\n%s", n, data)
 	}
-	if got := parseEnvFile(string(data))["APP_PORT"]; got != "8080" {
+	if got := envfile.Parse(string(data))["APP_PORT"]; got != "8080" {
 		t.Errorf("unrelated key was disturbed: APP_PORT = %q", got)
 	}
 }
@@ -2116,7 +1514,7 @@ func TestSetEnvFileValuesMatchesKeysWithSurroundingSpaces(t *testing.T) {
 			if n := countEnvDefinitions(string(data), "VERSION"); n != 1 {
 				t.Errorf("spaced key was not matched, duplicate appended (%d definitions):\n%s", n, data)
 			}
-			if got := parseEnvFile(string(data))["VERSION"]; got != "v2026.08.05" {
+			if got := envfile.Parse(string(data))["VERSION"]; got != "v2026.08.05" {
 				t.Errorf("effective VERSION = %q, want v2026.08.05", got)
 			}
 		})
@@ -2143,38 +1541,11 @@ func TestSetEnvFileValueSingleKeyHonoursLastWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseEnvFile(string(data))["VERSION"]; got != "v2026.08.05" {
+	if got := envfile.Parse(string(data))["VERSION"]; got != "v2026.08.05" {
 		t.Errorf("effective VERSION = %q, want v2026.08.05:\n%s", got, data)
 	}
 	if n := countEnvDefinitions(string(data), "VERSION"); n != 1 {
 		t.Errorf("expected one live VERSION definition, got %d:\n%s", n, data)
-	}
-}
-
-func TestDuplicateEnvKeysNamesEveryRedefinedKey(t *testing.T) {
-	// A duplicate is a user-visible foot-gun for every key the launcher touches,
-	// not just CPU limits, so it is worth naming in the log at start.
-	content := strings.Join([]string{
-		"# comment",
-		"VERSION=latest",
-		"APP_PORT=8080",
-		"VERSION=v2026.08.05",
-		"WORKER_CPU_CPU_LIMIT = 6",
-		"WORKER_CPU_CPU_LIMIT=16",
-		"#VERSION=commented-out-does-not-count",
-	}, "\n")
-	got := duplicateEnvKeys(content)
-	want := []string{"VERSION", "WORKER_CPU_CPU_LIMIT"}
-	if len(got) != len(want) {
-		t.Fatalf("duplicateEnvKeys = %v, want %v", got, want)
-	}
-	for i, k := range want {
-		if got[i] != k {
-			t.Errorf("duplicateEnvKeys[%d] = %q, want %q", i, got[i], k)
-		}
-	}
-	if dups := duplicateEnvKeys("A=1\nB=2\n"); len(dups) != 0 {
-		t.Errorf("clean file reported duplicates: %v", dups)
 	}
 }
 
@@ -2245,7 +1616,7 @@ func TestEnsureProductionEnvClampsTheEffectiveDuplicateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]
+	got := envfile.Parse(string(data))["WORKER_CPU_CPU_LIMIT"]
 	v, err := strconv.ParseFloat(got, 64)
 	if err != nil {
 		t.Fatalf("WORKER_CPU_CPU_LIMIT=%q is not a number", got)
@@ -2376,7 +1747,7 @@ func TestVerifyFittedModelClampsALimitThatIsNotInTheEnvFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseEnvFile(string(data))["WORKER_REINVENT_CPU_LIMIT"]; got != "6" {
+	if got := envfile.Parse(string(data))["WORKER_REINVENT_CPU_LIMIT"]; got != "6" {
 		t.Errorf("WORKER_REINVENT_CPU_LIMIT = %q, want 6 — the inline default was never brought under the ceiling", got)
 	}
 }
@@ -2414,7 +1785,7 @@ func TestVerifyFittedModelUsesTheSameCeilingsAsTheFitting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := parseEnvFile(string(data))["GATEWAY_CPU_LIMIT"]; got != "8" {
+	if got := envfile.Parse(string(data))["GATEWAY_CPU_LIMIT"]; got != "8" {
 		t.Errorf("GATEWAY_CPU_LIMIT = %q, want 8 (the daemon's count, not the worker headroom)", got)
 	}
 }
@@ -2689,7 +2060,7 @@ func TestFitResourceLimitsAlwaysReportsWhatItDetected(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte(env), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.fitResourceLimits(parseEnvFile(env)); err != nil {
+	if err := app.fitResourceLimits(envfile.Parse(env)); err != nil {
 		t.Fatal(err)
 	}
 	logged, err := os.ReadFile(app.composeLogPath())
@@ -2746,7 +2117,7 @@ func TestResetResourceLimitsRestoresTemplateValuesAndRefits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := parseEnvFile(string(data))
+	env := envfile.Parse(string(data))
 	if env["WORKER_CPU_CPU_LIMIT"] != "4" || env["WORKER_GPU_LONG_CPU_LIMIT"] != "4" {
 		t.Errorf("resource limits not restored from the template: %v", env)
 	}
@@ -2791,7 +2162,7 @@ func TestResetResourceLimitsFitsATemplateTooBigForThisMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := parseEnvFile(string(data))["WORKER_CPU_CPU_LIMIT"]
+	got := envfile.Parse(string(data))["WORKER_CPU_CPU_LIMIT"]
 	if got != "3" { // floor(4 * 0.75)
 		t.Errorf("WORKER_CPU_CPU_LIMIT = %q, want 3 — reset restored the template without re-fitting", got)
 	}
@@ -2815,7 +2186,7 @@ func TestShippedTemplateStartsOnTheSmallestSupportedMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range parseEnvFile(string(data)) {
+	for k, v := range envfile.Parse(string(data)) {
 		if !strings.HasSuffix(k, "_CPU_LIMIT") && !strings.HasSuffix(k, "_CPU_RES") {
 			continue
 		}
@@ -2847,7 +2218,7 @@ func TestTemplatesAgreeOnResourceKeys(t *testing.T) {
 	if err != nil {
 		t.Skipf("sibling repo not checked out: %v", err)
 	}
-	a, b := parseEnvFile(string(ours)), parseEnvFile(string(theirs))
+	a, b := envfile.Parse(string(ours)), envfile.Parse(string(theirs))
 	for _, k := range sortedKeys(a) {
 		if !isResourceEnvKey(k) {
 			continue
@@ -2905,7 +2276,7 @@ func TestFitResourceLimitsPreservesUserChosenConcurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cur := parseEnvFile(env)
+	cur := envfile.Parse(env)
 	if err := app.fitResourceLimits(cur); err != nil {
 		t.Fatal(err)
 	}
@@ -2926,7 +2297,7 @@ func TestFitResourceLimitsPreservesUserChosenConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cur = parseEnvFile(content)
+	cur = envfile.Parse(content)
 	if err := app.fitResourceLimits(cur); err != nil {
 		t.Fatal(err)
 	}
@@ -3031,7 +2402,7 @@ func TestEnsureProductionEnvDerivesCORSFromAppPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := parseEnvFile(content)["CORS_ORIGINS"]
+	got := envfile.Parse(content)["CORS_ORIGINS"]
 	want := "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8081,http://127.0.0.1:8081"
 	if got != want {
 		t.Errorf("CORS_ORIGINS did not follow APP_PORT:\n got %q\nwant %q", got, want)
@@ -3124,7 +2495,7 @@ func TestEnsureProductionEnvSeedsProVersionForUpgradingInstalls(t *testing.T) {
 			t.Fatal(err)
 		}
 		content, _ := app.GetEnvContent("prod")
-		if got := parseEnvFile(content)["PRO_VERSION"]; got != "v2026.06.21" {
+		if got := envfile.Parse(content)["PRO_VERSION"]; got != "v2026.06.21" {
 			t.Errorf("PRO_VERSION not seeded: got %q, want v2026.06.21", got)
 		}
 	})
@@ -3144,54 +2515,21 @@ func TestEnsureProductionEnvSeedsProVersionForUpgradingInstalls(t *testing.T) {
 			t.Fatal(err)
 		}
 		content, _ := app.GetEnvContent("prod")
-		if got := parseEnvFile(content)["PRO_VERSION"]; got != "v2026.07.01" {
+		if got := envfile.Parse(content)["PRO_VERSION"]; got != "v2026.07.01" {
 			t.Errorf("user's PRO_VERSION was overwritten: got %q", got)
 		}
 	})
 }
 
-// TestShouldAdvanceVersionMovesStalePinsForward is the fix for the case that
-// made the whole v2026.08.05 release inert for existing users: their
-// .env.production held VERSION=v2026.06.21, a valid pin, so the old
-// "only rewrite broken values" rule preserved it through both
-// ensureProductionEnv and a full runtime-bundle install. They would take the
-// new launcher and the new bundle and still run the previous images.
-func TestShouldAdvanceVersionMovesStalePinsForward(t *testing.T) {
-	cases := []struct {
-		name    string
-		current string
-		release string
-		want    bool
-		why     string
-	}{
-		{"the reported case", "v2026.06.21", "v2026.08.05", true, "stale pin must advance"},
-		{"equal", "v2026.08.05", "v2026.08.05", false, "nothing to do"},
-		{"pin ahead of runtime", "v2026.09.01", "v2026.08.05", false, "never downgrade"},
-		{"empty", "", "v2026.08.05", true, "no pin at all"},
-		{"placeholder", "CHANGE_ME", "v2026.08.05", true, "broken pin"},
-		{"latest", "latest", "v2026.08.05", true, "mutable pin is rejected elsewhere"},
-		{"unparseable current", "sha-abc1234", "v2026.08.05", false, "digest pins are deliberate"},
-		{"unparseable release", "v2026.06.21", "nightly", false, "refuse to move onto a non-release"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldAdvanceVersion(tc.current, tc.release); got != tc.want {
-				t.Errorf("shouldAdvanceVersion(%q, %q) = %v, want %v — %s",
-					tc.current, tc.release, got, tc.want, tc.why)
-			}
-		})
-	}
-}
-
 func TestInstalledRuntimeVersionReadsMarker(t *testing.T) {
 	dir := t.TempDir()
-	if v := installedRuntimeVersion(dir); v != "" {
+	if v := runtimebundle.InstalledVersion(dir); v != "" {
 		t.Errorf("expected empty for a dir with no marker, got %q", v)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".ligandx-runtime-version"), []byte("v2026.08.05\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if v := installedRuntimeVersion(dir); v != "v2026.08.05" {
+	if v := runtimebundle.InstalledVersion(dir); v != "v2026.08.05" {
 		t.Errorf("got %q, want v2026.08.05 (trailing newline must be trimmed)", v)
 	}
 	// GetDistributionStatus surfaces it so the UI can show what is installed.
@@ -3277,4 +2615,227 @@ func stripWholeEnvDefault(raw string) string {
 		}
 	}
 	return raw
+}
+
+func TestAgentMCPSessionUsesProtectedStoreNotFiles(t *testing.T) {
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	store := secretstore.NewMemory()
+	app.secretStore = store
+	sessionID := "0123456789abcdef0123456789abcdef"
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	secret := agentsession.Secret{
+		Token:        "workspace-token-value",
+		SigningKey:   hex.EncodeToString(private.Seed()),
+		CredentialID: "11111111-2222-3333-4444-555555555555",
+		Scopes:       []string{"projects:read", "jobs:read", "jobs:plan"},
+	}
+	meta := agentsession.Meta{
+		SessionID:        sessionID,
+		CredentialID:     secret.CredentialID,
+		ExpiresAt:        "2026-09-02T00:00:00Z",
+		ExecutionEnabled: false,
+		CreatedAt:        "2026-09-02T00:00:00Z",
+	}
+	if err := agentsession.Persist(store, app.projectPath, meta, secret); err != nil {
+		t.Fatalf("store session: %v", err)
+	}
+	cmd := agentsession.Command(app.projectPath, secret, nil, nil, nil)
+	joinedArgs := strings.Join(cmd.Args, " ")
+	joinedEnv := strings.Join(cmd.Env, "\n")
+	if strings.Contains(joinedArgs, "workspace-token-value") || strings.Contains(joinedArgs, secret.SigningKey) {
+		t.Fatalf("connector arguments must not contain secrets")
+	}
+	if !strings.Contains(joinedEnv, "LIGANDX_AGENT_TOKEN=workspace-token-value") {
+		t.Fatalf("connector must forward the bearer token only through its private environment")
+	}
+	if !strings.Contains(joinedEnv, "LIGANDX_AGENT_CREDENTIAL_ID="+secret.CredentialID) {
+		t.Fatalf("connector must inject the credential id into the child environment")
+	}
+	if !strings.Contains(joinedEnv, "LIGANDX_AGENT_SIGNING_KEY="+secret.SigningKey) {
+		t.Fatalf("connector must inject the signing key into the child environment")
+	}
+	if !strings.Contains(joinedEnv, "LIGANDX_AGENT_SCOPES=projects:read,jobs:read,jobs:plan") {
+		t.Fatalf("connector must inject workspace scopes into the child environment")
+	}
+	raw, err := os.ReadFile(filepath.Join(app.projectPath, ".ligandx-agent-mcp", "sessions.json"))
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if strings.Contains(string(raw), "workspace-token-value") || strings.Contains(string(raw), secret.SigningKey) {
+		t.Fatalf("session metadata must remain non-secret")
+	}
+	if _, err := os.Stat(filepath.Join(app.projectPath, ".ligandx-agent-mcp", "session-"+sessionID)); !os.IsNotExist(err) {
+		t.Fatalf("legacy token files must not be created")
+	}
+	copied, err := app.CopyAgentSessionConfig(sessionID)
+	if err != nil {
+		t.Fatalf("copy config: %v", err)
+	}
+	if strings.Contains(copied, "workspace-token-value") || strings.Contains(copied, secret.SigningKey) {
+		t.Fatalf("copied MCP config must not contain secrets")
+	}
+	if err := agentsession.Delete(store, app.projectPath, sessionID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	if _, err := store.Get(sessionID); err == nil {
+		t.Fatalf("revoked session must disappear from protected storage")
+	}
+}
+
+func TestLinuxWithoutSecretServiceDoesNotBreakNonMCPLauncher(t *testing.T) {
+	app := NewApp()
+	store := secretstore.NewMemory()
+	store.SetUnavailable(secretstore.ErrUnavailable)
+	app.secretStore = store
+	status := app.GetAgentStorageStatus()
+	if status.Available {
+		t.Fatal("storage should report unavailable")
+	}
+	if status.Message == "" {
+		t.Fatal("unavailable storage must include an actionable message")
+	}
+	if app.logStreams == nil {
+		t.Fatal("core launcher state must still initialize when assistant storage is locked")
+	}
+}
+
+// A user who installed before a fix shipped has a runtime directory full of the
+// *old* docker-compose.yml. Downloading a new launcher does not replace it —
+// only "Update now" -> InstallRuntimeBundle does. So the install must be allowed
+// to overwrite the managed runtime directory; short-circuiting on "a compose
+// file is already there" strands them on the broken runtime forever, while the
+// UI reports success.
+func TestManagedRuntimeDirDoesNotShortCircuitInstall(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	// A shipped launcher is a public build, so developerSourceCandidates finds
+	// nothing. Under the dev build tag it would find this checkout instead, so
+	// run from a directory with no compose project around it.
+	t.Chdir(t.TempDir())
+
+	app := NewApp()
+	runtimeDir, err := app.defaultRuntimeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A stale runtime from an earlier release.
+	if err := os.WriteFile(filepath.Join(runtimeDir, "docker-compose.yml"), []byte("services: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, ok := app.findProjectPath()
+	if !ok {
+		t.Fatalf("findProjectPath did not see the runtime dir %s", runtimeDir)
+	}
+	if foreignRuntimeProject(found, runtimeDir) {
+		t.Errorf("install would skip its own managed runtime dir\n found:   %s\n runtime: %s", found, runtimeDir)
+	}
+}
+
+// The counterpart: a developer source checkout, or a runtime shipped next to the
+// executable, is not ours to overwrite. That is the case the skip exists for.
+func TestForeignComposeProjectStillSkipsInstall(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	app := NewApp()
+	runtimeDir, err := app.defaultRuntimeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := t.TempDir()
+	if !foreignRuntimeProject(checkout, runtimeDir) {
+		t.Errorf("a source checkout at %s was treated as the managed runtime %s", checkout, runtimeDir)
+	}
+	if foreignRuntimeProject("", runtimeDir) {
+		t.Error(`no discovered project should not count as "foreign"`)
+	}
+}
+
+// The June runtime declares worker-kinetics as `${WORKER_KINETICS_CPU_LIMIT:-12}`
+// and no template defines that key, so fitResourceEnv — which only walks keys
+// present in .env.production — cannot see the 12. On an 8-thread machine docker
+// then refuses to create the container with the same "range of CPUs is from 0.01
+// to 8.00" the user already had, no matter what they edit. verifyFittedModel must
+// recover the key from the compose text and pin it.
+func TestVerifyFittedModelClampsComposeInlineOnlyDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	compose := `services:
+  worker-cpu:
+    deploy:
+      resources:
+        limits:
+          cpus: ${WORKER_CPU_CPU_LIMIT:-16}
+  worker-kinetics:
+    deploy:
+      resources:
+        limits:
+          cpus: ${WORKER_KINETICS_CPU_LIMIT:-12}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte(compose), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte("WORKER_CPU_CPU_LIMIT=8\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	app.composeConfigFn = func([]string) ([]byte, error) {
+		return []byte(`{"services":{
+			"worker-cpu":{"deploy":{"resources":{"limits":{"cpus":"8"}}}},
+			"worker-kinetics":{"deploy":{"resources":{"limits":{"cpus":"12"}}}}}}`), nil
+	}
+
+	if err := app.verifyFittedModel([]string{"compose", "up", "-d"}); err != nil {
+		t.Fatalf("start was refused for a limit that is fixable from the compose text: %v", err)
+	}
+
+	content, err := app.GetEnvContent("prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := envfile.Parse(content)["WORKER_KINETICS_CPU_LIMIT"]
+	if got != "6" {
+		t.Errorf("WORKER_KINETICS_CPU_LIMIT = %q, want %q (floor(8 * 0.75))", got, "6")
+	}
+}
+
+// rabbitmq/redis/postgres/flower/proxy pin container_name so a local override
+// stack can share them with the real install. That defeats
+// `docker compose --project-name` isolation, which is exactly what candidate
+// validation (and `make validate-staging`) needs when a production stack is
+// already running. The generated snapshot must keep the prefix overridable,
+// and the staging script must actually set it from COMPOSE_PROJECT_NAME.
+func TestValidateStagingIsolatesInfraContainerNames(t *testing.T) {
+	compose, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"rabbitmq", "redis", "postgres", "flower", "proxy"} {
+		want := "${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-" + name
+		if !strings.Contains(string(compose), "container_name: "+want) {
+			t.Errorf("docker-compose.yml: %s must use overridable container_name %s", name, want)
+		}
+		if strings.Contains(string(compose), "container_name: ligandx-"+name+"\n") {
+			t.Errorf("docker-compose.yml: %s still has a hardcoded ligandx-%s container_name", name, name)
+		}
+	}
+
+	script, err := os.ReadFile("scripts/validate-staging-startup.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const exportLine = `export LIGANDX_INFRA_CONTAINER_PREFIX="${LIGANDX_INFRA_CONTAINER_PREFIX:-$COMPOSE_PROJECT_NAME}"`
+	if !strings.Contains(string(script), exportLine) {
+		t.Fatal("validate-staging-startup.sh must export LIGANDX_INFRA_CONTAINER_PREFIX from COMPOSE_PROJECT_NAME so an isolated stack can start next to a running install")
+	}
 }

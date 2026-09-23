@@ -1,4 +1,7 @@
-package main
+// Package agentsession manages the launcher-issued MCP sessions that let a coding
+// assistant reach the local Ligand-X gateway: session metadata on disk, secrets
+// in the OS credential store, request signing, and the agent-mcp connector.
+package agentsession
 
 import (
 	"crypto/ed25519"
@@ -7,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"ligandx-launcher/internal/secretstore"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,19 +18,19 @@ import (
 )
 
 const (
-	agentSessionDirName      = ".ligandx-agent-mcp"
-	agentSessionsJSONFile    = "sessions.json"
-	agentLegacySessionPrefix = "session-"
-	agentProofVersion        = "ligand-x-agent-proof-v1"
+	sessionDirName      = ".ligandx-agent-mcp"
+	sessionsJSONFile    = "sessions.json"
+	legacySessionPrefix = "session-"
+	proofVersion        = "ligand-x-agent-proof-v1"
 )
 
-type AgentStorageStatus struct {
+type StorageStatus struct {
 	Available bool   `json:"available"`
 	Backend   string `json:"backend"`
 	Message   string `json:"message"`
 }
 
-type AgentSessionInfo struct {
+type Info struct {
 	SessionID        string `json:"sessionId"`
 	CredentialID     string `json:"credentialId"`
 	ExpiresAt        string `json:"expiresAt"`
@@ -35,26 +39,26 @@ type AgentSessionInfo struct {
 	SecretPresent    bool   `json:"secretPresent"`
 }
 
-type AgentSessionList struct {
-	Sessions    []AgentSessionInfo `json:"sessions"`
-	LegacyFiles int                `json:"legacyFiles"`
-	Storage     AgentStorageStatus `json:"storage"`
+type List struct {
+	Sessions    []Info        `json:"sessions"`
+	LegacyFiles int           `json:"legacyFiles"`
+	Storage     StorageStatus `json:"storage"`
 }
 
-type AgentSessionHealth struct {
+type Health struct {
 	SessionID string `json:"sessionId"`
 	Status    string `json:"status"`
 	Detail    string `json:"detail"`
 }
 
-type agentSessionSecret struct {
+type Secret struct {
 	Token        string   `json:"token"`
 	SigningKey   string   `json:"signing_key"`
 	CredentialID string   `json:"credential_id"`
 	Scopes       []string `json:"scopes,omitempty"`
 }
 
-type agentSessionMeta struct {
+type Meta struct {
 	SessionID        string `json:"session_id"`
 	CredentialID     string `json:"credential_id"`
 	ExpiresAt        string `json:"expires_at"`
@@ -62,19 +66,19 @@ type agentSessionMeta struct {
 	CreatedAt        string `json:"created_at"`
 }
 
-type agentSessionsFile struct {
-	Sessions []agentSessionMeta `json:"sessions"`
+type sessionsFile struct {
+	Sessions []Meta `json:"sessions"`
 }
 
-func agentSessionDir(runtimeDir string) string {
-	return filepath.Join(runtimeDir, agentSessionDirName)
+func sessionDir(runtimeDir string) string {
+	return filepath.Join(runtimeDir, sessionDirName)
 }
 
-func agentSessionMetadataPath(runtimeDir string) string {
-	return filepath.Join(agentSessionDir(runtimeDir), agentSessionsJSONFile)
+func metadataPath(runtimeDir string) string {
+	return filepath.Join(sessionDir(runtimeDir), sessionsJSONFile)
 }
 
-func generateAgentSessionID() (string, error) {
+func NewSessionID() (string, error) {
 	randomID := make([]byte, 16)
 	if _, err := rand.Read(randomID); err != nil {
 		return "", fmt.Errorf("create assistant session identifier: %w", err)
@@ -82,7 +86,7 @@ func generateAgentSessionID() (string, error) {
 	return hex.EncodeToString(randomID), nil
 }
 
-func generateAgentSigningKey() (privateHex, publicHex string, err error) {
+func NewSigningKey() (privateHex, publicHex string, err error) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return "", "", fmt.Errorf("create assistant signing key: %w", err)
@@ -90,7 +94,7 @@ func generateAgentSigningKey() (privateHex, publicHex string, err error) {
 	return hex.EncodeToString(private.Seed()), hex.EncodeToString(public), nil
 }
 
-func marshalAgentSessionSecret(secret agentSessionSecret) (string, error) {
+func marshalSecret(secret Secret) (string, error) {
 	raw, err := json.Marshal(secret)
 	if err != nil {
 		return "", err
@@ -98,51 +102,51 @@ func marshalAgentSessionSecret(secret agentSessionSecret) (string, error) {
 	return string(raw), nil
 }
 
-func parseAgentSessionSecret(raw string) (agentSessionSecret, error) {
-	var secret agentSessionSecret
+func parseSecret(raw string) (Secret, error) {
+	var secret Secret
 	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &secret); err != nil {
-		return agentSessionSecret{}, fmt.Errorf("assistant session credential is invalid")
+		return Secret{}, fmt.Errorf("assistant session credential is invalid")
 	}
 	if secret.Token == "" || len(secret.Token) > 1024 {
-		return agentSessionSecret{}, fmt.Errorf("assistant session credential is invalid")
+		return Secret{}, fmt.Errorf("assistant session credential is invalid")
 	}
 	seed, err := hex.DecodeString(secret.SigningKey)
 	if err != nil || len(seed) != ed25519.SeedSize {
-		return agentSessionSecret{}, fmt.Errorf("assistant session signing key is invalid")
+		return Secret{}, fmt.Errorf("assistant session signing key is invalid")
 	}
 	if secret.CredentialID == "" {
-		return agentSessionSecret{}, fmt.Errorf("assistant session credential is invalid")
+		return Secret{}, fmt.Errorf("assistant session credential is invalid")
 	}
 	return secret, nil
 }
 
-func loadAgentSessionMetadata(runtimeDir string) ([]agentSessionMeta, error) {
-	raw, err := os.ReadFile(agentSessionMetadataPath(runtimeDir))
+func LoadMetadata(runtimeDir string) ([]Meta, error) {
+	raw, err := os.ReadFile(metadataPath(runtimeDir))
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var file agentSessionsFile
+	var file sessionsFile
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, fmt.Errorf("assistant session metadata is invalid")
 	}
 	return file.Sessions, nil
 }
 
-func saveAgentSessionMetadata(runtimeDir string, sessions []agentSessionMeta) error {
-	if err := os.MkdirAll(agentSessionDir(runtimeDir), 0o700); err != nil {
+func saveMetadata(runtimeDir string, sessions []Meta) error {
+	if err := os.MkdirAll(sessionDir(runtimeDir), 0o700); err != nil {
 		return fmt.Errorf("create local assistant session directory: %w", err)
 	}
 	if sessions == nil {
-		sessions = []agentSessionMeta{}
+		sessions = []Meta{}
 	}
-	raw, err := json.MarshalIndent(agentSessionsFile{Sessions: sessions}, "", "  ")
+	raw, err := json.MarshalIndent(sessionsFile{Sessions: sessions}, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := agentSessionMetadataPath(runtimeDir)
+	path := metadataPath(runtimeDir)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return fmt.Errorf("write assistant session metadata: %w", err)
 	}
@@ -150,8 +154,8 @@ func saveAgentSessionMetadata(runtimeDir string, sessions []agentSessionMeta) er
 	return nil
 }
 
-func upsertAgentSessionMetadata(runtimeDir string, meta agentSessionMeta) error {
-	sessions, err := loadAgentSessionMetadata(runtimeDir)
+func upsertMetadata(runtimeDir string, meta Meta) error {
+	sessions, err := LoadMetadata(runtimeDir)
 	if err != nil {
 		return err
 	}
@@ -166,11 +170,11 @@ func upsertAgentSessionMetadata(runtimeDir string, meta agentSessionMeta) error 
 	if !replaced {
 		sessions = append(sessions, meta)
 	}
-	return saveAgentSessionMetadata(runtimeDir, sessions)
+	return saveMetadata(runtimeDir, sessions)
 }
 
-func removeAgentSessionMetadata(runtimeDir, sessionID string) error {
-	sessions, err := loadAgentSessionMetadata(runtimeDir)
+func removeMetadata(runtimeDir, sessionID string) error {
+	sessions, err := LoadMetadata(runtimeDir)
 	if err != nil {
 		return err
 	}
@@ -180,70 +184,70 @@ func removeAgentSessionMetadata(runtimeDir, sessionID string) error {
 			next = append(next, existing)
 		}
 	}
-	return saveAgentSessionMetadata(runtimeDir, next)
+	return saveMetadata(runtimeDir, next)
 }
 
-func listLegacyAgentTokenFiles(runtimeDir string) []string {
-	entries, err := os.ReadDir(agentSessionDir(runtimeDir))
+func ListLegacyTokenFiles(runtimeDir string) []string {
+	entries, err := os.ReadDir(sessionDir(runtimeDir))
 	if err != nil {
 		return nil
 	}
 	var files []string
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), agentLegacySessionPrefix) {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), legacySessionPrefix) {
 			continue
 		}
-		files = append(files, filepath.Join(agentSessionDir(runtimeDir), entry.Name()))
+		files = append(files, filepath.Join(sessionDir(runtimeDir), entry.Name()))
 	}
 	return files
 }
 
-func deleteLegacyAgentTokenFiles(runtimeDir string) {
-	for _, path := range listLegacyAgentTokenFiles(runtimeDir) {
+func DeleteLegacyTokenFiles(runtimeDir string) {
+	for _, path := range ListLegacyTokenFiles(runtimeDir) {
 		_ = os.Remove(path)
 	}
 }
 
-func storeAgentSession(store SecretStore, runtimeDir string, meta agentSessionMeta, secret agentSessionSecret) error {
+func Persist(store secretstore.Store, runtimeDir string, meta Meta, secret Secret) error {
 	if store == nil {
-		return fmt.Errorf("%w: secure storage is not configured", ErrSecureStorageUnavailable)
+		return fmt.Errorf("%w: secure storage is not configured", secretstore.ErrUnavailable)
 	}
 	if err := store.Available(); err != nil {
 		return err
 	}
-	payload, err := marshalAgentSessionSecret(secret)
+	payload, err := marshalSecret(secret)
 	if err != nil {
 		return err
 	}
 	if err := store.Set(meta.SessionID, payload); err != nil {
 		return err
 	}
-	if err := upsertAgentSessionMetadata(runtimeDir, meta); err != nil {
+	if err := upsertMetadata(runtimeDir, meta); err != nil {
 		_ = store.Delete(meta.SessionID)
 		return err
 	}
 	return nil
 }
 
-func loadAgentSessionSecret(store SecretStore, sessionID string) (agentSessionSecret, error) {
+func LoadSecret(store secretstore.Store, sessionID string) (Secret, error) {
 	if store == nil {
-		return agentSessionSecret{}, fmt.Errorf("%w: secure storage is not configured", ErrSecureStorageUnavailable)
+		return Secret{}, fmt.Errorf("%w: secure storage is not configured", secretstore.ErrUnavailable)
 	}
 	raw, err := store.Get(sessionID)
 	if err != nil {
-		return agentSessionSecret{}, err
+		return Secret{}, err
 	}
-	return parseAgentSessionSecret(raw)
+	return parseSecret(raw)
 }
 
-func deleteStoredAgentSession(store SecretStore, runtimeDir, sessionID string) error {
+func Delete(store secretstore.Store, runtimeDir, sessionID string) error {
 	if store != nil {
 		_ = store.Delete(sessionID)
 	}
-	return removeAgentSessionMetadata(runtimeDir, sessionID)
+	return removeMetadata(runtimeDir, sessionID)
 }
 
-func mcpConfigJSON(executable, runtimeDir, sessionID string) ([]byte, error) {
+func MCPConfigJSON(executable, runtimeDir, sessionID string) ([]byte, error) {
 	return json.MarshalIndent(map[string]interface{}{"mcpServers": map[string]interface{}{
 		"ligand-x": map[string]interface{}{
 			"command": executable,
@@ -252,13 +256,13 @@ func mcpConfigJSON(executable, runtimeDir, sessionID string) ([]byte, error) {
 	}}, "", "  ")
 }
 
-func signAgentProof(privateKeyHex, method, path, bodySHA256 string, timestamp int64, nonce string) (string, error) {
+func signProof(privateKeyHex, method, path, bodySHA256 string, timestamp int64, nonce string) (string, error) {
 	seed, err := hex.DecodeString(privateKeyHex)
 	if err != nil || len(seed) != ed25519.SeedSize {
 		return "", fmt.Errorf("assistant session signing key is invalid")
 	}
 	message := strings.Join([]string{
-		agentProofVersion,
+		proofVersion,
 		strings.ToUpper(method),
 		path,
 		"", // launcher health checks have no query parameters
@@ -275,7 +279,7 @@ func contentSHA256Hex(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func newAgentNonce() (string, error) {
+func newNonce() (string, error) {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -283,14 +287,14 @@ func newAgentNonce() (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-func agentProofHeaders(secret agentSessionSecret, method, path string, body []byte) (map[string]string, error) {
-	nonce, err := newAgentNonce()
+func ProofHeaders(secret Secret, method, path string, body []byte) (map[string]string, error) {
+	nonce, err := newNonce()
 	if err != nil {
 		return nil, err
 	}
 	timestamp := time.Now().Unix()
 	digest := contentSHA256Hex(body)
-	signature, err := signAgentProof(secret.SigningKey, method, path, digest, timestamp, nonce)
+	signature, err := signProof(secret.SigningKey, method, path, digest, timestamp, nonce)
 	if err != nil {
 		return nil, err
 	}
@@ -302,4 +306,22 @@ func agentProofHeaders(secret agentSessionSecret, method, path string, body []by
 		"X-LigandX-Content-SHA256": digest,
 		"X-LigandX-Signature":      signature,
 	}, nil
+}
+
+// Status reports whether the protected store can hold assistant sessions.
+func Status(store secretstore.Store) StorageStatus {
+	if store == nil {
+		store = secretstore.Default()
+	}
+	status := StorageStatus{Backend: store.Name(), Available: true}
+	if err := store.Available(); err != nil {
+		status.Available = false
+		status.Message = fmt.Sprintf(
+			"%s is unavailable or locked. Ligand-X itself still works; reconnecting an AI assistant needs an unlocked %s.",
+			store.Name(), store.Name(),
+		)
+		return status
+	}
+	status.Message = store.Name() + " is ready for assistant sessions."
+	return status
 }

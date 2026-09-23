@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"ligandx-launcher/internal/envfile"
+	"strings"
+)
 
 // proGPUShortGroups lists the service groups that submit work to the gpu-short
 // queue whose task implementations ship only in the Pro worker image.
@@ -49,7 +52,7 @@ func (a *App) productionProVersion() string {
 	if err != nil {
 		return "latest"
 	}
-	parsed := parseEnvFile(content)
+	parsed := envfile.Parse(content)
 	if proVersion := strings.TrimSpace(parsed["PRO_VERSION"]); proVersion != "" {
 		return proVersion
 	}
@@ -57,4 +60,10 @@ func (a *App) productionProVersion() string {
 		return version
 	}
 	return "latest"
+}
+func agentSetupGPUShortWarning(selectedGroups []string) string {
+	if gpuShortImageOverride(selectedGroups, "ghcr.io/example/ligand-x-pro", "v0.0.0") != "" {
+		return "Pro gpu-short jobs (ADMET, Boltz-2, RBFE mapping preview) can run with the selected service groups."
+	}
+	return "WARNING: ADMET, Boltz-2, and RBFE mapping preview templates require the admet, boltz2, or free-energy service groups. Without them, jobs enqueue on the public gpu-short worker and fail at dispatch."
 }

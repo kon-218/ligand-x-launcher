@@ -8,13 +8,13 @@
   "frontend:dev:serverUrl": "",
   "author": {
     "name": "Ligand-X Team",
-    "email": "contact@ligand-x.io"
+    "email": "support@ligand-x.com"
   },
   "info": {
     "companyName": "Ligand-X",
     "productName": "Ligand-X Launcher",
     "productVersion": "1.0.0",
     "copyright": "Copyright © 2026 Ligand-X Team",
-    "comments": "Cross-platform launcher for Ligand-X molecular analysis platform"
+    "comments": "Desktop installer and launcher for the Ligand-X drug-discovery platform"
   }
 }

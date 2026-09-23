@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"ligandx-launcher/internal/envfile"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,7 +176,7 @@ func TestEnsureProductionEnvSyncsGPUShortImage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return strings.TrimSpace(parseEnvFile(content)["LIGANDX_GPU_SHORT_IMAGE"])
+		return strings.TrimSpace(envfile.Parse(content)["LIGANDX_GPU_SHORT_IMAGE"])
 	}
 
 	// Free-only selection: the public default must apply.
@@ -266,7 +267,18 @@ func TestGPUShortOverrideHonoursMirrorPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "registry.internal/ligandx-pro/worker-gpu-short:v-pro"
-	if got := strings.TrimSpace(parseEnvFile(content)["LIGANDX_GPU_SHORT_IMAGE"]); got != want {
+	if got := strings.TrimSpace(envfile.Parse(content)["LIGANDX_GPU_SHORT_IMAGE"]); got != want {
 		t.Fatalf("LIGANDX_GPU_SHORT_IMAGE = %q, want %q", got, want)
+	}
+}
+
+func TestAgentSetupGPUShortWarning(t *testing.T) {
+	withPro := agentSetupGPUShortWarning([]string{"core", "admet"})
+	if !strings.Contains(withPro, "can run") {
+		t.Fatalf("expected positive gpu-short note, got %q", withPro)
+	}
+	withoutPro := agentSetupGPUShortWarning([]string{"core", "docking"})
+	if !strings.Contains(withoutPro, "WARNING") {
+		t.Fatalf("expected warning when Pro gpu-short groups absent, got %q", withoutPro)
 	}
 }

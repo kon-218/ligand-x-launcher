@@ -1,36 +1,30 @@
-# Build outputs (but keep icons and desktop files)
+# Build outputs (icons and packaging assets under build/ are tracked)
 build/bin/
 dist/
 
-# Keep these build assets
-!build/appicon.svg
-!build/appicon.png
-!build/darwin/
-!build/darwin/appicon.png
-!build/windows/
-!build/windows/icon.ico
-!build/linux/
-!build/linux/ligandx-launcher.desktop
-
-# Binaries - NEVER commit these
+# Binaries - never commit these
 *.exe
 *.app
 *.dmg
 *.AppImage
 ligandx-launcher
 ligandx-launcher-*
+*.syso
 
-# Go
-# go.sum is intentionally committed — pins dependency checksums for reproducible builds
-
-# Wails generated
+# Wails-generated bindings
 frontend/wailsjs/
 frontend-public/wailsjs/
 
-# IDE
+# Local runtime state and secrets
+.env.production
+/data/
+
+# Local tooling
 .idea/
 .vscode/
 *.swp
 *.swo
-.env.production
-/data/
+.pytest_cache/
+.claude/
+AGENTS.md
+CLAUDE.md
