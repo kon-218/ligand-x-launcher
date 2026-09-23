@@ -342,6 +342,7 @@ func normalizedEntryName(name string) string {
 func EntryAllowed(name string) bool {
 	allowedFiles := map[string]bool{
 		"docker-compose.yml":        true,
+		"docker-compose.gpu.yml":    true,
 		".env.production.template":  true,
 		"LICENSE":                   true,
 		"README.md":                 true,
