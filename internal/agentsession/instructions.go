@@ -1,16 +1,11 @@
-package main
+package agentsession
 
 import "fmt"
 
-func agentSetupGPUShortWarning(selectedGroups []string) string {
-	if gpuShortImageOverride(selectedGroups, "ghcr.io/example/ligand-x-pro", "v0.0.0") != "" {
-		return "Pro gpu-short jobs (ADMET, Boltz-2, RBFE mapping preview) can run with the selected service groups."
-	}
-	return "WARNING: ADMET, Boltz-2, and RBFE mapping preview templates require the admet, boltz2, or free-energy service groups. Without them, jobs enqueue on the public gpu-short worker and fail at dispatch."
-}
-
-func buildAgentSetupInstructions(mcpConfigJSON, expiresAt string, selectedGroups []string, executionEnabled bool) string {
-	gpuShortNote := agentSetupGPUShortWarning(selectedGroups)
+// SetupInstructions is the text shown to the user alongside a new MCP
+// configuration. gpuShortNote explains whether the selected service groups can
+// run Pro gpu-short templates.
+func SetupInstructions(mcpConfigJSON, expiresAt, gpuShortNote string, executionEnabled bool) string {
 	authority := "This is a planning-only connection: do not submit, cancel, approve, or execute calculations."
 	if executionEnabled {
 		authority = "This connection may execute calculations only after their exact plan hash is approved in the Ligand-X application; it cannot approve its own plans."

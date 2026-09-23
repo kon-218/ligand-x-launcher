@@ -1,17 +1,18 @@
-package main
+package agentsession
 
 import (
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
+	"ligandx-launcher/internal/secretstore"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-func agentMCPCommand(runtimeDir string, secret agentSessionSecret, stdin io.Reader, stdout, stderr io.Writer) *exec.Cmd {
+func Command(runtimeDir string, secret Secret, stdin io.Reader, stdout, stderr io.Writer) *exec.Cmd {
 	args := []string{
 		"compose", "--env-file", filepath.Join(runtimeDir, ".env.production"),
 		"-f", filepath.Join(runtimeDir, "docker-compose.yml"),
@@ -50,11 +51,11 @@ func withoutEnvironmentKey(values []string, key string) []string {
 	return filtered
 }
 
-func runAgentMCPConnector(args []string) error {
-	return runAgentMCPConnectorWithStore(args, defaultSecretStore())
+func RunConnector(args []string) error {
+	return runConnector(args, secretstore.Default())
 }
 
-func runAgentMCPConnectorWithStore(args []string, store SecretStore) error {
+func runConnector(args []string, store secretstore.Store) error {
 	flags := flag.NewFlagSet("agent-mcp", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	runtimeDirArg := flags.String("runtime-dir", "", "Ligand-X runtime directory")
@@ -78,9 +79,9 @@ func runAgentMCPConnectorWithStore(args []string, store SecretStore) error {
 	if err := store.Available(); err != nil {
 		return fmt.Errorf("%s. Unlock it, then reconnect the assistant from Ligand-X Launcher", err.Error())
 	}
-	secret, err := loadAgentSessionSecret(store, *sessionID)
+	secret, err := LoadSecret(store, *sessionID)
 	if err != nil {
 		return err
 	}
-	return agentMCPCommand(runtimeDir, secret, os.Stdin, os.Stdout, os.Stderr).Run()
+	return Command(runtimeDir, secret, os.Stdin, os.Stdout, os.Stderr).Run()
 }

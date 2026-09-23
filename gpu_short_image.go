@@ -58,3 +58,9 @@ func (a *App) productionProVersion() string {
 	}
 	return "latest"
 }
+func agentSetupGPUShortWarning(selectedGroups []string) string {
+	if gpuShortImageOverride(selectedGroups, "ghcr.io/example/ligand-x-pro", "v0.0.0") != "" {
+		return "Pro gpu-short jobs (ADMET, Boltz-2, RBFE mapping preview) can run with the selected service groups."
+	}
+	return "WARNING: ADMET, Boltz-2, and RBFE mapping preview templates require the admet, boltz2, or free-energy service groups. Without them, jobs enqueue on the public gpu-short worker and fail at dispatch."
+}

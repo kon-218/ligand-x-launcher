@@ -1,4 +1,4 @@
-package main
+package secretstore
 
 import (
 	"errors"
@@ -10,13 +10,14 @@ import (
 
 const agentKeyringService = "com.ligandx.launcher.agent"
 
-type nativeSecretStore struct{}
+type native struct{}
 
-func defaultSecretStore() SecretStore {
-	return nativeSecretStore{}
+// Default returns the platform's native protected store.
+func Default() Store {
+	return native{}
 }
 
-func (nativeSecretStore) Name() string {
+func (native) Name() string {
 	switch runtime.GOOS {
 	case "darwin":
 		return "macOS Keychain"
@@ -27,25 +28,25 @@ func (nativeSecretStore) Name() string {
 	}
 }
 
-func (s nativeSecretStore) Available() error {
+func (s native) Available() error {
 	_, err := keyring.Get(agentKeyringService, "__ligandx_probe__")
 	if err == nil || errors.Is(err, keyring.ErrNotFound) {
 		return nil
 	}
-	return fmt.Errorf("%w: %s (%v)", ErrSecureStorageUnavailable, s.Name(), err)
+	return fmt.Errorf("%w: %s (%v)", ErrUnavailable, s.Name(), err)
 }
 
-func (s nativeSecretStore) Set(account, secret string) error {
+func (s native) Set(account, secret string) error {
 	if err := s.Available(); err != nil {
 		return err
 	}
 	if err := keyring.Set(agentKeyringService, account, secret); err != nil {
-		return fmt.Errorf("%w: %s (%v)", ErrSecureStorageUnavailable, s.Name(), err)
+		return fmt.Errorf("%w: %s (%v)", ErrUnavailable, s.Name(), err)
 	}
 	return nil
 }
 
-func (s nativeSecretStore) Get(account string) (string, error) {
+func (s native) Get(account string) (string, error) {
 	if err := s.Available(); err != nil {
 		return "", err
 	}
@@ -54,12 +55,12 @@ func (s nativeSecretStore) Get(account string) (string, error) {
 		return "", fmt.Errorf("assistant session is missing or has been revoked")
 	}
 	if err != nil {
-		return "", fmt.Errorf("%w: %s (%v)", ErrSecureStorageUnavailable, s.Name(), err)
+		return "", fmt.Errorf("%w: %s (%v)", ErrUnavailable, s.Name(), err)
 	}
 	return secret, nil
 }
 
-func (s nativeSecretStore) Delete(account string) error {
+func (s native) Delete(account string) error {
 	if err := s.Available(); err != nil {
 		return err
 	}
@@ -67,5 +68,5 @@ func (s nativeSecretStore) Delete(account string) error {
 	if err == nil || errors.Is(err, keyring.ErrNotFound) {
 		return nil
 	}
-	return fmt.Errorf("%w: %s (%v)", ErrSecureStorageUnavailable, s.Name(), err)
+	return fmt.Errorf("%w: %s (%v)", ErrUnavailable, s.Name(), err)
 }

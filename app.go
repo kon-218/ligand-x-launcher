@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"ligandx-launcher/internal/agentsession"
+	"ligandx-launcher/internal/secretstore"
 	"net/http"
 	"net/url"
 	"os"
@@ -403,21 +405,21 @@ type App struct {
 
 	// secretStore holds assistant MCP credentials. Tests inject a memory
 	// store; production uses OS Keychain / Credential Manager / Secret Service.
-	secretStore SecretStore
+	secretStore secretstore.Store
 }
 
 func NewApp() *App {
 	return &App{
 		logStreams:  make(map[string]context.CancelFunc),
-		secretStore: defaultSecretStore(),
+		secretStore: secretstore.Default(),
 	}
 }
 
-func (a *App) sessionStore() SecretStore {
+func (a *App) sessionStore() secretstore.Store {
 	if a.secretStore != nil {
 		return a.secretStore
 	}
-	return defaultSecretStore()
+	return secretstore.Default()
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -3129,15 +3131,15 @@ func (a *App) createAgentSetup(allowExecution bool) (AgentSetup, error) {
 	if err := store.Available(); err != nil {
 		return AgentSetup{}, fmt.Errorf("%s. Ligand-X itself still works; unlock %s and reconnect the assistant", err.Error(), store.Name())
 	}
-	sessionID, err := generateAgentSessionID()
+	sessionID, err := agentsession.NewSessionID()
 	if err != nil {
 		return AgentSetup{}, err
 	}
-	privateHex, publicHex, err := generateAgentSigningKey()
+	privateHex, publicHex, err := agentsession.NewSigningKey()
 	if err != nil {
 		return AgentSetup{}, err
 	}
-	legacyFiles := listLegacyAgentTokenFiles(a.projectPath)
+	legacyFiles := agentsession.ListLegacyTokenFiles(a.projectPath)
 	scopes := []string{"projects:read", "projects:create", "inputs:prepare", "jobs:read", "jobs:plan"}
 	if allowExecution {
 		scopes = append(scopes, "jobs:submit")
@@ -3185,20 +3187,20 @@ func (a *App) createAgentSetup(allowExecution bool) (AgentSetup, error) {
 	if err != nil {
 		return AgentSetup{}, err
 	}
-	meta := agentSessionMeta{
+	meta := agentsession.Meta{
 		SessionID:        sessionID,
 		CredentialID:     credential.CredentialID,
 		ExpiresAt:        credential.ExpiresAt,
 		ExecutionEnabled: allowExecution,
 		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
-	secret := agentSessionSecret{
+	secret := agentsession.Secret{
 		Token:        credential.Token,
 		SigningKey:   privateHex,
 		CredentialID: credential.CredentialID,
 		Scopes:       scopes,
 	}
-	if err := storeAgentSession(store, a.projectPath, meta, secret); err != nil {
+	if err := agentsession.Persist(store, a.projectPath, meta, secret); err != nil {
 		_ = a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
 			revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials/%s", port, credential.CredentialID), nil)
 			revokeReq.Header.Set("X-API-Key", apiKey)
@@ -3212,18 +3214,18 @@ func (a *App) createAgentSetup(allowExecution bool) (AgentSetup, error) {
 		return AgentSetup{}, err
 	}
 	if len(legacyFiles) > 0 {
-		deleteLegacyAgentTokenFiles(a.projectPath)
+		agentsession.DeleteLegacyTokenFiles(a.projectPath)
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		return AgentSetup{}, fmt.Errorf("resolve launcher connector executable: %w", err)
 	}
-	mcpConfig, err := mcpConfigJSON(executable, a.projectPath, sessionID)
+	mcpConfig, err := agentsession.MCPConfigJSON(executable, a.projectPath, sessionID)
 	if err != nil {
 		return AgentSetup{}, err
 	}
 	config, _ := a.GetLauncherConfig()
-	instructions := buildAgentSetupInstructions(string(mcpConfig), credential.ExpiresAt, config.SelectedGroups, allowExecution)
+	instructions := agentsession.SetupInstructions(string(mcpConfig), credential.ExpiresAt, agentSetupGPUShortWarning(config.SelectedGroups), allowExecution)
 	return AgentSetup{
 		Instructions:   instructions,
 		ExpiresAt:      credential.ExpiresAt,
@@ -3233,20 +3235,20 @@ func (a *App) createAgentSetup(allowExecution bool) (AgentSetup, error) {
 	}, nil
 }
 
-func (a *App) GetAgentStorageStatus() AgentStorageStatus {
-	return storageStatus(a.sessionStore())
+func (a *App) GetAgentStorageStatus() agentsession.StorageStatus {
+	return agentsession.Status(a.sessionStore())
 }
 
-func (a *App) ListAgentSessions() (AgentSessionList, error) {
+func (a *App) ListAgentSessions() (agentsession.List, error) {
 	store := a.sessionStore()
-	status := storageStatus(store)
-	sessions, err := loadAgentSessionMetadata(a.projectPath)
+	status := agentsession.Status(store)
+	sessions, err := agentsession.LoadMetadata(a.projectPath)
 	if err != nil {
-		return AgentSessionList{Storage: status, LegacyFiles: len(listLegacyAgentTokenFiles(a.projectPath))}, err
+		return agentsession.List{Storage: status, LegacyFiles: len(agentsession.ListLegacyTokenFiles(a.projectPath))}, err
 	}
-	infos := make([]AgentSessionInfo, 0, len(sessions))
+	infos := make([]agentsession.Info, 0, len(sessions))
 	for _, meta := range sessions {
-		info := AgentSessionInfo{
+		info := agentsession.Info{
 			SessionID:        meta.SessionID,
 			CredentialID:     meta.CredentialID,
 			ExpiresAt:        meta.ExpiresAt,
@@ -3254,15 +3256,15 @@ func (a *App) ListAgentSessions() (AgentSessionList, error) {
 			CreatedAt:        meta.CreatedAt,
 		}
 		if status.Available {
-			if _, err := loadAgentSessionSecret(store, meta.SessionID); err == nil {
+			if _, err := agentsession.LoadSecret(store, meta.SessionID); err == nil {
 				info.SecretPresent = true
 			}
 		}
 		infos = append(infos, info)
 	}
-	return AgentSessionList{
+	return agentsession.List{
 		Sessions:    infos,
-		LegacyFiles: len(listLegacyAgentTokenFiles(a.projectPath)),
+		LegacyFiles: len(agentsession.ListLegacyTokenFiles(a.projectPath)),
 		Storage:     status,
 	}, nil
 }
@@ -3275,7 +3277,7 @@ func (a *App) CopyAgentSessionConfig(sessionID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve launcher connector executable: %w", err)
 	}
-	raw, err := mcpConfigJSON(executable, a.projectPath, sessionID)
+	raw, err := agentsession.MCPConfigJSON(executable, a.projectPath, sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -3285,21 +3287,21 @@ func (a *App) CopyAgentSessionConfig(sessionID string) (string, error) {
 	return string(raw), nil
 }
 
-func (a *App) CheckAgentSessionHealth(sessionID string) (AgentSessionHealth, error) {
+func (a *App) CheckAgentSessionHealth(sessionID string) (agentsession.Health, error) {
 	store := a.sessionStore()
-	health := AgentSessionHealth{SessionID: sessionID, Status: "unhealthy"}
+	health := agentsession.Health{SessionID: sessionID, Status: "unhealthy"}
 	if err := store.Available(); err != nil {
 		health.Status = "storage_unavailable"
 		health.Detail = fmt.Sprintf("%s. Ligand-X itself still works; unlock %s to use this assistant session.", err.Error(), store.Name())
 		return health, nil
 	}
-	secret, err := loadAgentSessionSecret(store, sessionID)
+	secret, err := agentsession.LoadSecret(store, sessionID)
 	if err != nil {
 		health.Status = "missing_secret"
 		health.Detail = "This session is missing from protected storage. Reconnect the assistant from Ligand-X Launcher."
 		return health, nil
 	}
-	headers, err := agentProofHeaders(secret, http.MethodGet, "/api/agent/v1/capabilities", nil)
+	headers, err := agentsession.ProofHeaders(secret, http.MethodGet, "/api/agent/v1/capabilities", nil)
 	if err != nil {
 		health.Detail = err.Error()
 		return health, nil
@@ -3332,7 +3334,7 @@ func (a *App) CheckAgentSessionHealth(sessionID string) (AgentSessionHealth, err
 
 func (a *App) RevokeAgentSession(sessionID string) error {
 	store := a.sessionStore()
-	sessions, _ := loadAgentSessionMetadata(a.projectPath)
+	sessions, _ := agentsession.LoadMetadata(a.projectPath)
 	var credentialID string
 	for _, meta := range sessions {
 		if meta.SessionID == sessionID {
@@ -3358,7 +3360,7 @@ func (a *App) RevokeAgentSession(sessionID string) error {
 			return err
 		}
 	}
-	return deleteStoredAgentSession(store, a.projectPath, sessionID)
+	return agentsession.Delete(store, a.projectPath, sessionID)
 }
 
 // RevokeAgentAccess invalidates all dedicated assistant workspace tokens for
@@ -3381,11 +3383,11 @@ func (a *App) RevokeAgentAccess() error {
 	if err != nil {
 		return err
 	}
-	sessions, _ := loadAgentSessionMetadata(a.projectPath)
+	sessions, _ := agentsession.LoadMetadata(a.projectPath)
 	for _, meta := range sessions {
-		_ = deleteStoredAgentSession(store, a.projectPath, meta.SessionID)
+		_ = agentsession.Delete(store, a.projectPath, meta.SessionID)
 	}
-	deleteLegacyAgentTokenFiles(a.projectPath)
+	agentsession.DeleteLegacyTokenFiles(a.projectPath)
 	return nil
 }
 

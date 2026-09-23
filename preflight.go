@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"ligandx-launcher/internal/diskfree"
 	"net"
 	"os"
 	"strconv"
@@ -175,7 +176,7 @@ func (a *App) dockerStoragePath() string {
 // not acted on.
 func (a *App) checkDiskSpace(groupIDs []string, groupMap map[string]ServiceGroup, present map[string]bool) (warning string, err error) {
 	path := a.dockerStoragePath()
-	free, ok := diskFreeBytes(path)
+	free, ok := diskfree.Available(path)
 	if !ok {
 		return "", nil // cannot tell; never block on ignorance
 	}

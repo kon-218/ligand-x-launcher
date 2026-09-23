@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"ligandx-launcher/internal/agentsession"
 	"os"
 
 	"github.com/wailsapp/wails/v2"
@@ -17,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "agent-mcp" {
-		if err := runAgentMCPConnector(os.Args[2:]); err != nil {
+		if err := agentsession.RunConnector(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "Ligand-X MCP connector:", err)
 			os.Exit(1)
 		}
