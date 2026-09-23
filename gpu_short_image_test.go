@@ -271,3 +271,14 @@ func TestGPUShortOverrideHonoursMirrorPrefix(t *testing.T) {
 		t.Fatalf("LIGANDX_GPU_SHORT_IMAGE = %q, want %q", got, want)
 	}
 }
+
+func TestAgentSetupGPUShortWarning(t *testing.T) {
+	withPro := agentSetupGPUShortWarning([]string{"core", "admet"})
+	if !strings.Contains(withPro, "can run") {
+		t.Fatalf("expected positive gpu-short note, got %q", withPro)
+	}
+	withoutPro := agentSetupGPUShortWarning([]string{"core", "docking"})
+	if !strings.Contains(withoutPro, "WARNING") {
+		t.Fatalf("expected warning when Pro gpu-short groups absent, got %q", withoutPro)
+	}
+}

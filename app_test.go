@@ -7,11 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"ligandx-launcher/internal/agentsession"
 	"ligandx-launcher/internal/envfile"
 	"ligandx-launcher/internal/license"
 	"ligandx-launcher/internal/runtimebundle"
+	"ligandx-launcher/internal/secretstore"
 	"net"
 	"os"
 	"path/filepath"
@@ -2612,4 +2615,227 @@ func stripWholeEnvDefault(raw string) string {
 		}
 	}
 	return raw
+}
+
+func TestAgentMCPSessionUsesProtectedStoreNotFiles(t *testing.T) {
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	store := secretstore.NewMemory()
+	app.secretStore = store
+	sessionID := "0123456789abcdef0123456789abcdef"
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	secret := agentsession.Secret{
+		Token:        "workspace-token-value",
+		SigningKey:   hex.EncodeToString(private.Seed()),
+		CredentialID: "11111111-2222-3333-4444-555555555555",
+		Scopes:       []string{"projects:read", "jobs:read", "jobs:plan"},
+	}
+	meta := agentsession.Meta{
+		SessionID:        sessionID,
+		CredentialID:     secret.CredentialID,
+		ExpiresAt:        "2026-09-02T00:00:00Z",
+		ExecutionEnabled: false,
+		CreatedAt:        "2026-09-02T00:00:00Z",
+	}
+	if err := agentsession.Persist(store, app.projectPath, meta, secret); err != nil {
+		t.Fatalf("store session: %v", err)
+	}
+	cmd := agentsession.Command(app.projectPath, secret, nil, nil, nil)
+	joinedArgs := strings.Join(cmd.Args, " ")
+	joinedEnv := strings.Join(cmd.Env, "\n")
+	if strings.Contains(joinedArgs, "workspace-token-value") || strings.Contains(joinedArgs, secret.SigningKey) {
+		t.Fatalf("connector arguments must not contain secrets")
+	}
+	if !strings.Contains(joinedEnv, "LIGANDX_AGENT_TOKEN=workspace-token-value") {
+		t.Fatalf("connector must forward the bearer token only through its private environment")
+	}
+	if !strings.Contains(joinedEnv, "LIGANDX_AGENT_CREDENTIAL_ID="+secret.CredentialID) {
+		t.Fatalf("connector must inject the credential id into the child environment")
+	}
+	if !strings.Contains(joinedEnv, "LIGANDX_AGENT_SIGNING_KEY="+secret.SigningKey) {
+		t.Fatalf("connector must inject the signing key into the child environment")
+	}
+	if !strings.Contains(joinedEnv, "LIGANDX_AGENT_SCOPES=projects:read,jobs:read,jobs:plan") {
+		t.Fatalf("connector must inject workspace scopes into the child environment")
+	}
+	raw, err := os.ReadFile(filepath.Join(app.projectPath, ".ligandx-agent-mcp", "sessions.json"))
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if strings.Contains(string(raw), "workspace-token-value") || strings.Contains(string(raw), secret.SigningKey) {
+		t.Fatalf("session metadata must remain non-secret")
+	}
+	if _, err := os.Stat(filepath.Join(app.projectPath, ".ligandx-agent-mcp", "session-"+sessionID)); !os.IsNotExist(err) {
+		t.Fatalf("legacy token files must not be created")
+	}
+	copied, err := app.CopyAgentSessionConfig(sessionID)
+	if err != nil {
+		t.Fatalf("copy config: %v", err)
+	}
+	if strings.Contains(copied, "workspace-token-value") || strings.Contains(copied, secret.SigningKey) {
+		t.Fatalf("copied MCP config must not contain secrets")
+	}
+	if err := agentsession.Delete(store, app.projectPath, sessionID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	if _, err := store.Get(sessionID); err == nil {
+		t.Fatalf("revoked session must disappear from protected storage")
+	}
+}
+
+func TestLinuxWithoutSecretServiceDoesNotBreakNonMCPLauncher(t *testing.T) {
+	app := NewApp()
+	store := secretstore.NewMemory()
+	store.SetUnavailable(secretstore.ErrUnavailable)
+	app.secretStore = store
+	status := app.GetAgentStorageStatus()
+	if status.Available {
+		t.Fatal("storage should report unavailable")
+	}
+	if status.Message == "" {
+		t.Fatal("unavailable storage must include an actionable message")
+	}
+	if app.logStreams == nil {
+		t.Fatal("core launcher state must still initialize when assistant storage is locked")
+	}
+}
+
+// A user who installed before a fix shipped has a runtime directory full of the
+// *old* docker-compose.yml. Downloading a new launcher does not replace it —
+// only "Update now" -> InstallRuntimeBundle does. So the install must be allowed
+// to overwrite the managed runtime directory; short-circuiting on "a compose
+// file is already there" strands them on the broken runtime forever, while the
+// UI reports success.
+func TestManagedRuntimeDirDoesNotShortCircuitInstall(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	// A shipped launcher is a public build, so developerSourceCandidates finds
+	// nothing. Under the dev build tag it would find this checkout instead, so
+	// run from a directory with no compose project around it.
+	t.Chdir(t.TempDir())
+
+	app := NewApp()
+	runtimeDir, err := app.defaultRuntimeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A stale runtime from an earlier release.
+	if err := os.WriteFile(filepath.Join(runtimeDir, "docker-compose.yml"), []byte("services: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, ok := app.findProjectPath()
+	if !ok {
+		t.Fatalf("findProjectPath did not see the runtime dir %s", runtimeDir)
+	}
+	if foreignRuntimeProject(found, runtimeDir) {
+		t.Errorf("install would skip its own managed runtime dir\n found:   %s\n runtime: %s", found, runtimeDir)
+	}
+}
+
+// The counterpart: a developer source checkout, or a runtime shipped next to the
+// executable, is not ours to overwrite. That is the case the skip exists for.
+func TestForeignComposeProjectStillSkipsInstall(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	app := NewApp()
+	runtimeDir, err := app.defaultRuntimeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := t.TempDir()
+	if !foreignRuntimeProject(checkout, runtimeDir) {
+		t.Errorf("a source checkout at %s was treated as the managed runtime %s", checkout, runtimeDir)
+	}
+	if foreignRuntimeProject("", runtimeDir) {
+		t.Error(`no discovered project should not count as "foreign"`)
+	}
+}
+
+// The June runtime declares worker-kinetics as `${WORKER_KINETICS_CPU_LIMIT:-12}`
+// and no template defines that key, so fitResourceEnv — which only walks keys
+// present in .env.production — cannot see the 12. On an 8-thread machine docker
+// then refuses to create the container with the same "range of CPUs is from 0.01
+// to 8.00" the user already had, no matter what they edit. verifyFittedModel must
+// recover the key from the compose text and pin it.
+func TestVerifyFittedModelClampsComposeInlineOnlyDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	compose := `services:
+  worker-cpu:
+    deploy:
+      resources:
+        limits:
+          cpus: ${WORKER_CPU_CPU_LIMIT:-16}
+  worker-kinetics:
+    deploy:
+      resources:
+        limits:
+          cpus: ${WORKER_KINETICS_CPU_LIMIT:-12}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte(compose), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte("WORKER_CPU_CPU_LIMIT=8\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	app.projectPath = tmpDir
+	app.hostResourcesFn = func() hostResources { return hostResources{CPUs: 8} }
+	app.composeConfigFn = func([]string) ([]byte, error) {
+		return []byte(`{"services":{
+			"worker-cpu":{"deploy":{"resources":{"limits":{"cpus":"8"}}}},
+			"worker-kinetics":{"deploy":{"resources":{"limits":{"cpus":"12"}}}}}}`), nil
+	}
+
+	if err := app.verifyFittedModel([]string{"compose", "up", "-d"}); err != nil {
+		t.Fatalf("start was refused for a limit that is fixable from the compose text: %v", err)
+	}
+
+	content, err := app.GetEnvContent("prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := envfile.Parse(content)["WORKER_KINETICS_CPU_LIMIT"]
+	if got != "6" {
+		t.Errorf("WORKER_KINETICS_CPU_LIMIT = %q, want %q (floor(8 * 0.75))", got, "6")
+	}
+}
+
+// rabbitmq/redis/postgres/flower/proxy pin container_name so a local override
+// stack can share them with the real install. That defeats
+// `docker compose --project-name` isolation, which is exactly what candidate
+// validation (and `make validate-staging`) needs when a production stack is
+// already running. The generated snapshot must keep the prefix overridable,
+// and the staging script must actually set it from COMPOSE_PROJECT_NAME.
+func TestValidateStagingIsolatesInfraContainerNames(t *testing.T) {
+	compose, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"rabbitmq", "redis", "postgres", "flower", "proxy"} {
+		want := "${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-" + name
+		if !strings.Contains(string(compose), "container_name: "+want) {
+			t.Errorf("docker-compose.yml: %s must use overridable container_name %s", name, want)
+		}
+		if strings.Contains(string(compose), "container_name: ligandx-"+name+"\n") {
+			t.Errorf("docker-compose.yml: %s still has a hardcoded ligandx-%s container_name", name, name)
+		}
+	}
+
+	script, err := os.ReadFile("scripts/validate-staging-startup.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const exportLine = `export LIGANDX_INFRA_CONTAINER_PREFIX="${LIGANDX_INFRA_CONTAINER_PREFIX:-$COMPOSE_PROJECT_NAME}"`
+	if !strings.Contains(string(script), exportLine) {
+		t.Fatal("validate-staging-startup.sh must export LIGANDX_INFRA_CONTAINER_PREFIX from COMPOSE_PROJECT_NAME so an isolated stack can start next to a running install")
+	}
 }
