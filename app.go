@@ -4,19 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"ligandx-launcher/internal/agentsession"
 	"ligandx-launcher/internal/envfile"
+	"ligandx-launcher/internal/hostmetrics"
+	"ligandx-launcher/internal/license"
 	"ligandx-launcher/internal/runtimebundle"
 	"ligandx-launcher/internal/secretstore"
 	"net/http"
@@ -158,17 +157,6 @@ type RuntimeUpdateStatus struct {
 	Message          string `json:"message"`
 }
 
-type LicenseSummary struct {
-	Edition      string   `json:"edition"`
-	LicenseID    string   `json:"licenseId"`
-	CustomerName string   `json:"customerName"`
-	ExpiresAt    string   `json:"expiresAt"`
-	GraceUntil   string   `json:"graceUntil"`
-	Entitlements []string `json:"entitlements"`
-	Valid        bool     `json:"valid"`
-	Reason       string   `json:"reason"`
-}
-
 type UserSettings struct {
 	CPUWorkerConcurrency int    `json:"cpuWorkerConcurrency"`
 	GPUShortConcurrency  int    `json:"gpuShortConcurrency"`
@@ -187,46 +175,6 @@ type AgentSetup struct {
 	SessionID      string `json:"sessionId"`
 	CredentialID   string `json:"credentialId"`
 	MigratedLegacy bool   `json:"migratedLegacy"`
-}
-
-type licenseBundle struct {
-	Schema    string                 `json:"schema"`
-	Algorithm string                 `json:"algorithm"`
-	Payload   map[string]interface{} `json:"payload"`
-	Signature string                 `json:"signature"`
-}
-
-type registryCredentials struct {
-	Host     string
-	Username string
-	Token    string
-}
-
-type registryTokenRequest struct {
-	LicenseID    string   `json:"license_id"`
-	Groups       []string `json:"groups"`
-	Repositories []string `json:"repositories"`
-	Entitlements []string `json:"entitlements"`
-	MachineID    string   `json:"machine_id"`
-	Version      string   `json:"version"`
-}
-
-type registryTokenResponse struct {
-	Host          string   `json:"host"`
-	Username      string   `json:"username"`
-	Token         string   `json:"token"`
-	IdentityToken string   `json:"identity_token"`
-	RegistryToken string   `json:"registry_token"`
-	ExpiresAt     string   `json:"expires_at"`
-	Repositories  []string `json:"repositories"`
-}
-
-var proEntitlements = map[string]bool{
-	"admet":       true,
-	"qc":          true,
-	"boltz2":      true,
-	"free-energy": true,
-	"reinvent":    true,
 }
 
 // gpuRequiredRuntime lists services that genuinely cannot run without a GPU and
@@ -290,10 +238,6 @@ func runtimePolicy() runtimebundle.Policy {
 // dir whose template still says CHANGE_ME). Keep in sync with the published
 // core image tag and .env.production.template's VERSION.
 const defaultPinnedImageVersion = "v2026.08.05"
-
-const licensePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAcKQKljOJr+vNjOKVewo7sDMaguZUqIJVhYZDgDhnUlE=
------END PUBLIC KEY-----`
 
 type App struct {
 	ctx           context.Context
@@ -1034,11 +978,11 @@ func (a *App) ligandXContainers(ctx context.Context, all bool) ([]container.Summ
 
 func (a *App) GetResourceMetrics() ResourceMetrics {
 	metrics := ResourceMetrics{}
-	metrics.CPUPercent, metrics.LoadAverage = readHostCPU()
-	metrics.MemoryUsedBytes, metrics.MemoryTotalBytes, metrics.MemoryPercent = readHostMemory()
-	metrics.NetRxBytes, metrics.NetTxBytes = readHostNetwork()
-	metrics.DiskUsedBytes, metrics.DiskTotalBytes = readDiskUsage(a.projectPath)
-	metrics.GPUPercent, metrics.GPUMemoryUsedMB, metrics.GPUMemoryTotalMB = readNvidiaGPU()
+	metrics.CPUPercent, metrics.LoadAverage = hostmetrics.CPU()
+	metrics.MemoryUsedBytes, metrics.MemoryTotalBytes, metrics.MemoryPercent = hostmetrics.Memory()
+	metrics.NetRxBytes, metrics.NetTxBytes = hostmetrics.Network()
+	metrics.DiskUsedBytes, metrics.DiskTotalBytes = hostmetrics.DiskUsage(a.projectPath)
+	metrics.GPUPercent, metrics.GPUMemoryUsedMB, metrics.GPUMemoryTotalMB = hostmetrics.NvidiaGPU()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
@@ -1067,7 +1011,7 @@ func (a *App) GetResourceMetrics() ResourceMetrics {
 					metric.CPUPercent = calculateContainerCPU(stat)
 					metric.MemoryBytes = stat.MemoryStats.Usage
 					metric.MemoryLimit = stat.MemoryStats.Limit
-					metric.MemoryText = fmt.Sprintf("%s / %s", formatBytes(metric.MemoryBytes), formatBytes(metric.MemoryLimit))
+					metric.MemoryText = fmt.Sprintf("%s / %s", hostmetrics.FormatBytes(metric.MemoryBytes), hostmetrics.FormatBytes(metric.MemoryLimit))
 				}
 				_ = stats.Body.Close()
 			}
@@ -1119,158 +1063,6 @@ func calculateContainerCPU(stat container.StatsResponse) float64 {
 		return 0
 	}
 	return (cpuDelta / systemDelta) * onlineCPUs * 100
-}
-
-func readHostCPU() (float64, string) {
-	idle1, total1, ok1 := readProcStat()
-	time.Sleep(120 * time.Millisecond)
-	idle2, total2, ok2 := readProcStat()
-	load := "-"
-	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
-		fields := strings.Fields(string(data))
-		if len(fields) >= 3 {
-			load = strings.Join(fields[:3], " ")
-		}
-	}
-	if !ok1 || !ok2 || total2 <= total1 {
-		return 0, load
-	}
-	idleDelta := float64(idle2 - idle1)
-	totalDelta := float64(total2 - total1)
-	return (1 - idleDelta/totalDelta) * 100, load
-}
-
-func readProcStat() (uint64, uint64, bool) {
-	data, err := os.ReadFile("/proc/stat")
-	if err != nil {
-		return 0, 0, false
-	}
-	line := strings.SplitN(string(data), "\n", 2)[0]
-	fields := strings.Fields(line)
-	if len(fields) < 5 || fields[0] != "cpu" {
-		return 0, 0, false
-	}
-	var total uint64
-	var values []uint64
-	for _, f := range fields[1:] {
-		v, err := strconv.ParseUint(f, 10, 64)
-		if err != nil {
-			return 0, 0, false
-		}
-		values = append(values, v)
-		total += v
-	}
-	idle := values[3]
-	if len(values) > 4 {
-		idle += values[4]
-	}
-	return idle, total, true
-}
-
-func readHostMemory() (uint64, uint64, float64) {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0, 0, 0
-	}
-	values := map[string]uint64{}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		key := strings.TrimSuffix(fields[0], ":")
-		v, _ := strconv.ParseUint(fields[1], 10, 64)
-		values[key] = v * 1024
-	}
-	total := values["MemTotal"]
-	available := values["MemAvailable"]
-	if total == 0 || available > total {
-		return 0, total, 0
-	}
-	used := total - available
-	return used, total, float64(used) / float64(total) * 100
-}
-
-func readHostNetwork() (uint64, uint64) {
-	data, err := os.ReadFile("/proc/net/dev")
-	if err != nil {
-		return 0, 0
-	}
-	var rx, tx uint64
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.Contains(line, ":") {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		iface := strings.TrimSpace(parts[0])
-		if iface == "lo" {
-			continue
-		}
-		fields := strings.Fields(parts[1])
-		if len(fields) < 16 {
-			continue
-		}
-		r, _ := strconv.ParseUint(fields[0], 10, 64)
-		t, _ := strconv.ParseUint(fields[8], 10, 64)
-		rx += r
-		tx += t
-	}
-	return rx, tx
-}
-
-func readDiskUsage(path string) (uint64, uint64) {
-	if goruntime.GOOS == "windows" {
-		return 0, 0
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "df", "-k", path).Output()
-	if err != nil {
-		return 0, 0
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) < 2 {
-		return 0, 0
-	}
-	fields := strings.Fields(lines[len(lines)-1])
-	if len(fields) < 4 {
-		return 0, 0
-	}
-	totalKB, _ := strconv.ParseUint(fields[1], 10, 64)
-	usedKB, _ := strconv.ParseUint(fields[2], 10, 64)
-	return usedKB * 1024, totalKB * 1024
-}
-
-func readNvidiaGPU() (float64, uint64, uint64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits").Output()
-	if err != nil {
-		return 0, 0, 0
-	}
-	line := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
-	parts := strings.Split(line, ",")
-	if len(parts) < 3 {
-		return 0, 0, 0
-	}
-	util, _ := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-	used, _ := strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 64)
-	total, _ := strconv.ParseUint(strings.TrimSpace(parts[2]), 10, 64)
-	return util, used, total
-}
-
-func formatBytes(n uint64) string {
-	units := []string{"B", "KB", "MB", "GB", "TB"}
-	v := float64(n)
-	i := 0
-	for v >= 1024 && i < len(units)-1 {
-		v /= 1024
-		i++
-	}
-	if i == 0 {
-		return fmt.Sprintf("%d %s", n, units[i])
-	}
-	return fmt.Sprintf("%.1f %s", v, units[i])
 }
 
 func (a *App) GetSystemStatus() SystemStatus {
@@ -3656,7 +3448,7 @@ func coreServiceImages(version string) []string {
 }
 
 func (a *App) GetServiceGroups() []ServiceGroup {
-	license := a.GetLicenseStatus()
+	licenseStatus := a.GetLicenseStatus()
 	version, proPrefix := a.productionImageSettings()
 	// Pro images are tagged independently of the public ones; compose resolves
 	// them as ${PRO_VERSION:-${VERSION}}. The shared gpu-short worker is pulled
@@ -3805,7 +3597,7 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			groups[i].Edition = "free"
 		}
 		if groups[i].Edition == "pro" {
-			groups[i].Licensed = license.HasEntitlement(groups[i].Entitlement)
+			groups[i].Licensed = licenseStatus.HasEntitlement(groups[i].Entitlement)
 			groups[i].Locked = !groups[i].Licensed
 		} else {
 			groups[i].Licensed = true
@@ -3932,10 +3724,10 @@ func (a *App) licensePath() string {
 	return filepath.Join(a.projectPath, "data", "license", "ligandx-license.json")
 }
 
-func (a *App) GetLicenseStatus() LicenseSummary {
+func (a *App) GetLicenseStatus() license.Summary {
 	status, err := a.readLicenseStatus()
 	if err != nil {
-		return LicenseSummary{Edition: "free", Valid: true, Reason: err.Error()}
+		return license.Summary{Edition: "free", Valid: true, Reason: err.Error()}
 	}
 	return status
 }
@@ -3949,10 +3741,10 @@ func (a *App) persistImportedLicense(data []byte) error {
 	return envfile.WritePrivate(dest, data)
 }
 
-func (a *App) ImportLicense(path string) (LicenseSummary, error) {
+func (a *App) ImportLicense(path string) (license.Summary, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return LicenseSummary{}, err
+		return license.Summary{}, err
 	}
 
 	status, err := a.verifyLicenseData(data)
@@ -3974,7 +3766,7 @@ func (a *App) ImportLicense(path string) (LicenseSummary, error) {
 	return status, nil
 }
 
-func (a *App) SelectLicenseFile() (LicenseSummary, error) {
+func (a *App) SelectLicenseFile() (license.Summary, error) {
 	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "Select Ligand-X License",
 		Filters: []wailsRuntime.FileFilter{
@@ -3982,224 +3774,39 @@ func (a *App) SelectLicenseFile() (LicenseSummary, error) {
 		},
 	})
 	if err != nil {
-		return LicenseSummary{}, err
+		return license.Summary{}, err
 	}
 	if path == "" {
-		return LicenseSummary{Edition: "free", Valid: true, Reason: "no_license"}, nil
+		return license.Summary{Edition: "free", Valid: true, Reason: "no_license"}, nil
 	}
 	return a.ImportLicense(path)
 }
 
-func (a *App) readLicenseStatus() (LicenseSummary, error) {
+func (a *App) readLicenseStatus() (license.Summary, error) {
 	envfile.EnsurePrivateMode(a.licensePath())
 	data, err := os.ReadFile(a.licensePath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return LicenseSummary{Edition: "free", Valid: true, Reason: "no_license"}, nil
+			return license.Summary{Edition: "free", Valid: true, Reason: "no_license"}, nil
 		}
-		return LicenseSummary{}, err
+		return license.Summary{}, err
 	}
 	return a.verifyLicenseData(data)
-}
-
-func verifyLicenseData(data []byte) (LicenseSummary, error) {
-	return verifyLicenseDataWithPublicKey(data, []byte(licensePublicKeyPEM))
 }
 
 // verifyLicenseData on the App always uses the embedded public key.
 // Allowing a file or env-var override here would let anyone substitute
 // their own keypair and forge licenses without modifying the binary.
-func (a *App) verifyLicenseData(data []byte) (LicenseSummary, error) {
-	return verifyLicenseDataWithPublicKey(data, []byte(licensePublicKeyPEM))
+func (a *App) verifyLicenseData(data []byte) (license.Summary, error) {
+	return license.VerifyWithPublicKey(data, []byte(license.PublicKeyPEM))
 }
 
-func canonicalLicensePayload(payload map[string]interface{}) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(payload); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSpace(buf.Bytes()), nil
-}
-
-func verifyLicenseDataWithPublicKey(data []byte, publicKeyPEM []byte) (LicenseSummary, error) {
-	var bundle licenseBundle
-	if err := json.Unmarshal(data, &bundle); err != nil {
-		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_license_json"}, err
-	}
-	if bundle.Algorithm != "Ed25519" {
-		return LicenseSummary{Edition: "free", Valid: false, Reason: "unsupported_algorithm"}, nil
-	}
-
-	block, _ := pem.Decode(publicKeyPEM)
-	if block == nil {
-		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_public_key"}, nil
-	}
-	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_public_key"}, err
-	}
-	publicKey, ok := parsed.(ed25519.PublicKey)
-	if !ok {
-		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_public_key_type"}, nil
-	}
-
-	canonical, err := canonicalLicensePayload(bundle.Payload)
-	if err != nil {
-		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_payload"}, err
-	}
-	signature, err := base64.StdEncoding.DecodeString(bundle.Signature)
-	if err != nil {
-		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_signature_encoding"}, err
-	}
-	if !ed25519.Verify(publicKey, canonical, signature) {
-		return LicenseSummary{Edition: "free", Valid: false, Reason: "invalid_signature"}, nil
-	}
-
-	return summarizeLicensePayload(bundle.Payload), nil
-}
-
-func summarizeLicensePayload(payload map[string]interface{}) LicenseSummary {
-	edition, _ := payload["edition"].(string)
-	entitlements := stringSlice(payload["entitlements"])
-	if edition == "academic" {
-		entitlements = []string{"admet", "boltz2", "free-energy", "qc", "reinvent"}
-	}
-
-	status := LicenseSummary{
-		Edition:      edition,
-		LicenseID:    stringValue(payload["license_id"]),
-		ExpiresAt:    stringValue(payload["expires_at"]),
-		GraceUntil:   stringValue(payload["grace_until"]),
-		Entitlements: entitlements,
-		Valid:        true,
-		Reason:       "ok",
-	}
-	if customer, ok := payload["customer"].(map[string]interface{}); ok {
-		status.CustomerName = stringValue(customer["name"])
-	}
-	if edition != "academic" && edition != "pro" {
-		status.Edition = "free"
-		status.Valid = false
-		status.Reason = "invalid_edition"
-		return status
-	}
-	if edition == "pro" && len(entitlements) == 0 {
-		status.Edition = "free"
-		status.Valid = false
-		status.Reason = "pro_license_requires_entitlements"
-		return status
-	}
-	for _, entitlement := range entitlements {
-		if !proEntitlements[entitlement] {
-			status.Edition = "free"
-			status.Valid = false
-			status.Reason = "unknown_entitlement"
-			return status
-		}
-	}
-
-	now := time.Now().UTC()
-	if status.ExpiresAt != "" {
-		if expiresAt, err := time.Parse(time.RFC3339, status.ExpiresAt); err == nil && now.After(expiresAt) {
-			if status.GraceUntil == "" {
-				status.Edition = "free"
-				status.Valid = false
-				status.Reason = "license_expired"
-				return status
-			}
-			if graceUntil, err := time.Parse(time.RFC3339, status.GraceUntil); err != nil || now.After(graceUntil) {
-				status.Edition = "free"
-				status.Valid = false
-				status.Reason = "license_expired"
-				return status
-			}
-		}
-	}
-
-	return status
-}
-
-func stringValue(value interface{}) string {
-	if value == nil {
-		return ""
-	}
-	if s, ok := value.(string); ok {
-		return s
-	}
-	return fmt.Sprintf("%v", value)
-}
-
-func stringSlice(value interface{}) []string {
-	raw, ok := value.([]interface{})
-	if !ok {
-		return []string{}
-	}
-	result := make([]string, 0, len(raw))
-	for _, item := range raw {
-		if s, ok := item.(string); ok {
-			result = append(result, s)
-		}
-	}
-	return result
-}
-
-func (s LicenseSummary) HasEntitlement(entitlement string) bool {
-	if entitlement == "" {
-		return true
-	}
-	if s.Valid && s.Edition == "academic" {
-		return true
-	}
-	if !s.Valid || s.Edition != "pro" {
-		return false
-	}
-	for _, candidate := range s.Entitlements {
-		if candidate == entitlement {
-			return true
-		}
-	}
-	return false
-}
-
-func registryCredentialsFromLicenseData(data, publicKeyPEM []byte) (registryCredentials, bool) {
-	status, err := verifyLicenseDataWithPublicKey(data, publicKeyPEM)
-	if err != nil || !status.Valid {
-		return registryCredentials{}, false
-	}
-
-	var bundle licenseBundle
-	if err := json.Unmarshal(data, &bundle); err != nil {
-		return registryCredentials{}, false
-	}
-	// Bridge registry credentials embedded in the license are an offline /
-	// airgap fallback. They MUST be opt-in via an explicit signed claim and
-	// are accepted only after the complete certificate verifies above.
-	if mode := stringValue(bundle.Payload["registry_mode"]); mode != "bridge" {
-		return registryCredentials{}, false
-	}
-	registry, ok := bundle.Payload["registry"].(map[string]interface{})
-	if !ok {
-		return registryCredentials{}, false
-	}
-	creds := registryCredentials{
-		Host:     strings.ToLower(strings.TrimSpace(stringValue(registry["host"]))),
-		Username: strings.TrimSpace(stringValue(registry["username"])),
-		Token:    strings.TrimSpace(stringValue(registry["token"])),
-	}
-	if creds.Host != "ghcr.io" || creds.Username == "" || creds.Token == "" {
-		return registryCredentials{}, false
-	}
-	return creds, true
-}
-
-func (a *App) registryCredentialsFromLicense() (registryCredentials, bool) {
+func (a *App) registryCredentialsFromLicense() (license.RegistryCredentials, bool) {
 	data, err := os.ReadFile(a.licensePath())
 	if err != nil {
-		return registryCredentials{}, false
+		return license.RegistryCredentials{}, false
 	}
-	return registryCredentialsFromLicenseData(data, []byte(licensePublicKeyPEM))
+	return license.RegistryCredentialsFromData(data, []byte(license.PublicKeyPEM))
 }
 
 func needsProRegistryAuth(groupIDs []string, groupMap map[string]ServiceGroup) bool {
@@ -4248,72 +3855,45 @@ func machineID() string {
 	return fmt.Sprintf("%s/%s", goruntime.GOOS, host)
 }
 
-func validateRegistryTokenResponse(tokenResp registryTokenResponse, repositories []string) (registryCredentials, error) {
-	secret := tokenResp.Token
-	if secret == "" {
-		secret = tokenResp.IdentityToken
-	}
-	if secret == "" {
-		secret = tokenResp.RegistryToken
-	}
-	creds := registryCredentials{
-		Host:     stringValueOrDefault(tokenResp.Host, "ghcr.io"),
-		Username: stringValueOrDefault(tokenResp.Username, "oauth2"),
-		Token:    secret,
-	}
-	expiresAt, expiryErr := time.Parse(time.RFC3339, tokenResp.ExpiresAt)
-	now := time.Now().UTC()
-	if expiryErr != nil || now.After(expiresAt) || expiresAt.After(now.Add(15*time.Minute+30*time.Second)) {
-		return registryCredentials{}, fmt.Errorf("registry token broker returned an invalid expiry")
-	}
-	if !slices.Equal(tokenResp.Repositories, repositories) {
-		return registryCredentials{}, fmt.Errorf("registry token broker returned an unexpected repository scope")
-	}
-	if creds.Host != "ghcr.io" || creds.Token == "" {
-		return registryCredentials{}, fmt.Errorf("registry token broker response did not include valid GHCR credentials")
-	}
-	return creds, nil
-}
-
-func (a *App) registryCredentialsFromBroker(groupIDs []string, groupMap map[string]ServiceGroup) (registryCredentials, bool, error) {
+func (a *App) registryCredentialsFromBroker(groupIDs []string, groupMap map[string]ServiceGroup) (license.RegistryCredentials, bool, error) {
 	tokenURL := strings.TrimSpace(os.Getenv("LIGANDX_REGISTRY_TOKEN_URL"))
 	if tokenURL == "" {
-		return registryCredentials{}, false, nil
+		return license.RegistryCredentials{}, false, nil
 	}
 	parsedTokenURL, parseErr := url.Parse(tokenURL)
 	if parseErr != nil || parsedTokenURL.Scheme != "https" || parsedTokenURL.Hostname() == "" || parsedTokenURL.User != nil {
-		return registryCredentials{}, true, fmt.Errorf("LIGANDX_REGISTRY_TOKEN_URL must be an HTTPS URL without embedded credentials")
+		return license.RegistryCredentials{}, true, fmt.Errorf("LIGANDX_REGISTRY_TOKEN_URL must be an HTTPS URL without embedded credentials")
 	}
 	accessToken := strings.TrimSpace(os.Getenv("LIGANDX_VENDOR_ACCESS_TOKEN"))
 	if accessToken == "" {
-		return registryCredentials{}, true, fmt.Errorf("LIGANDX_VENDOR_ACCESS_TOKEN is required when LIGANDX_REGISTRY_TOKEN_URL is set")
+		return license.RegistryCredentials{}, true, fmt.Errorf("LIGANDX_VENDOR_ACCESS_TOKEN is required when LIGANDX_REGISTRY_TOKEN_URL is set")
 	}
-	license := a.GetLicenseStatus()
-	if !license.Valid || license.Edition == "free" {
-		return registryCredentials{}, true, fmt.Errorf("valid Pro or Academic license required before requesting registry credentials")
+	licenseStatus := a.GetLicenseStatus()
+	if !licenseStatus.Valid || licenseStatus.Edition == "free" {
+		return license.RegistryCredentials{}, true, fmt.Errorf("valid Pro or Academic license required before requesting registry credentials")
 	}
 	version, _ := a.productionImageSettings()
 	if !envfile.IsPinnedVersion(version) {
-		return registryCredentials{}, true, fmt.Errorf("registry token request requires an immutable VERSION")
+		return license.RegistryCredentials{}, true, fmt.Errorf("registry token request requires an immutable VERSION")
 	}
 	repositories := selectedProRepositories(groupIDs, groupMap)
-	reqBody := registryTokenRequest{
-		LicenseID:    license.LicenseID,
+	reqBody := license.RegistryTokenRequest{
+		LicenseID:    licenseStatus.LicenseID,
 		Groups:       groupIDs,
 		Repositories: repositories,
-		Entitlements: license.Entitlements,
+		Entitlements: licenseStatus.Entitlements,
 		MachineID:    machineID(),
 		Version:      version,
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return registryCredentials{}, true, err
+		return license.RegistryCredentials{}, true, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
 	if err != nil {
-		return registryCredentials{}, true, err
+		return license.RegistryCredentials{}, true, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
@@ -4328,42 +3908,35 @@ func (a *App) registryCredentialsFromBroker(groupIDs []string, groupMap map[stri
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return registryCredentials{}, true, err
+		return license.RegistryCredentials{}, true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return registryCredentials{}, true, fmt.Errorf("registry token broker returned %s: %s", resp.Status, strings.TrimSpace(string(limited)))
+		return license.RegistryCredentials{}, true, fmt.Errorf("registry token broker returned %s: %s", resp.Status, strings.TrimSpace(string(limited)))
 	}
-	var tokenResp registryTokenResponse
+	var tokenResp license.RegistryTokenResponse
 	decoder := json.NewDecoder(io.LimitReader(resp.Body, 64*1024))
 	if err := decoder.Decode(&tokenResp); err != nil {
-		return registryCredentials{}, true, err
+		return license.RegistryCredentials{}, true, err
 	}
-	creds, validationErr := validateRegistryTokenResponse(tokenResp, repositories)
+	creds, validationErr := license.ValidateRegistryTokenResponse(tokenResp, repositories)
 	if validationErr != nil {
-		return registryCredentials{}, true, validationErr
+		return license.RegistryCredentials{}, true, validationErr
 	}
 	return creds, true, nil
 }
 
-func stringValueOrDefault(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
-}
-
-type bridgeCredentialLoader func() (registryCredentials, bool)
+type bridgeCredentialLoader func() (license.RegistryCredentials, bool)
 
 func (a *App) registryCredentialsForProImagesForBuild(
 	groupIDs []string,
 	groupMap map[string]ServiceGroup,
 	publicBuild bool,
 	loadBridge bridgeCredentialLoader,
-) (registryCredentials, bool, error) {
+) (license.RegistryCredentials, bool, error) {
 	if !needsProRegistryAuth(groupIDs, groupMap) {
-		return registryCredentials{}, false, nil
+		return license.RegistryCredentials{}, false, nil
 	}
 
 	if creds, configured, err := a.registryCredentialsFromBroker(groupIDs, groupMap); configured || err != nil {
@@ -4375,34 +3948,18 @@ func (a *App) registryCredentialsForProImagesForBuild(
 	}
 
 	if publicBuild {
-		return registryCredentials{}, false, fmt.Errorf("public launcher requires the short-lived registry token broker or signed bridge credentials")
+		return license.RegistryCredentials{}, false, fmt.Errorf("public launcher requires the short-lived registry token broker or signed bridge credentials")
 	}
-	return registryCredentials{}, false, fmt.Errorf("Pro image pull requires LIGANDX_REGISTRY_TOKEN_URL/LIGANDX_VENDOR_ACCESS_TOKEN or signed bridge credentials in the license")
+	return license.RegistryCredentials{}, false, fmt.Errorf("Pro image pull requires LIGANDX_REGISTRY_TOKEN_URL/LIGANDX_VENDOR_ACCESS_TOKEN or signed bridge credentials in the license")
 }
 
-func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[string]ServiceGroup) (registryCredentials, bool, error) {
+func (a *App) registryCredentialsForProImages(groupIDs []string, groupMap map[string]ServiceGroup) (license.RegistryCredentials, bool, error) {
 	return a.registryCredentialsForProImagesForBuild(
 		groupIDs,
 		groupMap,
 		isPublicBuild,
 		a.registryCredentialsFromLicense,
 	)
-}
-
-func encodeRegistryAuth(creds registryCredentials) (string, error) {
-	if creds.Host == "" || creds.Token == "" {
-		return "", nil
-	}
-	payload := map[string]string{
-		"username":      creds.Username,
-		"password":      creds.Token,
-		"serveraddress": creds.Host,
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
-	return base64.URLEncoding.EncodeToString(raw), nil
 }
 
 func (a *App) dockerLoginForProImages(groupIDs []string, groupMap map[string]ServiceGroup) error {
@@ -4812,7 +4369,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 		registryAuth := ""
 		if hasRegistryAuth {
 			var encodeErr error
-			registryAuth, encodeErr = encodeRegistryAuth(creds)
+			registryAuth, encodeErr = license.EncodeRegistryAuth(creds)
 			if encodeErr != nil {
 				wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
 					Service:   "launcher",

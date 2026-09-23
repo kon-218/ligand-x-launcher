@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"ligandx-launcher/internal/diskfree"
 	"ligandx-launcher/internal/envfile"
+	"ligandx-launcher/internal/hostmetrics"
 	"net"
 	"os"
 	"strconv"
@@ -177,7 +177,7 @@ func (a *App) dockerStoragePath() string {
 // not acted on.
 func (a *App) checkDiskSpace(groupIDs []string, groupMap map[string]ServiceGroup, present map[string]bool) (warning string, err error) {
 	path := a.dockerStoragePath()
-	free, ok := diskfree.Available(path)
+	free, ok := hostmetrics.DiskFree(path)
 	if !ok {
 		return "", nil // cannot tell; never block on ignorance
 	}
@@ -202,13 +202,13 @@ func (a *App) checkDiskSpaceWithFree(groupIDs []string, groupMap map[string]Serv
 		return "", fmt.Errorf(
 			"not enough free disk space to download images: %s available on %s, "+
 				"at least %s is needed for even one service. Free up space and try again",
-			formatBytes(free), path, formatBytes(hardFloorFreeBytes))
+			hostmetrics.FormatBytes(free), path, hostmetrics.FormatBytes(hardFloorFreeBytes))
 	}
 	if required > 0 && free < required {
 		return fmt.Sprintf(
 			"Low disk space: about %s may be needed for the selected services but only %s is free on %s. "+
 				"The download may fail partway — consider freeing space or selecting fewer services.",
-			formatBytes(required), formatBytes(free), path), nil
+			hostmetrics.FormatBytes(required), hostmetrics.FormatBytes(free), path), nil
 	}
 	return "", nil
 }

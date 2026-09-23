@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"ligandx-launcher/internal/envfile"
+	"ligandx-launcher/internal/hostmetrics"
 	"math"
 	"os"
 	"os/exec"
@@ -80,7 +81,7 @@ func (a *App) detectHostResources() hostResources {
 			return a.hostRes
 		}
 	}
-	_, memTotal, _ := readHostMemory() // Linux-only; 0 elsewhere
+	_, memTotal, _ := hostmetrics.Memory() // Linux-only; 0 elsewhere
 	return hostResources{CPUs: goruntime.NumCPU(), MemBytes: int64(memTotal)}
 }
 
@@ -295,7 +296,7 @@ func (a *App) fitResourceLimits(cur map[string]string) error {
 	// the original report, so the line is cheap at the price.
 	machine := fmt.Sprintf("%d CPUs", host.CPUs)
 	if host.MemBytes > 0 {
-		machine += ", " + formatBytes(uint64(host.MemBytes)) + " RAM"
+		machine += ", " + hostmetrics.FormatBytes(uint64(host.MemBytes)) + " RAM"
 	}
 	summary := fmt.Sprintf("Detected %s (%s); resource limits fitted", machine, host.CPUSource())
 	if len(notes) > 0 {
