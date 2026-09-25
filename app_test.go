@@ -117,13 +117,19 @@ func TestGetServiceGroups(t *testing.T) {
 		imageSet[img] = true
 	}
 	infraOnly := map[string]bool{"proxy": true} // shares the nginx image already listed
+	// Same image, different entrypoint command (see docker-compose.yml).
+	sharedImage := map[string]string{"worker-control": "worker-cpu", "celery-beat": "worker-cpu"}
 	for _, svc := range coreServiceNames() {
 		if infraOnly[svc] {
 			continue
 		}
+		want := svc
+		if image, ok := sharedImage[svc]; ok {
+			want = image
+		}
 		found := false
 		for img := range imageSet {
-			if strings.Contains(img, svc) {
+			if strings.Contains(img, want) {
 				found = true
 				break
 			}
@@ -131,6 +137,34 @@ func TestGetServiceGroups(t *testing.T) {
 		if !found {
 			t.Errorf("core service %q has no matching image in coreServiceImages(): %v", svc, core.Images)
 		}
+	}
+}
+
+// REL-04 D3: the launcher's grouped start is the only start real installs use.
+// celery-beat schedules the orphan reaper and outbox drains, and worker-control
+// consumes them; neither was in any group, so neither ever ran.
+func TestCoreGroupStartsTheMaintenanceScheduler(t *testing.T) {
+	names := strings.Join(coreServiceNames(), ",")
+	for _, svc := range []string{"celery-beat", "worker-control"} {
+		if !strings.Contains(","+names+",", ","+svc+",") {
+			t.Errorf("core group must start %s: %s", svc, names)
+		}
+	}
+}
+
+// REL-04 D2: with no saved selection an unscoped start runs every licensed
+// group, so lease activation must replace every unlocked group's workers --
+// not only DefaultOn ones -- or licensed Pro workers keep the old image while
+// the gateway enables leases.
+func TestLeaseActivationWithoutSelectionIncludesEveryUnlockedGroup(t *testing.T) {
+	groups := []ServiceGroup{
+		{ID: "core", Services: []string{"gateway", "worker-cpu"}, Required: true, DefaultOn: true},
+		{ID: "qc", Services: []string{"qc", "worker-qc"}, DefaultOn: false},
+		{ID: "reinvent", Services: []string{"worker-reinvent"}, DefaultOn: false, Locked: true},
+	}
+	got := strings.Join(launcherAllowedServices(groups, nil), ",")
+	if got != "gateway,qc,worker-cpu,worker-qc" {
+		t.Fatalf("unselected allowed services = %q, want every unlocked group and no locked one", got)
 	}
 }
 
