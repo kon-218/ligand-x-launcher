@@ -927,6 +927,219 @@ func TestProductionInfraUpArgsPreservesGlobalFlags(t *testing.T) {
 	}
 }
 
+func TestFreshRuntimeDoesNotEnterLeaseActivation(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte("JOB_ATTEMPT_LEASES_ENABLED=true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rollback, err := app.beginLeaseActivationUpgrade(false, "v2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollback()
+	if _, err := os.Stat(filepath.Join(tmpDir, leaseActivationMarkerName)); !os.IsNotExist(err) {
+		t.Fatalf("fresh runtime unexpectedly has lease activation marker: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envfile.Parse(string(content))[jobAttemptLeasesEnabledEnv]; got != "true" {
+		t.Fatalf("fresh runtime lease flag = %q, want true", got)
+	}
+}
+
+func TestExistingRuntimePersistsDisabledLeaseActivationBeforeSwap(t *testing.T) {
+	tmpDir := t.TempDir()
+	app := NewApp()
+	app.projectPath = tmpDir
+	original := "POSTGRES_PASSWORD=keep-me\nJOB_ATTEMPT_LEASES_ENABLED=true\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".env.production"), []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rollback, err := app.beginLeaseActivationUpgrade(true, "v2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envfile.Parse(string(content))[jobAttemptLeasesEnabledEnv]; got != "false" {
+		t.Fatalf("upgrade lease flag = %q, want false", got)
+	}
+	if envfile.Parse(string(content))["POSTGRES_PASSWORD"] != "keep-me" {
+		t.Fatal("disabling lease activation changed unrelated production secrets")
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, leaseActivationMarkerName)); err != nil {
+		t.Fatalf("upgrade marker was not persisted: %v", err)
+	}
+	if err := validateLeaseActivationRuntime(filepath.Join(tmpDir, leaseActivationMarkerName), "v2.0.0"); err != nil {
+		t.Fatalf("activated bundle version did not match marker: %v", err)
+	}
+	if err := validateLeaseActivationRuntime(filepath.Join(tmpDir, leaseActivationMarkerName), "v1.0.0"); err == nil {
+		t.Fatal("old runtime was accepted as the activation target after an interrupted install")
+	}
+	rollback()
+	content, err = os.ReadFile(filepath.Join(tmpDir, ".env.production"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != original {
+		t.Fatalf("failed install did not restore original production env: %q", content)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, leaseActivationMarkerName)); !os.IsNotExist(err) {
+		t.Fatalf("failed install left a new upgrade marker: %v", err)
+	}
+}
+
+func TestLeaseActivationWorkerResolutionFailsClosedWithoutWorkers(t *testing.T) {
+	startArgs := []string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml", "up", "-d"}
+	workers, err := resolveLeaseActivationWorkers(startArgs, []string{"gateway", "worker-cpu", "worker-control", "worker-gpu-short"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(workers, ","); got != "worker-control,worker-cpu,worker-gpu-short" {
+		t.Fatalf("unscoped start workers = %q, want configured workers", got)
+	}
+	if _, err := resolveLeaseActivationWorkers(startArgs, []string{"gateway", "frontend"}, nil); err == nil {
+		t.Fatal("unscoped start with no configured workers must fail closed")
+	}
+	if _, err := resolveLeaseActivationWorkers(append(startArgs, "gateway"), nil, nil); err == nil {
+		t.Fatal("gateway-only start with no active workers must fail closed")
+	}
+}
+
+func TestUnscopedLeaseActivationScopesServicesToUnlockedLauncherGroups(t *testing.T) {
+	groups := []ServiceGroup{
+		{ID: "core", Services: []string{"worker-cpu", "gateway"}, Required: true},
+		{ID: "md", Services: []string{"worker-gpu-short"}, DefaultOn: true},
+		{ID: "qc", Services: []string{"worker-qc"}, DefaultOn: false, Locked: true},
+	}
+	allowed := launcherAllowedServices(groups, nil)
+	got := intersectServices([]string{"gateway", "worker-cpu", "worker-gpu-short", "worker-qc"}, allowed)
+	if joined := strings.Join(got, ","); joined != "gateway,worker-cpu,worker-gpu-short" {
+		t.Fatalf("unscoped activation services = %q; locked Pro service must be excluded", joined)
+	}
+	selected := launcherAllowedServices(groups, []string{"qc"})
+	if got := strings.Join(selected, ","); got != "" {
+		t.Fatalf("locked selected group services = %q; want none", got)
+	}
+}
+
+func TestLeaseActivationSequenceStartsWorkersBeforeEnablingGateway(t *testing.T) {
+	tmpDir := t.TempDir()
+	marker := filepath.Join(tmpDir, leaseActivationMarkerName)
+	if err := os.WriteFile(marker, []byte("pending\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	flag := "true"
+	var commands [][]string
+	var flagAtCommand []string
+	run := func(args []string, _ string) error {
+		commands = append(commands, append([]string(nil), args...))
+		flagAtCommand = append(flagAtCommand, flag)
+		return nil
+	}
+	setFlag := func(enabled bool) error {
+		flag = strconv.FormatBool(enabled)
+		return nil
+	}
+	startArgs := []string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml", "up", "-d", "--pull=never", "worker-cpu"}
+	err := runLeaseActivationSequence(marker, startArgs, startArgs, []string{"worker-gpu-short"}, []string{"worker-cpu", "worker-gpu-short"}, setFlag, run, "Starting services...")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 5 {
+		t.Fatalf("got %d compose phases, want stop, disabled gateway, workers, enabled gateway, and final-up: %#v", len(commands), commands)
+	}
+	if got := strings.Join(commands[0], " "); !strings.Contains(got, " stop gateway") || !strings.Contains(got, "worker-gpu-short") {
+		t.Fatalf("first command did not stop the prior gateway and workers: %s", got)
+	}
+	if got := strings.Join(commands[1], " "); !strings.Contains(got, "gateway") || strings.Contains(got, "--no-deps") {
+		t.Fatalf("disabled gateway warmup must start dependencies before worker replacement: %s", got)
+	}
+	for _, worker := range []string{"worker-cpu", "worker-gpu-short"} {
+		if !strings.Contains(strings.Join(commands[2], " "), worker) {
+			t.Errorf("worker phase omitted %s: %v", worker, commands[2])
+		}
+	}
+	if flagAtCommand[0] != "false" || flagAtCommand[1] != "false" || flagAtCommand[2] != "false" || flagAtCommand[3] != "true" || flagAtCommand[4] != "true" {
+		t.Fatalf("lease flag at compose phases = %v, want false,false,false,true,true", flagAtCommand)
+	}
+	if got := strings.Join(commands[3], " "); !strings.Contains(got, "gateway") || !strings.Contains(got, "--no-deps") {
+		t.Fatalf("enabled gateway phase must explicitly restart gateway without dependencies: %s", got)
+	}
+	if got := strings.Join(commands[4], " "); !strings.Contains(got, "worker-cpu") || strings.Contains(got, "worker-gpu-short") {
+		t.Fatalf("final compose phase did not preserve caller's subset target: %v", commands[4])
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("successful activation did not clear marker: %v", err)
+	}
+}
+
+func TestLeaseActivationFailureKeepsMarkerAndDisablesGateway(t *testing.T) {
+	for _, failedPhase := range []string{"disable-flag", "stop", "disabled-gateway", "workers", "enable-flag", "enabled-gateway", "caller-target"} {
+		t.Run(failedPhase, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			marker := filepath.Join(tmpDir, leaseActivationMarkerName)
+			if err := os.WriteFile(marker, []byte("pending\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			flag := "true"
+			if failedPhase == "disable-flag" {
+				flag = "false" // installation already durably disabled submissions
+			}
+			var commands [][]string
+			run := func(args []string, _ string) error {
+				commands = append(commands, append([]string(nil), args...))
+				command := strings.Join(args, " ")
+				if failedPhase == "stop" && strings.Contains(command, " stop gateway") {
+					return fmt.Errorf("stop failed")
+				}
+				if failedPhase == "disabled-gateway" && strings.Contains(command, " up ") && strings.Contains(command, "gateway") && flag == "false" {
+					return fmt.Errorf("disabled gateway health check failed")
+				}
+				if failedPhase == "workers" && strings.Contains(command, "worker-cpu") && strings.Contains(command, " up ") {
+					return fmt.Errorf("worker health check failed")
+				}
+				if failedPhase == "enabled-gateway" && strings.Contains(command, " up ") && strings.Contains(command, "gateway") && flag == "true" {
+					return fmt.Errorf("enabled gateway failed")
+				}
+				if failedPhase == "caller-target" && strings.Contains(command, " up ") && strings.Contains(command, "worker-cpu") && flag == "true" && len(commands) > 4 {
+					return fmt.Errorf("caller target failed")
+				}
+				return nil
+			}
+			setFlag := func(enabled bool) error {
+				if enabled && failedPhase == "enable-flag" {
+					return fmt.Errorf("persisting enabled flag failed")
+				}
+				if !enabled && failedPhase == "disable-flag" {
+					return fmt.Errorf("persisting disabled flag failed")
+				}
+				flag = strconv.FormatBool(enabled)
+				return nil
+			}
+			startArgs := []string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml", "up", "-d", "worker-cpu"}
+			if err := runLeaseActivationSequence(marker, startArgs, startArgs, []string{"worker-cpu"}, []string{"worker-cpu"}, setFlag, run, "Starting services..."); err == nil {
+				t.Fatal("expected activation failure")
+			}
+			if flag != "false" {
+				t.Errorf("lease flag after %s failure = %s, want false", failedPhase, flag)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Errorf("activation marker was not retained after %s failure: %v", failedPhase, err)
+			}
+			if (failedPhase == "disabled-gateway" || failedPhase == "enabled-gateway" || failedPhase == "caller-target") && !strings.Contains(strings.Join(commands[len(commands)-1], " "), "stop gateway") {
+				t.Errorf("%s failure did not stop partial gateway before returning: %v", failedPhase, commands)
+			}
+		})
+	}
+}
+
 func TestStderrTailKeepsLastNLines(t *testing.T) {
 	tail := &stderrTail{max: 3}
 	for _, line := range []string{"a", "b", "c", "d", "e"} {

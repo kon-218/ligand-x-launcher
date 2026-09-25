@@ -239,6 +239,12 @@ func runtimePolicy() runtimebundle.Policy {
 // core image tag and .env.production.template's VERSION.
 const defaultPinnedImageVersion = "v2026.08.05"
 
+const (
+	jobAttemptLeasesEnabledEnv = "JOB_ATTEMPT_LEASES_ENABLED"
+	leaseActivationMarkerName  = ".ligandx-lease-activation-pending"
+	leaseActivationWaitSeconds = "300"
+)
+
 type App struct {
 	ctx           context.Context
 	dockerClient  *client.Client
@@ -888,15 +894,19 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 	if err := runtimebundle.Extract(zipPath, extractedDir); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to extract runtime bundle: %w", err)
 	}
+	previousProjectPath := a.projectPath
+	a.projectPath = runtimeDir
+	_, existingComposeErr := os.Stat(filepath.Join(runtimeDir, "docker-compose.yml"))
+	rollbackLeaseActivation, err := a.beginLeaseActivationUpgrade(existingComposeErr == nil, manifest.Version)
+	if err != nil {
+		a.projectPath = previousProjectPath
+		return a.GetDistributionStatus(), fmt.Errorf("failed to prepare safe worker upgrade: %w", err)
+	}
 	rollback, err := runtimebundle.ActivateStage(extractedDir, runtimeDir, filepath.Join(stageRoot, "backup"))
 	if err != nil {
+		rollbackLeaseActivation()
+		a.projectPath = previousProjectPath
 		return a.GetDistributionStatus(), fmt.Errorf("failed to activate staged runtime: %w", err)
-	}
-	envPath := filepath.Join(runtimeDir, ".env.production")
-	oldEnv, oldEnvErr := os.ReadFile(envPath)
-	oldEnvMode := os.FileMode(0600)
-	if info, statErr := os.Stat(envPath); statErr == nil {
-		oldEnvMode = info.Mode().Perm()
 	}
 	committed := false
 	defer func() {
@@ -904,14 +914,10 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 			return
 		}
 		rollback()
-		if oldEnvErr == nil {
-			_ = os.WriteFile(envPath, oldEnv, oldEnvMode)
-		} else if os.IsNotExist(oldEnvErr) {
-			_ = os.Remove(envPath)
-		}
+		rollbackLeaseActivation()
+		a.projectPath = previousProjectPath
 	}()
 
-	a.projectPath = runtimeDir
 	if err := a.ensureProductionEnv(); err != nil {
 		return a.GetDistributionStatus(), err
 	}
@@ -1635,6 +1641,17 @@ func (a *App) validateUnlockedServices(services []string) error {
 }
 
 func (a *App) runDockerCompose(args []string, message string) error {
+	if isProductionUpCommand(args) && a.leaseActivationPending() {
+		return a.runProductionUpWithLeaseActivation(args, message)
+	}
+	return a.runDockerComposeDirect(args, message)
+}
+
+// runDockerComposeDirect executes one Compose command without the lease
+// activation wrapper. The wrapper uses this for the explicit gateway-stop,
+// worker-health, and gateway-enable phases without recursively restarting the
+// sequence.
+func (a *App) runDockerComposeDirect(args []string, message string) error {
 	// Validate project path has docker-compose.yml
 	composePath := filepath.Join(a.projectPath, "docker-compose.yml")
 	if _, err := os.Stat(composePath); os.IsNotExist(err) {
@@ -1754,6 +1771,397 @@ func (a *App) runDockerCompose(args []string, message string) error {
 		Timestamp: time.Now().Format("15:04:05"),
 	})
 
+	return nil
+}
+
+func (a *App) leaseActivationMarkerPath() string {
+	return filepath.Join(a.projectPath, leaseActivationMarkerName)
+}
+
+func (a *App) leaseActivationPending() bool {
+	info, err := os.Stat(a.leaseActivationMarkerPath())
+	return err == nil && !info.IsDir()
+}
+
+// beginLeaseActivationUpgrade durably disables lease-required submissions
+// before replacing an existing runtime. Its rollback is paired with the
+// staged file rollback so failed extraction/activation restores both the old
+// env and any pre-existing activation marker.
+func (a *App) beginLeaseActivationUpgrade(existingRuntime bool, targetVersion string) (func(), error) {
+	if !existingRuntime {
+		return func() {}, nil
+	}
+	markerPath := a.leaseActivationMarkerPath()
+	oldMarker, markerErr := os.ReadFile(markerPath)
+	markerExisted := markerErr == nil
+	if markerErr != nil && !os.IsNotExist(markerErr) {
+		return nil, fmt.Errorf("could not read activation marker: %w", markerErr)
+	}
+	envPath := filepath.Join(a.projectPath, ".env.production")
+	oldEnv, envErr := os.ReadFile(envPath)
+	if envErr != nil && !os.IsNotExist(envErr) {
+		return nil, fmt.Errorf("could not read production env: %w", envErr)
+	}
+	markerData := []byte("target_runtime_version=" + strings.TrimSpace(targetVersion) + "\n")
+	if err := envfile.WritePrivate(markerPath, markerData); err != nil {
+		return nil, fmt.Errorf("could not persist activation marker: %w", err)
+	}
+	if err := a.setProductionEnvValues(map[string]string{jobAttemptLeasesEnabledEnv: "false"}); err != nil {
+		restoreLeaseActivationFiles(envPath, oldEnv, envErr, markerPath, oldMarker, markerExisted)
+		return nil, fmt.Errorf("could not disable lease-required submissions: %w", err)
+	}
+	rollback := func() {
+		restoreLeaseActivationFiles(envPath, oldEnv, envErr, markerPath, oldMarker, markerExisted)
+	}
+	return rollback, nil
+}
+
+func restoreLeaseActivationFiles(envPath string, oldEnv []byte, envErr error, markerPath string, oldMarker []byte, markerExisted bool) {
+	if envErr == nil {
+		_ = envfile.WritePrivate(envPath, oldEnv)
+	} else if os.IsNotExist(envErr) {
+		_ = os.Remove(envPath)
+	}
+	if markerExisted {
+		_ = envfile.WritePrivate(markerPath, oldMarker)
+	} else {
+		_ = os.Remove(markerPath)
+	}
+}
+
+func (a *App) setLeaseActivationEnabled(enabled bool) error {
+	return a.setProductionEnvValues(map[string]string{jobAttemptLeasesEnabledEnv: strconv.FormatBool(enabled)})
+}
+
+func (a *App) activeProductionWorkerServices() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "ps", "--filter", "label=com.docker.compose.project=ligand-x", "--format", `{{.Label "com.docker.compose.service"}}`)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("could not identify running workers before lease activation: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	var services []string
+	for _, line := range strings.Split(string(output), "\n") {
+		service := strings.TrimSpace(line)
+		if strings.HasPrefix(service, "worker-") {
+			services = append(services, service)
+		}
+	}
+	return sortedUnique(services), nil
+}
+
+func (a *App) runProductionUpWithLeaseActivation(args []string, message string) error {
+	markerPath := a.leaseActivationMarkerPath()
+	if err := a.setLeaseActivationEnabled(false); err != nil {
+		return fmt.Errorf("could not keep lease activation disabled: %w", err)
+	}
+	if err := validateLeaseActivationRuntime(markerPath, runtimebundle.InstalledVersion(a.projectPath)); err != nil {
+		return err
+	}
+	activeWorkers, err := a.activeProductionWorkerServices()
+	if err != nil {
+		return err
+	}
+	config, configErr := a.GetLauncherConfig()
+	var selected []string
+	if configErr == nil {
+		selected = config.SelectedGroups
+	}
+	allowedServices := launcherAllowedServices(a.GetServiceGroups(), selected)
+	activeWorkers = intersectServices(activeWorkers, allowedServices)
+	var configuredServices []string
+	var finalArgs = args
+	if len(composeTargetServices(args)) == 0 {
+		configuredServices, err = a.configuredProductionServices(args)
+		if err != nil {
+			return err
+		}
+		configuredServices = intersectServices(configuredServices, allowedServices)
+		if len(configuredServices) == 0 {
+			return fmt.Errorf("no configured services are allowed by the launcher selection for lease activation")
+		}
+		finalArgs = composeUpForServices(args, configuredServices)
+	}
+	workers, err := resolveLeaseActivationWorkers(args, configuredServices, activeWorkers)
+	if err != nil {
+		return err
+	}
+	return runLeaseActivationSequence(markerPath, args, finalArgs, activeWorkers, workers, a.setLeaseActivationEnabled, a.runDockerComposeDirect, message)
+}
+
+func launcherAllowedServices(groups []ServiceGroup, selectedGroupIDs []string) []string {
+	selected := make(map[string]bool, len(selectedGroupIDs))
+	for _, id := range selectedGroupIDs {
+		selected[id] = true
+	}
+	var services []string
+	for _, group := range groups {
+		if group.Locked {
+			continue
+		}
+		include := selected[group.ID]
+		if len(selectedGroupIDs) == 0 {
+			include = group.Required || group.DefaultOn
+		}
+		if include {
+			services = append(services, group.Services...)
+		}
+	}
+	return sortedUnique(services)
+}
+
+func intersectServices(configured, allowed []string) []string {
+	allow := make(map[string]bool, len(allowed))
+	for _, service := range allowed {
+		allow[service] = true
+	}
+	var result []string
+	for _, service := range configured {
+		if allow[service] {
+			result = append(result, service)
+		}
+	}
+	return sortedUnique(result)
+}
+
+func validateLeaseActivationRuntime(markerPath, installedVersion string) error {
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return fmt.Errorf("could not read pending lease activation marker: %w", err)
+	}
+	targetVersion := envfile.Parse(string(data))["target_runtime_version"]
+	if targetVersion == "" || installedVersion == "" || targetVersion != installedVersion {
+		return fmt.Errorf("runtime bundle upgrade is incomplete (installed %q, activation target %q); install the selected runtime bundle before starting services", installedVersion, targetVersion)
+	}
+	return nil
+}
+
+func (a *App) configuredProductionServices(startArgs []string) ([]string, error) {
+	args := composeConfigServicesArgs(startArgs)
+	if len(args) == 0 {
+		return nil, fmt.Errorf("could not determine configured production workers from Compose arguments")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Dir = a.projectPath
+	cmd.Env = a.composeEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("could not list configured production services before lease activation: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	var services []string
+	for _, line := range strings.Split(string(output), "\n") {
+		service := strings.TrimSpace(line)
+		if service != "" {
+			services = append(services, service)
+		}
+	}
+	return sortedUnique(services), nil
+}
+
+func runLeaseActivationSequence(markerPath string, startArgs, finalArgs, activeWorkers, workers []string, setEnabled func(bool) error, run func([]string, string) error, message string) error {
+	if len(workers) == 0 {
+		return fmt.Errorf("no configured or running workers found for lease activation")
+	}
+	if err := setEnabled(false); err != nil {
+		return fmt.Errorf("could not keep lease activation disabled: %w", err)
+	}
+	if err := run(composeStopGatewayArgs(startArgs, activeWorkers), "Stopping gateway before replacing workers..."); err != nil {
+		return fmt.Errorf("could not stop gateway for safe worker upgrade: %w", err)
+	}
+	if err := run(composeUpGatewayArgs(startArgs, false), "Starting the lease-disabled gateway and its dependencies before replacing workers..."); err != nil {
+		_ = run(composeStopGatewayArgs(startArgs, nil), "Stopping gateway after failed disabled startup...")
+		_ = setEnabled(false)
+		return fmt.Errorf("could not start the lease-disabled gateway for worker upgrade: %w", err)
+	}
+	workers = sortedUnique(workers)
+	if len(workers) > 0 {
+		if err := run(composeUpForServices(startArgs, workers), "Replacing workers and waiting for lease-capable workers to become healthy..."); err != nil {
+			return fmt.Errorf("worker upgrade did not become healthy; lease activation remains disabled: %w", err)
+		}
+	}
+	if err := setEnabled(true); err != nil {
+		return fmt.Errorf("workers are healthy but lease activation could not be enabled: %w", err)
+	}
+	if err := run(composeUpGatewayArgs(startArgs, true), "Restarting the gateway with leases enabled after workers are healthy..."); err != nil {
+		_ = run(composeStopGatewayArgs(startArgs, nil), "Stopping gateway after failed lease activation...")
+		_ = setEnabled(false)
+		return fmt.Errorf("gateway activation failed; lease activation remains disabled: %w", err)
+	}
+	if err := run(composeUpWithHealthWait(finalArgs), message); err != nil {
+		_ = run(composeStopGatewayArgs(startArgs, nil), "Stopping gateway after failed lease activation...")
+		_ = setEnabled(false)
+		return fmt.Errorf("gateway activation failed; lease activation remains disabled: %w", err)
+	}
+	if err := os.Remove(markerPath); err != nil {
+		_ = run(composeStopGatewayArgs(startArgs, nil), "Stopping gateway because lease activation could not be finalized...")
+		_ = setEnabled(false)
+		return fmt.Errorf("gateway is healthy but activation marker could not be cleared; lease activation remains disabled: %w", err)
+	}
+	return nil
+}
+
+func composeWorkerServices(args []string) []string {
+	var workers []string
+	for _, service := range composeTargetServices(args) {
+		if strings.HasPrefix(service, "worker-") {
+			workers = append(workers, service)
+		}
+	}
+	return sortedUnique(workers)
+}
+
+func resolveLeaseActivationWorkers(startArgs, configuredServices, activeServices []string) ([]string, error) {
+	workers := append(composeWorkerServices(startArgs), activeServices...)
+	if len(composeTargetServices(startArgs)) == 0 {
+		for _, service := range configuredServices {
+			if strings.HasPrefix(service, "worker-") {
+				workers = append(workers, service)
+			}
+		}
+	}
+	workers = sortedUnique(workers)
+	if len(workers) == 0 {
+		return nil, fmt.Errorf("no configured or running workers found for lease activation")
+	}
+	return workers, nil
+}
+
+func composeTargetServices(args []string) []string {
+	upIndex := -1
+	for i, arg := range args {
+		if arg == "up" {
+			upIndex = i
+			break
+		}
+	}
+	if upIndex < 0 {
+		return nil
+	}
+	servicesStart := false
+	var services []string
+	for i := upIndex + 1; i < len(args); i++ {
+		arg := args[i]
+		if !servicesStart && strings.HasPrefix(arg, "-") {
+			if composeOptionTakesValue(arg) && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		servicesStart = true
+		services = append(services, arg)
+	}
+	return sortedUnique(services)
+}
+
+func sortedUnique(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	unique := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != "" {
+			unique[value] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(unique))
+	for value := range unique {
+		result = append(result, value)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func composeOptionTakesValue(option string) bool {
+	switch option {
+	case "--pull", "--wait-timeout", "--scale", "--timeout", "-t":
+		return true
+	default:
+		return false
+	}
+}
+
+func composeStopGatewayArgs(startArgs, workers []string) []string {
+	for i, arg := range startArgs {
+		if arg == "up" {
+			result := append([]string(nil), startArgs[:i]...)
+			result = append(result, "stop", "gateway")
+			return append(result, sortedUnique(workers)...)
+		}
+	}
+	return append([]string(nil), startArgs...)
+}
+
+func composeConfigServicesArgs(startArgs []string) []string {
+	for i, arg := range startArgs {
+		if arg == "up" {
+			result := append([]string(nil), startArgs[:i]...)
+			return append(result, "config", "--services")
+		}
+	}
+	return nil
+}
+
+func composeUpForServices(startArgs, services []string) []string {
+	for i, arg := range startArgs {
+		if arg != "up" {
+			continue
+		}
+		result := append([]string(nil), startArgs[:i+1]...)
+		for j := i + 1; j < len(startArgs); j++ {
+			option := startArgs[j]
+			if !strings.HasPrefix(option, "-") {
+				break
+			}
+			result = append(result, option)
+			if composeOptionTakesValue(option) && j+1 < len(startArgs) {
+				j++
+				result = append(result, startArgs[j])
+			}
+		}
+		result = append(result, "--wait", "--wait-timeout", leaseActivationWaitSeconds)
+		return append(result, services...)
+	}
+	return nil
+}
+
+func composeUpWithHealthWait(startArgs []string) []string {
+	for i, arg := range startArgs {
+		if arg != "up" {
+			continue
+		}
+		result := append([]string(nil), startArgs[:i+1]...)
+		result = append(result, "--wait", "--wait-timeout", leaseActivationWaitSeconds)
+		return append(result, startArgs[i+1:]...)
+	}
+	return append([]string(nil), startArgs...)
+}
+
+func composeUpGatewayArgs(startArgs []string, noDeps bool) []string {
+	for i, arg := range startArgs {
+		if arg != "up" {
+			continue
+		}
+		result := append([]string(nil), startArgs[:i+1]...)
+		for j := i + 1; j < len(startArgs); j++ {
+			option := startArgs[j]
+			if !strings.HasPrefix(option, "-") {
+				break
+			}
+			result = append(result, option)
+			if composeOptionTakesValue(option) && j+1 < len(startArgs) {
+				j++
+				result = append(result, startArgs[j])
+			}
+		}
+		if noDeps {
+			result = append(result, "--no-deps")
+		}
+		result = append(result, "--wait", "--wait-timeout", leaseActivationWaitSeconds)
+		return append(result, "gateway")
+	}
 	return nil
 }
 
