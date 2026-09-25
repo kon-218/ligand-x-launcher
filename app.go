@@ -1900,10 +1900,10 @@ func launcherAllowedServices(groups []ServiceGroup, selectedGroupIDs []string) [
 		if group.Locked {
 			continue
 		}
-		include := selected[group.ID]
-		if len(selectedGroupIDs) == 0 {
-			include = group.Required || group.DefaultOn
-		}
+		// With no saved selection an unscoped start runs every licensed group,
+		// so every unlocked group's workers must be replaced before leases
+		// are enabled.
+		include := selected[group.ID] || len(selectedGroupIDs) == 0
 		if include {
 			services = append(services, group.Services...)
 		}
@@ -3821,7 +3821,9 @@ func coreServicesDescription() string {
 }
 
 func coreServiceNames() []string {
-	return []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "alignment", "ketcher", "msa", "worker-cpu", "flower", "pocket-finder"}
+	// celery-beat schedules the orphan reaper and outbox drains; worker-control
+	// runs them. Both use the worker-cpu image already in coreServiceImages().
+	return []string{"postgres", "redis", "rabbitmq", "gateway", "frontend", "proxy", "structure", "alignment", "ketcher", "msa", "worker-cpu", "worker-control", "celery-beat", "flower", "pocket-finder"}
 }
 
 func imageRef(repository, tag string) string {

@@ -1286,11 +1286,11 @@ services:
         max-size: 10m
         max-file: '3'
   celery-beat:
-    image: ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
+    image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
     command:
     - celery
     - -A
-    - lib.tasks.gpu_tasks
+    - lib.tasks.celery_app:gpu_celery_app
     - beat
     - -l
     - info
@@ -1327,11 +1327,11 @@ services:
     healthcheck:
       test:
       - CMD
-      - celery
-      - -A
-      - lib.tasks.gpu_tasks
-      - inspect
-      - active_queues
+      - python
+      - -c
+      - import os,sys; me=str(os.getpid()); sys.exit(0 if any(b'celery' in c and b'beat'
+        in c for c in (open('/proc/'+p+'/cmdline','rb').read() for p in os.listdir('/proc')
+        if p.isdigit() and p != me)) else 1)
       interval: 30s
       timeout: 10s
       retries: 3
