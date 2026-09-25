@@ -69,6 +69,16 @@ services:
     user: 0:0
     volumes:
     - celery_beat_data:/app/celery-beat
+  boltz-model-cache-init:
+    image: alpine:3.21
+    command:
+    - sh
+    - -ec
+    - mkdir -p /home/appuser/.boltz && chown -R 1001:1001 /home/appuser/.boltz
+    user: 0:0
+    volumes:
+    - boltz_model_cache:/home/appuser/.boltz
+    restart: 'no'
   runtime-settings-init:
     image: alpine:3.21
     command:
@@ -764,6 +774,10 @@ services:
     - msa_cache:/app/data/msa_cache
     - boltz_outputs:/app/data/boltz_results_input
     - runtime_settings:/app/data/settings
+    - boltz_model_cache:/home/appuser/.boltz
+    depends_on:
+      boltz-model-cache-init:
+        condition: service_completed_successfully
     expose:
     - '8005'
     environment:
@@ -1564,6 +1578,7 @@ volumes:
   abfe_outputs: null
   rbfe_outputs: null
   boltz_outputs: null
+  boltz_model_cache: null
   qc_jobs: null
   qc_results: null
   msa_cache: null
