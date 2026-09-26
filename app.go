@@ -1887,7 +1887,7 @@ func (a *App) runProductionUpWithLeaseActivation(args []string, message string) 
 	if err != nil {
 		return err
 	}
-	return runLeaseActivationSequence(markerPath, args, finalArgs, activeWorkers, workers, a.setLeaseActivationEnabled, a.runDockerComposeDirect, message)
+	return runLeaseActivationSequence(markerPath, args, finalArgs, activeWorkers, workers, a.setLeaseActivationEnabled, a.runDockerComposeDirect, a.failUpgradeInterruptedJobs, message)
 }
 
 func launcherAllowedServices(groups []ServiceGroup, selectedGroupIDs []string) []string {
@@ -1961,7 +1961,7 @@ func (a *App) configuredProductionServices(startArgs []string) ([]string, error)
 	return sortedUnique(services), nil
 }
 
-func runLeaseActivationSequence(markerPath string, startArgs, finalArgs, activeWorkers, workers []string, setEnabled func(bool) error, run func([]string, string) error, message string) error {
+func runLeaseActivationSequence(markerPath string, startArgs, finalArgs, activeWorkers, workers []string, setEnabled func(bool) error, run func([]string, string) error, failInterrupted func(time.Time) error, message string) error {
 	if len(workers) == 0 {
 		return fmt.Errorf("no configured or running workers found for lease activation")
 	}
@@ -1971,6 +1971,10 @@ func runLeaseActivationSequence(markerPath string, startArgs, finalArgs, activeW
 	if err := run(composeStopGatewayArgs(startArgs, activeWorkers), "Stopping gateway before replacing workers..."); err != nil {
 		return fmt.Errorf("could not stop gateway for safe worker upgrade: %w", err)
 	}
+	// Every pre-lease worker is stopped from here on, and replacements only
+	// start in the worker phase below: a legacy attempt claimed before this
+	// instant has no process left (REL-05 S5a).
+	workersStoppedAt := time.Now().UTC()
 	if err := run(composeUpGatewayArgs(startArgs, false), "Starting the lease-disabled gateway and its dependencies before replacing workers..."); err != nil {
 		_ = run(composeStopGatewayArgs(startArgs, nil), "Stopping gateway after failed disabled startup...")
 		_ = setEnabled(false)
@@ -1981,6 +1985,13 @@ func runLeaseActivationSequence(markerPath string, startArgs, finalArgs, activeW
 		if err := run(composeUpForServices(startArgs, workers), "Replacing workers and waiting for lease-capable workers to become healthy..."); err != nil {
 			return fmt.Errorf("worker upgrade did not become healthy; lease activation remains disabled: %w", err)
 		}
+	}
+	// Past the worker health barrier: fail the jobs the stopped workers were
+	// running (owner decision O-5: fail, never requeue). Best-effort -- a
+	// failure leaves those jobs running, exactly as before this step existed,
+	// and must not hold up activation.
+	if failInterrupted != nil {
+		_ = failInterrupted(workersStoppedAt)
 	}
 	if err := setEnabled(true); err != nil {
 		return fmt.Errorf("workers are healthy but lease activation could not be enabled: %w", err)
@@ -1999,6 +2010,63 @@ func runLeaseActivationSequence(markerPath string, startArgs, finalArgs, activeW
 		_ = run(composeStopGatewayArgs(startArgs, nil), "Stopping gateway because lease activation could not be finalized...")
 		_ = setEnabled(false)
 		return fmt.Errorf("gateway is healthy but activation marker could not be cleared; lease activation remains disabled: %w", err)
+	}
+	return nil
+}
+
+// upgradeInterruptedRoute is the Core worker route that fails pre-lease
+// attempts whose worker lease activation stopped (REL-05 S5a).
+const upgradeInterruptedRoute = "/api/jobs/internal/upgrade-interrupted-attempts"
+
+// failUpgradeInterruptedJobs asks the gateway to fail every pre-lease job the
+// stopped workers were running, so none is left showing "running" forever.
+// A runtime whose gateway predates the route answers 404, which is not an
+// error: that runtime has no such jobs to recover.
+func (a *App) failUpgradeInterruptedJobs(workersStoppedAt time.Time) error {
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		a.emitAndLog("launcher", fmt.Sprintf("Could not read the production environment to recover interrupted jobs: %v", err))
+		return err
+	}
+	secret := strings.TrimSpace(envfile.Parse(content)["INTERNAL_WORKER_SECRET"])
+	if secret == "" {
+		err := fmt.Errorf("INTERNAL_WORKER_SECRET is not set")
+		a.emitAndLog("launcher", fmt.Sprintf("Could not recover jobs interrupted by the upgrade: %v", err))
+		return err
+	}
+	body, _ := json.Marshal(map[string]string{
+		"workers_replaced_at": workersStoppedAt.UTC().Format(time.RFC3339Nano),
+	})
+	port := a.envPort("GATEWAY_PORT", 8000)
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, upgradeInterruptedRoute), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Key", secret)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		a.emitAndLog("launcher", fmt.Sprintf("Could not recover jobs interrupted by the upgrade: %v", err))
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)
+		a.emitAndLog("launcher", fmt.Sprintf("Could not recover jobs interrupted by the upgrade: %v", err))
+		return err
+	}
+	var result struct {
+		FailedJobIDs []string `json:"failed_job_ids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if len(result.FailedJobIDs) > 0 {
+		a.emitAndLog("launcher", fmt.Sprintf("%d job(s) interrupted by the upgrade were marked failed; please resubmit them.", len(result.FailedJobIDs)))
 	}
 	return nil
 }
