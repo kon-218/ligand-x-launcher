@@ -1082,7 +1082,7 @@ func TestLeaseActivationSequenceStartsWorkersBeforeEnablingGateway(t *testing.T)
 		return nil
 	}
 	startArgs := []string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml", "up", "-d", "--pull=never", "worker-cpu"}
-	err := runLeaseActivationSequence(marker, startArgs, startArgs, []string{"worker-gpu-short"}, []string{"worker-cpu", "worker-gpu-short"}, setFlag, run, "Starting services...")
+	err := runLeaseActivationSequence(marker, startArgs, startArgs, []string{"worker-gpu-short"}, []string{"worker-cpu", "worker-gpu-short"}, setFlag, run, nil, "Starting services...")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1158,7 +1158,7 @@ func TestLeaseActivationFailureKeepsMarkerAndDisablesGateway(t *testing.T) {
 				return nil
 			}
 			startArgs := []string{"compose", "--env-file", ".env.production", "-f", "docker-compose.yml", "up", "-d", "worker-cpu"}
-			if err := runLeaseActivationSequence(marker, startArgs, startArgs, []string{"worker-cpu"}, []string{"worker-cpu"}, setFlag, run, "Starting services..."); err == nil {
+			if err := runLeaseActivationSequence(marker, startArgs, startArgs, []string{"worker-cpu"}, []string{"worker-cpu"}, setFlag, run, nil, "Starting services..."); err == nil {
 				t.Fatal("expected activation failure")
 			}
 			if flag != "false" {
