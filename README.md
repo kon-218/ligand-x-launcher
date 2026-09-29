@@ -27,6 +27,12 @@ Ligand-X is a self-hosted drug-discovery platform that runs locally on your own 
 5. Select modules, choose **Download & continue**, then **Start services**.
 6. Click **Open Ligand-X**. The app opens at <http://localhost:8080>.
 
+AI assistant connections, permissions, plan approvals, and revocation are managed
+in **Ligand-X → Agents** in the browser application. The launcher installs, updates,
+starts, and stops the local services; it does not create agent credentials or run
+an MCP connector. After upgrading, replace old launcher-issued connections from
+the application's Agents page.
+
 Windows and Linux are the qualified targets. macOS builds are available in preview — NVIDIA-accelerated containers are not supported on macOS.
 
 **Requirements:** 4-core CPU, 16 GB RAM (32 GB+ for GPU modules or large MD systems), 50 GB free disk, Docker with Compose v2. An NVIDIA GPU is required for Boltz-2 and Binding Free Energy, and optional for GPU-accelerated MD.
