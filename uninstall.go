@@ -116,7 +116,7 @@ func selectLigandxVolumes(volumes []volume.Volume, projects map[string]bool) []s
 	var names []string
 	for _, v := range volumes {
 		if proj := v.Labels["com.docker.compose.project"]; proj != "" {
-			if isLigandxProject(proj) {
+			if projects[proj] || isLigandxProject(proj) {
 				names = append(names, v.Name)
 			}
 			continue
@@ -137,7 +137,7 @@ func selectLigandxNetworks(networks []network.Summary, projects map[string]bool)
 	var ids []string
 	for _, n := range networks {
 		if proj := n.Labels["com.docker.compose.project"]; proj != "" {
-			if isLigandxProject(proj) {
+			if projects[proj] || isLigandxProject(proj) {
 				ids = append(ids, n.ID)
 			}
 			continue
@@ -218,7 +218,11 @@ func selectLigandxImages(images []image.Summary, prefixes []string) []string {
 // cannot turn uninstall into `rm -rf /`.
 func (a *App) launcherOwnedPaths() []string {
 	var paths []string
-	if base, err := os.UserConfigDir(); err == nil && base != "" {
+	if a.composeProjectName != "" {
+		if config := os.Getenv("LIGANDX_LAUNCHER_CONFIG_DIR"); config != "" {
+			paths = append(paths, config)
+		}
+	} else if base, err := os.UserConfigDir(); err == nil && base != "" {
 		paths = append(paths, filepath.Join(base, "ligandx-launcher"))
 	}
 	if runtimeDir, err := a.defaultRuntimeDir(); err == nil {
@@ -295,7 +299,7 @@ func (a *App) Uninstall(opts UninstallOptions) (UninstallReport, error) {
 
 	a.uninstallLocalFiles(&report)
 
-	if opts.KeepLauncher {
+	if opts.KeepLauncher || a.composeProjectName != "" {
 		report.add("Launcher application", "skipped", "left in place at your request")
 	} else {
 		a.uninstallLauncherBinary(&report)
@@ -323,6 +327,9 @@ func (a *App) uninstallDockerObjects(report *UninstallReport, opts UninstallOpti
 		return
 	}
 	projects := ligandxComposeProjects(listResult.Items)
+	if a.composeProjectName != "" {
+		projects = map[string]bool{a.composeProject(): true}
+	}
 	if len(projects) == 0 {
 		report.add("Containers", "skipped", "no Ligand-X containers found")
 	} else {
@@ -345,7 +352,17 @@ func (a *App) uninstallDockerObjects(report *UninstallReport, opts UninstallOpti
 	}
 
 	if netList, err := a.dockerClient.NetworkList(ctx, client.NetworkListOptions{}); err == nil {
-		ids := selectLigandxNetworks(netList.Items, projects)
+		networks := netList.Items
+		if a.composeProjectName != "" {
+			var scoped []network.Summary
+			for _, item := range networks {
+				if projects[item.Labels["com.docker.compose.project"]] || (item.Labels["com.docker.compose.project"] == "" && strings.HasPrefix(item.Name, a.composeProject()+"_")) {
+					scoped = append(scoped, item)
+				}
+			}
+			networks = scoped
+		}
+		ids := selectLigandxNetworks(networks, projects)
 		failed := 0
 		for _, id := range ids {
 			if _, err := a.dockerClient.NetworkRemove(ctx, id, client.NetworkRemoveOptions{}); err != nil {
@@ -360,7 +377,17 @@ func (a *App) uninstallDockerObjects(report *UninstallReport, opts UninstallOpti
 	if opts.KeepData {
 		report.add("Data volumes", "skipped", "your results and database were kept at your request")
 	} else if volList, err := a.dockerClient.VolumeList(ctx, client.VolumeListOptions{}); err == nil {
-		names := selectLigandxVolumes(volList.Items, projects)
+		volumes := volList.Items
+		if a.composeProjectName != "" {
+			var scoped []volume.Volume
+			for _, item := range volumes {
+				if projects[item.Labels["com.docker.compose.project"]] || (item.Labels["com.docker.compose.project"] == "" && strings.HasPrefix(item.Name, a.composeProject()+"_")) {
+					scoped = append(scoped, item)
+				}
+			}
+			volumes = scoped
+		}
+		names := selectLigandxVolumes(volumes, projects)
 		failed := 0
 		for _, name := range names {
 			if _, err := a.dockerClient.VolumeRemove(ctx, name, client.VolumeRemoveOptions{Force: true}); err != nil {
@@ -372,7 +399,7 @@ func (a *App) uninstallDockerObjects(report *UninstallReport, opts UninstallOpti
 		report.add("Data volumes", "failed", err.Error())
 	}
 
-	if opts.KeepImages {
+	if opts.KeepImages || a.composeProjectName != "" {
 		report.add("Images", "skipped", "downloaded images were kept at your request")
 		return
 	}

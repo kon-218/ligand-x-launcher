@@ -246,12 +246,15 @@ const (
 )
 
 type App struct {
-	ctx           context.Context
-	dockerClient  *client.Client
-	projectPath   string
-	logStreams    map[string]context.CancelFunc
-	logStreamsMux sync.Mutex
-	composeLogMux sync.Mutex
+	ctx          context.Context
+	dockerClient *client.Client
+	projectPath  string
+	// Empty preserves the installed production project and volumes.
+	composeProjectName   string
+	composeOverrideFiles []string
+	logStreams           map[string]context.CancelFunc
+	logStreamsMux        sync.Mutex
+	composeLogMux        sync.Mutex
 
 	// lastReleaseIndexWarning holds any non-fatal defect from the most recent
 	// index verification, for ListRuntimeReleaseOptions to surface.
@@ -291,6 +294,51 @@ func NewApp() *App {
 	return &App{
 		logStreams:  make(map[string]context.CancelFunc),
 		secretStore: secretstore.Default(),
+	}
+}
+
+// composeProject is an App-local injection: ambient Compose variables must not
+// redirect an installed launcher into a different project's volumes.
+func (a *App) composeProject() string {
+	if a.composeProjectName != "" {
+		return a.composeProjectName
+	}
+	return "ligand-x"
+}
+
+// Additional files let qualification pin images without changing the generated
+// topology snapshot. The default installed launcher uses no extra files.
+func (a *App) scopedComposeArgs(args []string) []string {
+	if len(a.composeOverrideFiles) == 0 || len(args) == 0 || args[0] != "compose" {
+		return args
+	}
+	for i, arg := range args {
+		if arg == "up" || arg == "stop" || arg == "down" || arg == "config" || arg == "ps" || arg == "restart" {
+			result := append([]string{}, args[:i]...)
+			for _, file := range a.composeOverrideFiles {
+				if !slices.Contains(args, file) {
+					result = append(result, "-f", file)
+				}
+			}
+			return append(result, args[i:]...)
+		}
+	}
+	return args
+}
+
+func (a *App) ownsComposeProject(name string) bool { return name == a.composeProject() }
+
+func (a *App) infraContainerName(service string) string {
+	if a.composeProjectName != "" {
+		return a.composeProject() + "-" + service
+	}
+	return "ligandx-" + service
+}
+
+// Wails startup is optional for the build-tagged qualification driver.
+func (a *App) emitEvent(name string, data ...interface{}) {
+	if a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, name, data...)
 	}
 }
 
@@ -823,21 +871,21 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 	}
 	defer os.RemoveAll(stageRoot)
 
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: "Installing Ligand-X runtime files...", Timestamp: time.Now().Format("15:04:05")})
+	a.emitEvent("log", LogEntry{Service: "launcher", Message: "Installing Ligand-X runtime files...", Timestamp: time.Now().Format("15:04:05")})
 
 	bundleURL := strings.TrimSpace(selectedURL)
 	releaseTag := strings.TrimSpace(selectedVersion)
 	if bundleURL != "" {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
+		a.emitEvent("log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Selected verified runtime release: %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 	} else if override := strings.TrimSpace(os.Getenv("LIGANDX_RUNTIME_BUNDLE_URL")); override != "" {
 		bundleURL = override
 	} else if resolved, tag, resolveErr := runtimebundle.ResolveBundleURL(a.includePrereleases()); resolveErr == nil {
 		bundleURL = resolved
 		releaseTag = tag
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Resolved latest runtime bundle: %s", bundleURL), Timestamp: time.Now().Format("15:04:05")})
+		a.emitEvent("log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Resolved latest runtime bundle: %s", bundleURL), Timestamp: time.Now().Format("15:04:05")})
 	} else {
 		bundleURL = runtimebundle.DefaultBundleURL
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Could not resolve latest release (%v); falling back to %s", resolveErr, bundleURL), Timestamp: time.Now().Format("15:04:05")})
+		a.emitEvent("log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Could not resolve latest release (%v); falling back to %s", resolveErr, bundleURL), Timestamp: time.Now().Format("15:04:05")})
 	}
 
 	manifestURL, err := runtimebundle.CompanionAssetURL(bundleURL, runtimebundle.ManifestAssetName)
@@ -878,7 +926,7 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 	}
 	releaseTag = manifest.Version
 
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Downloading verified runtime bundle %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
+	a.emitEvent("log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Downloading verified runtime bundle %s", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 	zipPath := filepath.Join(stageRoot, runtimebundle.AssetName)
 	if err := runtimePolicy().DownloadLimited(bundleURL, zipPath, manifest.Size); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to download runtime bundle from %s: %w", bundleURL, err)
@@ -927,7 +975,7 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 			current := strings.TrimSpace(envfile.Parse(content)["VERSION"])
 			if allowRollback || runtimebundle.ShouldAdvanceVersion(current, releaseTag) {
 				if setErr := a.setProductionEnvValues(map[string]string{"VERSION": releaseTag, "PRO_VERSION": releaseTag}); setErr == nil {
-					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Pinned product images to %s in .env.production", releaseTag), Timestamp: time.Now().Format("15:04:05")})
+					a.emitEvent("log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Pinned product images to %s in .env.production", releaseTag), Timestamp: time.Now().Format("15:04:05")})
 				}
 			}
 		}
@@ -936,7 +984,7 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 		return a.GetDistributionStatus(), fmt.Errorf("failed to persist runtime version: %w", err)
 	}
 	committed = true
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Runtime installed at %s", runtimeDir), Timestamp: time.Now().Format("15:04:05")})
+	a.emitEvent("log", LogEntry{Service: "launcher", Message: fmt.Sprintf("Runtime installed at %s", runtimeDir), Timestamp: time.Now().Format("15:04:05")})
 	return a.GetDistributionStatus(), nil
 }
 
@@ -999,7 +1047,7 @@ func (a *App) ligandXContainers(ctx context.Context, all bool) ([]container.Summ
 		if serviceName == "" || !ligandxServices[serviceName] {
 			continue
 		}
-		if !strings.Contains(projectName, "ligand") && projectName != "ligandx" {
+		if !a.ownsComposeProject(projectName) {
 			continue
 		}
 		filtered = append(filtered, c)
@@ -1136,7 +1184,7 @@ func (a *App) GetSystemStatus() SystemStatus {
 		if serviceName == "" || !ligandxServices[serviceName] {
 			continue
 		}
-		if !strings.Contains(projectName, "ligand") && projectName != "ligandx" {
+		if !a.ownsComposeProject(projectName) {
 			continue
 		}
 
@@ -1238,14 +1286,14 @@ func (a *App) devComposeArgs() []string {
 		args = append(args, "-f", "docker-compose.override.yml")
 	}
 	if path, ok := a.proSourcePath(); ok && hasProDevOverride {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   fmt.Sprintf("Pro source detected at %s — mounting for hot reload", path),
 			Timestamp: time.Now().Format("15:04:05"),
 		})
 		args = append(args, "-f", "docker-compose.pro-dev.yml")
 	} else if path, ok := a.proSourcePath(); ok && !hasProDevOverride {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   fmt.Sprintf("Pro source detected at %s, but docker-compose.pro-dev.yml is not present in %s; starting without Pro hot reload", path, a.projectPath),
 			Timestamp: time.Now().Format("15:04:05"),
@@ -1276,7 +1324,7 @@ func (a *App) StartServices(mode string) error {
 	}
 
 	if err := a.ensureDataDirs(); err != nil {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   fmt.Sprintf("Warning: Could not create data directories: %v", err),
 			Timestamp: time.Now().Format("15:04:05"),
@@ -1365,7 +1413,7 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 	}
 
 	if err := a.ensureDataDirs(); err != nil {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   fmt.Sprintf("Warning: Could not create data directories: %v", err),
 			Timestamp: time.Now().Format("15:04:05"),
@@ -1389,7 +1437,7 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 	for _, groupID := range groupIDs {
 		if group, ok := groupMap[groupID]; ok {
 			if group.Locked {
-				wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+				a.emitEvent("log", LogEntry{
 					Service:   "launcher",
 					Message:   fmt.Sprintf("Skipping %s (requires Pro or Academic license)", group.Name),
 					Timestamp: time.Now().Format("15:04:05"),
@@ -1449,7 +1497,7 @@ func (a *App) StartServicesCustom(env string, services []string) error {
 	}
 
 	if err := a.ensureDataDirs(); err != nil {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   fmt.Sprintf("Warning: Could not create data directories: %v", err),
 			Timestamp: time.Now().Format("15:04:05"),
@@ -1503,7 +1551,7 @@ func (a *App) StopServices() error {
 	}
 
 	emit := func(msg string) {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service: "launcher", Message: msg, Timestamp: time.Now().Format("15:04:05"),
 		})
 	}
@@ -1522,7 +1570,7 @@ func (a *App) StopServices() error {
 	// — including extras like celery-beat that aren't in the service set.
 	// Shared with Uninstall (see uninstall.go): the two must agree on what counts
 	// as our stack, or uninstall would leave behind exactly what stop tears down.
-	ligandProjects := ligandxComposeProjects(containers)
+	ligandProjects := map[string]bool{a.composeProject(): true}
 
 	if len(ligandProjects) == 0 {
 		emit("No running services found")
@@ -1578,7 +1626,7 @@ func (a *App) RestartServiceGroups(groupIDs []string) error {
 	for _, groupID := range groupIDs {
 		if group, ok := groupMap[groupID]; ok {
 			if group.Locked {
-				wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+				a.emitEvent("log", LogEntry{
 					Service:   "launcher",
 					Message:   fmt.Sprintf("Skipping %s (requires Pro or Academic license)", group.Name),
 					Timestamp: time.Now().Format("15:04:05"),
@@ -1641,6 +1689,7 @@ func (a *App) validateUnlockedServices(services []string) error {
 }
 
 func (a *App) runDockerCompose(args []string, message string) error {
+	args = a.scopedComposeArgs(args)
 	if isProductionUpCommand(args) && a.leaseActivationPending() {
 		return a.runProductionUpWithLeaseActivation(args, message)
 	}
@@ -1765,7 +1814,7 @@ func (a *App) runDockerComposeDirect(args []string, message string) error {
 		return fmt.Errorf("docker compose failed: %v", waitErr)
 	}
 
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+	a.emitEvent("log", LogEntry{
 		Service:   "launcher",
 		Message:   "Operation completed successfully",
 		Timestamp: time.Now().Format("15:04:05"),
@@ -1836,7 +1885,7 @@ func (a *App) setLeaseActivationEnabled(enabled bool) error {
 func (a *App) activeProductionWorkerServices() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "ps", "--filter", "label=com.docker.compose.project=ligand-x", "--format", `{{.Label "com.docker.compose.service"}}`)
+	cmd := exec.CommandContext(ctx, "docker", "ps", "--filter", "label=com.docker.compose.project="+a.composeProject(), "--format", `{{.Label "com.docker.compose.service"}}`)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("could not identify running workers before lease activation: %w: %s", err, strings.TrimSpace(string(output)))
@@ -2319,10 +2368,17 @@ func (a *App) composeEnv() []string {
 	if gid < 0 {
 		gid = 0
 	}
-	env := append(os.Environ(),
+	var baseEnv []string
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "COMPOSE_PROJECT_NAME=") && !strings.HasPrefix(entry, "LIGANDX_INFRA_CONTAINER_PREFIX=") {
+			baseEnv = append(baseEnv, entry)
+		}
+	}
+	env := append(baseEnv,
 		fmt.Sprintf("UID=%d", uid),
 		fmt.Sprintf("GID=%d", gid),
-		"COMPOSE_PROJECT_NAME=ligand-x",
+		"COMPOSE_PROJECT_NAME="+a.composeProject(),
+		"LIGANDX_INFRA_CONTAINER_PREFIX="+strings.TrimSuffix(a.infraContainerName(""), "-"),
 	)
 	if path, ok := a.proSourcePath(); ok {
 		env = append(env, fmt.Sprintf("LIGANDX_PRO_SRC_PATH=%s", path))
@@ -2348,7 +2404,7 @@ func (a *App) composeContextLine() string {
 			version = v
 		}
 	}
-	return fmt.Sprintf("Context: dir=%s UID=%d GID=%d COMPOSE_PROJECT_NAME=ligand-x VERSION=%s", a.projectPath, uid, gid, version)
+	return fmt.Sprintf("Context: dir=%s UID=%d GID=%d COMPOSE_PROJECT_NAME=%s VERSION=%s", a.projectPath, uid, gid, a.composeProject(), version)
 }
 
 // captureComposePs runs `docker compose ... ps --all` with the same global flags
@@ -2422,12 +2478,12 @@ func (a *App) reconcileProductionCredentials() error {
 	cur := envfile.Parse(content)
 	var failures []string
 
-	if pgUser, pgPass := cur["POSTGRES_USER"], cur["POSTGRES_PASSWORD"]; pgUser != "" && pgPass != "" && isContainerRunning("ligandx-postgres") {
+	if pgUser, pgPass := cur["POSTGRES_USER"], cur["POSTGRES_PASSWORD"]; pgUser != "" && pgPass != "" && isContainerRunning(a.infraContainerName("postgres")) {
 		sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s';", pgUser, strings.ReplaceAll(pgPass, "'", "''"))
-		cmd := exec.Command("docker", "exec", "ligandx-postgres", "psql", "-U", pgUser, "-d", pgUser, "-c", sql)
+		cmd := exec.Command("docker", "exec", a.infraContainerName("postgres"), "psql", "-U", pgUser, "-d", pgUser, "-c", sql)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			failures = append(failures, fmt.Sprintf("postgres: %v: %s", err, strings.TrimSpace(string(out))))
-			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			a.emitEvent("log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Credential reconciliation (postgres) failed: %v: %s", err, strings.TrimSpace(string(out))),
 				Timestamp: time.Now().Format("15:04:05"),
@@ -2435,10 +2491,10 @@ func (a *App) reconcileProductionCredentials() error {
 		}
 	}
 
-	if rmqUser, rmqPass := cur["RABBITMQ_USER"], cur["RABBITMQ_PASSWORD"]; rmqUser != "" && rmqPass != "" && isContainerRunning("ligandx-rabbitmq") {
-		if err := reconcileRabbitMQUser("ligandx-rabbitmq", rmqUser, rmqPass); err != nil {
+	if rmqUser, rmqPass := cur["RABBITMQ_USER"], cur["RABBITMQ_PASSWORD"]; rmqUser != "" && rmqPass != "" && isContainerRunning(a.infraContainerName("rabbitmq")) {
+		if err := reconcileRabbitMQUser(a.infraContainerName("rabbitmq"), rmqUser, rmqPass); err != nil {
 			failures = append(failures, fmt.Sprintf("rabbitmq: %v", err))
-			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			a.emitEvent("log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Credential reconciliation (rabbitmq) failed: %v", err),
 				Timestamp: time.Now().Format("15:04:05"),
@@ -2534,7 +2590,7 @@ func (a *App) emitAndLog(service, message string) {
 	// ctx is nil before Wails startup (and under test) — emitting then would
 	// panic, but the on-disk log should still get the line.
 	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   service,
 			Message:   message,
 			Timestamp: time.Now().Format("15:04:05"),
@@ -3478,13 +3534,13 @@ func (a *App) DownloadReinventModels() {
 			// Configured path not writable — fall back to project data dir and persist to .env.
 			fallback := filepath.Join(a.projectPath, "data", "reinvent_models")
 			if !canWriteDir(fallback) {
-				wailsRuntime.EventsEmit(a.ctx, "reinventModelComplete", map[string]interface{}{
+				a.emitEvent("reinventModelComplete", map[string]interface{}{
 					"success": false,
 					"error":   fmt.Sprintf("No write access to %s or fallback %s", modelsPath, fallback),
 				})
 				return
 			}
-			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			a.emitEvent("log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("No write access to %s — using %s and updating .env", modelsPath, fallback),
 				Timestamp: time.Now().Format("15:04:05"),
@@ -3499,7 +3555,7 @@ func (a *App) DownloadReinventModels() {
 		// the known latest record ID, which is the DOI target.
 		const latestRecordID = "15641297"
 
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   fmt.Sprintf("Fetching REINVENT4 file list from Zenodo record %s ...", latestRecordID),
 			Timestamp: time.Now().Format("15:04:05"),
@@ -3507,7 +3563,7 @@ func (a *App) DownloadReinventModels() {
 
 		files, err := resolveZenodoFiles(latestRecordID)
 		if err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "reinventModelComplete", map[string]interface{}{
+			a.emitEvent("reinventModelComplete", map[string]interface{}{
 				"success": false,
 				"error":   fmt.Sprintf("Failed to fetch file list: %v", err),
 			})
@@ -3523,14 +3579,14 @@ func (a *App) DownloadReinventModels() {
 			}
 		}
 		if target == nil {
-			wailsRuntime.EventsEmit(a.ctx, "reinventModelComplete", map[string]interface{}{
+			a.emitEvent("reinventModelComplete", map[string]interface{}{
 				"success": false,
 				"error":   "reinvent.prior not found in Zenodo record " + latestRecordID,
 			})
 			return
 		}
 
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   fmt.Sprintf("Downloading %s (%.1f MB) to %s ...", target.Key, float64(target.Size)/1024/1024, modelsPath),
 			Timestamp: time.Now().Format("15:04:05"),
@@ -3538,19 +3594,19 @@ func (a *App) DownloadReinventModels() {
 
 		destPath := filepath.Join(modelsPath, target.Key)
 		if err := a.downloadFileWithProgress(target.URL, destPath, target.Key, target.Size); err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "reinventModelComplete", map[string]interface{}{
+			a.emitEvent("reinventModelComplete", map[string]interface{}{
 				"success": false,
 				"error":   fmt.Sprintf("Download failed: %v", err),
 			})
 			return
 		}
 
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   "REINVENT prior downloaded successfully",
 			Timestamp: time.Now().Format("15:04:05"),
 		})
-		wailsRuntime.EventsEmit(a.ctx, "reinventModelComplete", map[string]interface{}{
+		a.emitEvent("reinventModelComplete", map[string]interface{}{
 			"success": true,
 		})
 	}()
@@ -3596,7 +3652,7 @@ func (a *App) downloadFileWithProgress(url, destPath, fileName string, knownSize
 				if totalSize > 0 {
 					pct = float64(downloaded) / float64(totalSize) * 100
 				}
-				wailsRuntime.EventsEmit(a.ctx, "reinventModelProgress", map[string]interface{}{
+				a.emitEvent("reinventModelProgress", map[string]interface{}{
 					"fileName":   fileName,
 					"percent":    pct,
 					"bytesDone":  downloaded,
@@ -3613,7 +3669,7 @@ func (a *App) downloadFileWithProgress(url, destPath, fileName string, knownSize
 		}
 	}
 
-	wailsRuntime.EventsEmit(a.ctx, "reinventModelProgress", map[string]interface{}{
+	a.emitEvent("reinventModelProgress", map[string]interface{}{
 		"fileName":   fileName,
 		"percent":    float64(100),
 		"bytesDone":  downloaded,
@@ -3775,7 +3831,7 @@ func (a *App) pullImageWithProgress(ctx context.Context, image, groupID, groupNa
 				BytesDownloaded: downloadedBytes,
 				BytesTotal:      totalBytes,
 			}
-			wailsRuntime.EventsEmit(a.ctx, "pullProgress", progress)
+			a.emitEvent("pullProgress", progress)
 		}
 	}
 
@@ -3789,7 +3845,7 @@ func (a *App) pullImageWithProgress(ctx context.Context, image, groupID, groupNa
 func (a *App) PullImages() error {
 	config, err := a.GetLauncherConfig()
 	if err != nil || config.SelectedGroups == nil || len(config.SelectedGroups) == 0 {
-		wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+		a.emitEvent("log", LogEntry{
 			Service:   "launcher",
 			Message:   "No services selected. Configure services in the Services tab first.",
 			Timestamp: time.Now().Format("15:04:05"),
@@ -3841,7 +3897,7 @@ func (a *App) PullImages() error {
 }
 
 func (a *App) CleanDocker() error {
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+	a.emitEvent("log", LogEntry{
 		Service:   "launcher",
 		Message:   "Cleaning Docker resources...",
 		Timestamp: time.Now().Format("15:04:05"),
@@ -3856,7 +3912,7 @@ func (a *App) CleanDocker() error {
 		cmd := exec.Command("docker", args...)
 		cmd.Dir = a.projectPath
 		if err := cmd.Run(); err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			a.emitEvent("log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Warning: %v", err),
 				Timestamp: time.Now().Format("15:04:05"),
@@ -3864,7 +3920,7 @@ func (a *App) CleanDocker() error {
 		}
 	}
 
-	wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+	a.emitEvent("log", LogEntry{
 		Service:   "launcher",
 		Message:   "Cleanup completed",
 		Timestamp: time.Now().Format("15:04:05"),
@@ -4716,13 +4772,13 @@ func (a *App) DeleteServiceGroupImages(groupID string) error {
 				if strings.Contains(tag, requiredImage) || (serviceName != "" && strings.Contains(tag, serviceName)) {
 					_, removeErr := a.dockerClient.ImageRemove(ctx, img.ID, client.ImageRemoveOptions{PruneChildren: true})
 					if removeErr != nil {
-						wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+						a.emitEvent("log", LogEntry{
 							Service:   "launcher",
 							Message:   fmt.Sprintf("Warning: could not remove image %s: %v", tag, removeErr),
 							Timestamp: time.Now().Format("15:04:05"),
 						})
 					} else {
-						wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+						a.emitEvent("log", LogEntry{
 							Service:   "launcher",
 							Message:   fmt.Sprintf("Removed image: %s", tag),
 							Timestamp: time.Now().Format("15:04:05"),
@@ -4775,12 +4831,12 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 
 		defer func() {
 			if r := recover(); r != nil {
-				wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+				a.emitEvent("log", LogEntry{
 					Service:   "launcher",
 					Message:   fmt.Sprintf("Error during pull: %v", r),
 					Timestamp: time.Now().Format("15:04:05"),
 				})
-				wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+				a.emitEvent("pullComplete", map[string]interface{}{
 					"success":      false,
 					"failedGroups": groupIDs,
 				})
@@ -4794,12 +4850,12 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 		}
 
 		if _, err := a.requirePinnedProductionVersion(); err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			a.emitEvent("log", LogEntry{
 				Service:   "launcher",
 				Message:   err.Error(),
 				Timestamp: time.Now().Format("15:04:05"),
 			})
-			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+			a.emitEvent("pullComplete", map[string]interface{}{
 				"success":      false,
 				"failedGroups": groupIDs,
 				"reason":       "version_not_pinned",
@@ -4811,7 +4867,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 		// the user a very long download and leaves a half-populated image store.
 		if warning, err := a.checkDiskSpace(groupIDs, groupMap, a.CheckImagePresence()); err != nil {
 			a.emitAndLog("launcher", err.Error())
-			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+			a.emitEvent("pullComplete", map[string]interface{}{
 				"success":      false,
 				"failedGroups": groupIDs,
 				"reason":       "insufficient_disk",
@@ -4825,7 +4881,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 		for _, groupID := range groupIDs {
 			if group, ok := groupMap[groupID]; ok {
 				if group.Locked {
-					wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+					a.emitEvent("pullComplete", map[string]interface{}{
 						"success":      false,
 						"failedGroups": []string{groupID},
 						"reason":       "license_required",
@@ -4842,12 +4898,12 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 		}
 
 		if hasGPUService && !a.CheckGPU() {
-			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			a.emitEvent("log", LogEntry{
 				Service:   "launcher",
 				Message:   "NVIDIA GPU not detected. GPU services require NVIDIA Docker runtime.",
 				Timestamp: time.Now().Format("15:04:05"),
 			})
-			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+			a.emitEvent("pullComplete", map[string]interface{}{
 				"success":      false,
 				"failedGroups": groupIDs,
 				"reason":       "gpu_not_found",
@@ -4857,12 +4913,12 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 
 		creds, hasRegistryAuth, err := a.registryCredentialsForProImages(groupIDs, groupMap)
 		if err != nil {
-			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			a.emitEvent("log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Registry login failed: %v", err),
 				Timestamp: time.Now().Format("15:04:05"),
 			})
-			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+			a.emitEvent("pullComplete", map[string]interface{}{
 				"success":      false,
 				"failedGroups": groupIDs,
 				"reason":       "registry_login_failed",
@@ -4874,12 +4930,12 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 			var encodeErr error
 			registryAuth, encodeErr = license.EncodeRegistryAuth(creds)
 			if encodeErr != nil {
-				wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+				a.emitEvent("log", LogEntry{
 					Service:   "launcher",
 					Message:   fmt.Sprintf("Registry auth failed: %v", encodeErr),
 					Timestamp: time.Now().Format("15:04:05"),
 				})
-				wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+				a.emitEvent("pullComplete", map[string]interface{}{
 					"success":      false,
 					"failedGroups": groupIDs,
 					"reason":       "registry_login_failed",
@@ -4901,7 +4957,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 
 		for _, groupID := range groupIDs {
 			if pullCtx.Err() != nil {
-				wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+				a.emitEvent("pullComplete", map[string]interface{}{
 					"success": false,
 					"reason":  "cancelled",
 				})
@@ -4913,7 +4969,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 				continue
 			}
 
-			wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+			a.emitEvent("log", LogEntry{
 				Service:   "launcher",
 				Message:   fmt.Sprintf("Pulling %s...", group.Name),
 				Timestamp: time.Now().Format("15:04:05"),
@@ -4922,7 +4978,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 			groupFailed := false
 			for _, image := range group.Images {
 				if pullCtx.Err() != nil {
-					wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+					a.emitEvent("pullComplete", map[string]interface{}{
 						"success": false,
 						"reason":  "cancelled",
 					})
@@ -4936,7 +4992,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 					imageAuth = registryAuth
 				}
 				if err := a.verifyImageSignature(image); err != nil {
-					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+					a.emitEvent("log", LogEntry{
 						Service:   groupID,
 						Message:   fmt.Sprintf("Image signature verification failed for %s: %v", image, err),
 						Timestamp: time.Now().Format("15:04:05"),
@@ -4947,21 +5003,21 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 						groupFailed = false
 						// Cancellation: stop immediately and let the caller decide how to
 						// interpret the pull lifecycle.
-						wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+						a.emitEvent("pullComplete", map[string]interface{}{
 							"success": false,
 							"reason":  "cancelled",
 						})
 						return
 					}
 
-					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+					a.emitEvent("log", LogEntry{
 						Service:   groupID,
 						Message:   fmt.Sprintf("Failed to pull %s: %v", image, err),
 						Timestamp: time.Now().Format("15:04:05"),
 					})
 					groupFailed = true
 				} else {
-					wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+					a.emitEvent("log", LogEntry{
 						Service:   groupID,
 						Message:   fmt.Sprintf("Pulled image %d/%d: %s", imgIdx+1, totalImagesAll, image),
 						Timestamp: time.Now().Format("15:04:05"),
@@ -4974,7 +5030,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 			if groupFailed {
 				failedGroups = append(failedGroups, groupID)
 			} else {
-				wailsRuntime.EventsEmit(a.ctx, "log", LogEntry{
+				a.emitEvent("log", LogEntry{
 					Service:   groupID,
 					Message:   fmt.Sprintf("✓ All images pulled successfully for %s", group.Name),
 					Timestamp: time.Now().Format("15:04:05"),
@@ -4983,12 +5039,12 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 		}
 
 		if len(failedGroups) > 0 {
-			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+			a.emitEvent("pullComplete", map[string]interface{}{
 				"success":      false,
 				"failedGroups": failedGroups,
 			})
 		} else {
-			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+			a.emitEvent("pullComplete", map[string]interface{}{
 				"success": true,
 			})
 		}
