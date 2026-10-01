@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	containerpath "path"
 	"path/filepath"
 	"strings"
 )
@@ -233,19 +234,13 @@ func preparedProteinRuntimeAvailable(values map[string]string) error {
 	if err := json.Unmarshal(data, &document); err != nil || document.Schema != "protein_tools_assets/v1" || document.Fixture {
 		return unavailable("invalid production manifest")
 	}
-	models := []model{}
-	for _, checkpoint := range []string{"esm2_t6_8M_UR50D", "esm2_t33_650M_UR50D"} {
-		row, ok := document.ESM2[checkpoint]
-		if !ok {
-			return unavailable("checkpoint inventory missing: " + checkpoint)
-		}
-		models = append(models, row)
-	}
-	row, ok := document.FAMPNN["0.3_cath"]
+	// Starting the pilot requires the small ESM2 profile. Other checkpoints
+	// are admitted independently by their exact worker readiness report.
+	row, ok := document.ESM2["esm2_t6_8M_UR50D"]
 	if !ok {
-		return unavailable("FAMPNN inventory missing")
+		return unavailable("8M checkpoint inventory missing")
 	}
-	models = append(models, row)
+	models := []model{row}
 	containerHome := strings.TrimSpace(values["PROTO_HOME"])
 	if containerHome == "" {
 		containerHome = "/opt/proto"
@@ -254,18 +249,25 @@ func preparedProteinRuntimeAvailable(values map[string]string) error {
 	if containerCache == "" {
 		containerCache = "/models/proto"
 	}
-	if !filepath.IsAbs(containerHome) || !filepath.IsAbs(containerCache) {
+	if !containerpath.IsAbs(containerHome) || !containerpath.IsAbs(containerCache) {
 		return unavailable("container runtime roots must be absolute")
 	}
-	mapPath := func(path string) (string, error) {
+	mapPath := func(assetPath string) (string, error) {
+		// Manifest paths belong to the Linux container even when the launcher
+		// runs on Windows. Only host paths use filepath's platform semantics.
+		cleaned := containerpath.Clean(assetPath)
 		for _, pair := range [][2]string{{containerHome, home}, {containerCache, cache}} {
-			relative, err := filepath.Rel(pair[0], filepath.Clean(path))
-			if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
-				return filepath.Join(pair[1], relative), nil
+			root := strings.TrimSuffix(containerpath.Clean(pair[0]), "/")
+			if cleaned == root {
+				return pair[1], nil
+			}
+			if strings.HasPrefix(cleaned, root+"/") {
+				return filepath.Join(pair[1], filepath.FromSlash(strings.TrimPrefix(cleaned, root+"/"))), nil
 			}
 		}
 		return "", unavailable("manifest contains an asset outside controlled runtime roots")
 	}
+
 	verify := func(path, digest string) error {
 		hostPath, err := mapPath(path)
 		if err != nil {

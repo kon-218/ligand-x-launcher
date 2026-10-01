@@ -84,7 +84,7 @@ func TestPreparedProteinRuntimeChecksCanonicalInventoryAndBytes(t *testing.T) {
 		"interpreter": "/opt/proto/python", "tool_interpreter": "/opt/proto/python", "identity": map[string]string{"proto_commit": "reviewed", "interpreter_sha256": hash, "driver_interpreter_sha256": hash},
 		"files": []map[string]string{{"path": "/models/proto/weight.bin", "sha256": hash}},
 	}
-	document := map[string]any{"schema": "protein_tools_assets/v1", "esm2": map[string]any{"esm2_t6_8M_UR50D": row, "esm2_t33_650M_UR50D": row}, "fampnn": map[string]any{"0.3_cath": row}}
+	document := map[string]any{"schema": "protein_tools_assets/v1", "esm2": map[string]any{"esm2_t6_8M_UR50D": row}}
 	manifest, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
