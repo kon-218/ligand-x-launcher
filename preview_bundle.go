@@ -245,8 +245,19 @@ func preparedProteinRuntimeAvailable(values map[string]string) error {
 		return unavailable("FAMPNN inventory missing")
 	}
 	models = append(models, row)
+	containerHome := strings.TrimSpace(values["PROTO_HOME"])
+	if containerHome == "" {
+		containerHome = "/opt/proto"
+	}
+	containerCache := strings.TrimSpace(values["PROTO_MODEL_CACHE"])
+	if containerCache == "" {
+		containerCache = "/models/proto"
+	}
+	if !filepath.IsAbs(containerHome) || !filepath.IsAbs(containerCache) {
+		return unavailable("container runtime roots must be absolute")
+	}
 	mapPath := func(path string) (string, error) {
-		for _, pair := range [][2]string{{"/opt/proto", home}, {"/models/proto", cache}} {
+		for _, pair := range [][2]string{{containerHome, home}, {containerCache, cache}} {
 			relative, err := filepath.Rel(pair[0], filepath.Clean(path))
 			if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
 				return filepath.Join(pair[1], relative), nil
