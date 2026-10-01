@@ -36,6 +36,11 @@ public_tags = $(subst $(space),$(comma),$(strip public $(WEBKIT_TAG)))
 # repo); override it to test against a different signing key.
 LIGANDX_RUNTIME_PUBKEY ?= F1fZr213yHMWwiTMsLn8hIhxaGyjjiIDZjjPfjebzfY=
 LDFLAGS := -X main.runtimeBundlePublicKeyB64=$(LIGANDX_RUNTIME_PUBKEY)
+# Empty keeps the stable service list. A named allowlisted bundle, such as
+# proto-mutation, is compiled into the public binary as an optional group.
+ifneq ($(strip $(PREVIEW_BUNDLES)),)
+  LDFLAGS += -X main.enabledPreviewBundles=$(PREVIEW_BUNDLES)
+endif
 
 # ============================================================
 # Help
@@ -104,6 +109,7 @@ vet:
 	@go vet -tags public ./...
 
 test: verify-docs
+	@python3 scripts/render_preview_bundle_test.py
 	@go test ./...
 	@go test -tags public ./...
 

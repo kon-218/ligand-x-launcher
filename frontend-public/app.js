@@ -427,6 +427,9 @@ function svcCard(g) {
 
   const sizeTxt = g.sizeMb ? `${(g.sizeMb / 1024).toFixed(g.sizeMb >= 1024 ? 1 : 2)} GB download` : "";
   const unlock = g.locked ? `<div class="svc-unlock">Add a license to unlock</div>` : "";
+  const pilotNote = g.id === "protein-mutation"
+    ? `<div class="svc-size">Protein mutation pilot opt-in. Sets LIGANDX_ENABLE_PREVIEW_MODULES and LIGANDX_PROTO_PILOT_ENABLED. A healthy worker is not model readiness.</div>`
+    : "";
 
   item.innerHTML = `
     <div class="svc-check">${selected ? "✓" : ""}</div>
@@ -434,6 +437,7 @@ function svcCard(g) {
       <div class="svc-name">${esc(g.name)}${tag}</div>
       <div class="svc-desc">${esc(g.description || "")}</div>
       ${sizeTxt ? `<div class="svc-size">${sizeTxt}</div>` : ""}
+      ${pilotNote}
       ${unlock}
     </div>`;
 
@@ -561,6 +565,10 @@ async function onPullComplete(res) {
   if (reason === "gpu_not_found") {
     // Drop GPU-requiring groups and bounce back to selection.
     pullFailed("Some selected modules need an NVIDIA GPU that wasn't found. Remove them or continue with the rest.");
+    return;
+  }
+  if (reason === "assets_unavailable") {
+    pullFailed("Protein mutation pilot model assets are unavailable. A healthy worker is not model readiness.");
     return;
   }
   if (reason === "license_required") {
