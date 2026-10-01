@@ -109,7 +109,7 @@ vet:
 	@go vet -tags public ./...
 
 test: verify-docs
-	@python3 scripts/render_preview_bundle_test.py
+	@LIGANDX_PUBLIC_REPO="$(abspath $(PUBLIC_REPO))" python3 scripts/render_preview_bundle_test.py
 	@go test ./...
 	@go test -tags public ./...
 
@@ -128,7 +128,7 @@ build-public: | $(WAILS)
 
 runtime-bundle:
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make runtime-bundle VERSION=vX.Y.Z"; exit 1; fi
-	@VERSION="$(VERSION)" LIGANDX_PUBLIC_REPO="$(PUBLIC_REPO)" bash scripts/build-runtime-bundle.sh
+	@VERSION="$(VERSION)" PREVIEW_BUNDLES="$(PREVIEW_BUNDLES)" LIGANDX_PUBLIC_REPO="$(PUBLIC_REPO)" bash scripts/build-runtime-bundle.sh
 
 # ============================================================
 # Runtime topology

@@ -15,4 +15,4 @@ if [ ! -f "$PUBLIC_REPO/scripts/validate_runtime_bundle.py" ]; then
   exit 66
 fi
 
-exec env VERSION="${VERSION:-}" bash "$PUBLIC_REPO/scripts/build-runtime-bundle.sh" "$OUT_DIR"
+exec env VERSION="${VERSION:-}" PREVIEW_BUNDLES="${PREVIEW_BUNDLES:-}" bash "$PUBLIC_REPO/scripts/build-runtime-bundle.sh" "$OUT_DIR"

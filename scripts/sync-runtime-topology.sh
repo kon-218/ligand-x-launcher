@@ -23,6 +23,7 @@ for required in "$RENDERER" "$CANONICAL" "$ENV_SYNC" "$CANONICAL_ENV" "$TARGET_E
 done
 
 python3 "$RENDERER" "$CANONICAL" "$TARGET"
+python3 "$PUBLIC_REPO/scripts/render_runtime_overlay.py" "$PUBLIC_REPO/docker-compose.gpu.yml" "$TARGET" "$ROOT_DIR/docker-compose.gpu.yml"
 echo "Synchronized generated launcher topology: $TARGET"
 
 python3 "$ENV_SYNC" "$CANONICAL_ENV" "$TARGET_ENV"

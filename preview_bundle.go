@@ -1,10 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -155,18 +159,132 @@ func previewEnvUpdates(raw string, selectedGroupIDs []string) (map[string]string
 	return updates, nil
 }
 
+// verifySelectedRuntimePreview is called on verified, extracted bundle bytes
+// before activation and again before starting the opt-in service group.
+func verifySelectedRuntimePreview(root, selection string) error {
+	labels, err := splitPreviewLabels(selection)
+	if err != nil {
+		return err
+	}
+	if _, err := previewServiceGroups(selection, "unused"); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docker-compose.yml"))
+	if err != nil {
+		return err
+	}
+	header := "# Preview bundles: " + strings.Join(labels, ",") + "\n"
+	if len(labels) == 0 {
+		if strings.HasPrefix(string(data), "# Preview bundles:") {
+			return fmt.Errorf("preview runtime requires an explicitly selected preview launcher")
+		}
+		return nil
+	}
+	if !strings.HasPrefix(string(data), header) || !strings.Contains(string(data), "\n  worker-proto:\n") {
+		return fmt.Errorf("protein mutation preview runtime is not installed: install the signed proto-mutation bundle using LIGANDX_RUNTIME_BUNDLE_URL")
+	}
+	return nil
+}
+
 func proteinModelCacheAvailable(path string) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return fmt.Errorf("protein mutation model assets are unavailable: set LIGANDX_PROTO_MODEL_CACHE to a prepared model directory. A healthy worker is not model readiness")
+	return preparedProteinRuntimeAvailable(map[string]string{"PROTO_MODEL_CACHE_HOST": path})
+}
+
+// This host check verifies the reviewed inventory and asset bytes. Worker CUDA,
+// task registration and freshly observed environment identity remain worker
+// readiness checks; a launcher check never declares scientific qualification.
+func preparedProteinRuntimeAvailable(values map[string]string) error {
+	unavailable := func(reason string) error {
+		return fmt.Errorf("protein mutation prepared assets unavailable: %s. A healthy worker is not model readiness", reason)
 	}
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
-		return fmt.Errorf("protein mutation model assets are unavailable at %s. A healthy worker is not model readiness", path)
+	manifestPath := strings.TrimSpace(values["PROTO_RUNTIME_MANIFEST_HOST"])
+	digestPath := strings.TrimSpace(values["PROTO_RUNTIME_MANIFEST_SHA256_HOST"])
+	home := strings.TrimSpace(values["PROTO_HOME_HOST"])
+	cache := strings.TrimSpace(values["PROTO_MODEL_CACHE_HOST"])
+	if manifestPath == "" || digestPath == "" || home == "" || cache == "" {
+		return unavailable("configure PROTO_HOME_HOST, PROTO_MODEL_CACHE_HOST and approved manifest paths")
 	}
-	entries, err := os.ReadDir(path)
-	if err != nil || len(entries) == 0 {
-		return fmt.Errorf("protein mutation model assets are unavailable at %s. A healthy worker is not model readiness", path)
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return unavailable("manifest missing")
+	}
+	expected, err := os.ReadFile(digestPath)
+	actual := sha256.Sum256(data)
+	fields := strings.Fields(string(expected))
+	if err != nil || len(fields) == 0 || fields[0] != hex.EncodeToString(actual[:]) {
+		return unavailable("manifest digest differs from the approved inventory")
+	}
+	type asset struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	}
+	type model struct {
+		Files       []asset           `json:"files"`
+		Interpreter string            `json:"interpreter"`
+		Identity    map[string]string `json:"identity"`
+	}
+	var document struct {
+		Schema  string           `json:"schema"`
+		Fixture bool             `json:"fixture"`
+		ESM2    map[string]model `json:"esm2"`
+		FAMPNN  map[string]model `json:"fampnn"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil || document.Schema != "protein_tools_assets/v1" || document.Fixture {
+		return unavailable("invalid production manifest")
+	}
+	models := []model{}
+	for _, checkpoint := range []string{"esm2_t6_8M_UR50D", "esm2_t33_650M_UR50D"} {
+		row, ok := document.ESM2[checkpoint]
+		if !ok {
+			return unavailable("checkpoint inventory missing: " + checkpoint)
+		}
+		models = append(models, row)
+	}
+	row, ok := document.FAMPNN["0.3_cath"]
+	if !ok {
+		return unavailable("FAMPNN inventory missing")
+	}
+	models = append(models, row)
+	mapPath := func(path string) (string, error) {
+		for _, pair := range [][2]string{{"/opt/proto", home}, {"/models/proto", cache}} {
+			relative, err := filepath.Rel(pair[0], filepath.Clean(path))
+			if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
+				return filepath.Join(pair[1], relative), nil
+			}
+		}
+		return "", unavailable("manifest contains an asset outside controlled runtime roots")
+	}
+	verify := func(path, digest string) error {
+		hostPath, err := mapPath(path)
+		if err != nil {
+			return err
+		}
+		file, err := os.Open(hostPath)
+		if err != nil {
+			return unavailable("missing asset: " + path)
+		}
+		defer file.Close()
+		hash := sha256.New()
+		if _, err := io.Copy(hash, file); err != nil {
+			return unavailable("unreadable asset: " + path)
+		}
+		if len(digest) != 64 || hex.EncodeToString(hash.Sum(nil)) != digest {
+			return unavailable("asset hash mismatch: " + path)
+		}
+		return nil
+	}
+	for _, row := range models {
+		if len(row.Files) == 0 || row.Identity["proto_commit"] == "" {
+			return unavailable("incomplete prepared inventory")
+		}
+		if err := verify(row.Interpreter, row.Identity["interpreter_sha256"]); err != nil {
+			return err
+		}
+		for _, file := range row.Files {
+			if err := verify(file.Path, file.SHA256); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

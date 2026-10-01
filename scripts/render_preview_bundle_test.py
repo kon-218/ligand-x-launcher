@@ -2,6 +2,7 @@
 """Focused checks for allowlisted preview-bundle rendering."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render_preview_bundle as preview  # noqa: E402
 
 LAUNCHER = Path(__file__).resolve().parents[1]
-RENDERER = LAUNCHER.parent / "ligand-x-proto-mutation" / "scripts" / "render_stable_compose.py"
+RENDERER = Path(os.environ.get("LIGANDX_PUBLIC_REPO", str(LAUNCHER.parent / "ligand-x"))) / "scripts" / "render_stable_compose.py"
 
 CANONICAL = """\
 services:

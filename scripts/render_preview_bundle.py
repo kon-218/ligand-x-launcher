@@ -121,52 +121,12 @@ def render_preview_bundle(
 ) -> None:
     allow = allow if allow is not None else load_allowlist()
     require_known_labels(labels, allow)
-    with tempfile.TemporaryDirectory() as tmp:
-        stable_path = Path(tmp) / "stable.yml"
-        _render_stable(renderer, canonical, stable_path)
-        if not labels:
-            output.write_bytes(stable_path.read_bytes())
-            return
-        document = yaml.safe_load(stable_path.read_text(encoding="utf-8")) or {}
-        source = yaml.safe_load(canonical.read_text(encoding="utf-8")) or {}
-        services = document.setdefault("services", {})
-        source_services = source.get("services") or {}
-        source_volumes = source.get("volumes") or {}
-        selected_services: list[str] = []
-        for label in labels:
-            bundle = allow["bundles"][label]
-            names = bundle.get("services")
-            if not isinstance(names, list) or not names:
-                raise PreviewBundleError(f"{label}: preview bundle has no services")
-            for name in names:
-                service = source_services.get(name)
-                if not isinstance(service, dict) or not service.get("profiles"):
-                    raise PreviewBundleError(
-                        f"{label}: canonical compose has no preview service {name}"
-                    )
-                copied = dict(service)
-                copied.pop("profiles", None)
-                services[name] = copied
-                selected_services.append(name)
-                if isinstance(document.get("volumes"), dict) or _named_volumes(copied):
-                    volumes = document.setdefault("volumes", {})
-                    for volume in _named_volumes(copied):
-                        if volume not in source_volumes:
-                            raise PreviewBundleError(f"{name}: volume {volume} is not declared")
-                        volumes[volume] = source_volumes[volume]
-        leaked = sorted(LEAKED_PREVIEW_SERVICES & set(services))
-        if leaked:
-            raise PreviewBundleError(f"preview bundle leaked unselected services: {leaked}")
-        missing = [name for name in selected_services if name not in services]
-        if missing:
-            raise PreviewBundleError(f"preview services were not rendered: {missing}")
-        rendered = (
-            "# GENERATED FILE. Preview bundles: "
-            + ",".join(labels)
-            + ". Do not hand-edit; rerun scripts/render_preview_bundle.py.\n"
-            + yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
-        )
-        output.write_text(rendered, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(renderer), str(canonical), str(output),
+         "--preview-bundles", ",".join(labels)], capture_output=True, text=True,
+    )
+    if completed.returncode:
+        raise PreviewBundleError(completed.stderr.strip() or completed.stdout.strip())
 
 
 def main(argv: list[str]) -> int:

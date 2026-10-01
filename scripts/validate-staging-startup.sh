@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${RUNTIME_ROOT:-$ROOT_DIR}"
 cd "$ROOT_DIR"
 
 ENV_FILE="${ENV_FILE:-.env.production}"

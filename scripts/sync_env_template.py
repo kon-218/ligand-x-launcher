@@ -25,11 +25,13 @@ import importlib.util
 import sys
 from pathlib import Path
 
+PROTO_CONTROL_KEYS = frozenset({"LIGANDX_PROTO_PILOT_ENABLED", "PROTO_HOME", "PROTO_MODEL_CACHE", "PROTO_HOME_HOST", "PROTO_MODEL_CACHE_HOST", "PROTO_RUNTIME_MANIFEST_HOST", "PROTO_RUNTIME_MANIFEST_SHA256_HOST"})
+
 RESOURCE_SUFFIXES = ("_CPU_LIMIT", "_CPU_RES", "_MEM_LIMIT", "_MEM_RES", "_CONCURRENCY")
 
 
 def is_resource_key(key):
-    return key.endswith(RESOURCE_SUFFIXES)
+    return key.endswith(RESOURCE_SUFFIXES) or key in PROTO_CONTROL_KEYS
 
 
 def parse(path):
@@ -122,6 +124,12 @@ def main(argv):
         if key in drift:
             newline = "\n" if line.endswith("\n") else ""
             lines[i] = f"{key}={drift[key]}{newline}"
+    missing = {key: value for key, value in drift.items() if key not in target}
+    if missing:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append("# Canonical prepared-runtime controls (preview remains disabled by default).\n")
+        lines.extend(f"{key}={value}\n" for key, value in sorted(missing.items()))
     with open(target_path, "w", encoding="utf-8") as handle:
         handle.writelines(lines)
 

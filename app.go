@@ -895,6 +895,9 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 	if err := runtimebundle.Extract(zipPath, extractedDir); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to extract runtime bundle: %w", err)
 	}
+	if err := verifySelectedRuntimePreview(extractedDir, enabledPreviewBundles); err != nil {
+		return a.GetDistributionStatus(), err
+	}
 	previousProjectPath := a.projectPath
 	a.projectPath = runtimeDir
 	_, existingComposeErr := os.Stat(filepath.Join(runtimeDir, "docker-compose.yml"))
@@ -3400,11 +3403,14 @@ func (a *App) proteinPilotUnavailable(groupIDs []string) error {
 	if !a.CheckGPU() {
 		return fmt.Errorf("protein mutation pilot is unavailable: NVIDIA GPU was not found. A healthy worker is not model readiness")
 	}
-	cache := ""
-	if content, err := a.GetEnvContent("prod"); err == nil {
-		cache = strings.TrimSpace(envfile.Parse(content)["LIGANDX_PROTO_MODEL_CACHE"])
+	if err := verifySelectedRuntimePreview(a.projectPath, enabledPreviewBundles); err != nil {
+		return err
 	}
-	return proteinModelCacheAvailable(cache)
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return err
+	}
+	return preparedProteinRuntimeAvailable(envfile.Parse(content))
 }
 
 // templatePinnedVersion returns the VERSION pinned in .env.production.template,

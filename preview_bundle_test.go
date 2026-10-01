@@ -109,8 +109,8 @@ func TestProteinPilotAssetsMissing(t *testing.T) {
 	if err := os.WriteFile(cache+"/weights.bin", []byte("pinned"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := proteinModelCacheAvailable(cache); err != nil {
-		t.Fatal(err)
+	if err := proteinModelCacheAvailable(cache); err == nil {
+		t.Fatal("arbitrary weights file was treated as approved prepared assets")
 	}
 }
 
