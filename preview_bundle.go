@@ -219,9 +219,10 @@ func preparedProteinRuntimeAvailable(values map[string]string) error {
 		SHA256 string `json:"sha256"`
 	}
 	type model struct {
-		Files       []asset           `json:"files"`
-		Interpreter string            `json:"interpreter"`
-		Identity    map[string]string `json:"identity"`
+		Files           []asset           `json:"files"`
+		Interpreter     string            `json:"interpreter"`
+		ToolInterpreter string            `json:"tool_interpreter"`
+		Identity        map[string]string `json:"identity"`
 	}
 	var document struct {
 		Schema  string           `json:"schema"`
@@ -288,7 +289,10 @@ func preparedProteinRuntimeAvailable(values map[string]string) error {
 		if len(row.Files) == 0 || row.Identity["proto_commit"] == "" {
 			return unavailable("incomplete prepared inventory")
 		}
-		if err := verify(row.Interpreter, row.Identity["interpreter_sha256"]); err != nil {
+		if err := verify(row.Interpreter, row.Identity["driver_interpreter_sha256"]); err != nil {
+			return err
+		}
+		if err := verify(row.ToolInterpreter, row.Identity["interpreter_sha256"]); err != nil {
 			return err
 		}
 		for _, file := range row.Files {
