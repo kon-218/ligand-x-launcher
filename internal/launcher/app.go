@@ -1,4 +1,4 @@
-package main
+package launcher
 
 import (
 	"bufio"
@@ -213,11 +213,11 @@ func isLigandxProject(projectName string) bool {
 	return strings.Contains(projectName, "ligand") || projectName == "ligandx"
 }
 
-// Injected into public builds with: -ldflags "-X main.runtimeBundlePublicKeyB64=<base64 raw Ed25519 public key>".
+// Set by Run from the release trust root injected into package main.
 // A public build without a trust root fails closed before downloading a runtime bundle.
 var runtimeBundlePublicKeyB64 string
 
-// Injected by production builds. The fallback matches the last runtime known
+// Set by Run from the production build version. The fallback matches the last runtime known
 // to older build scripts, while CI always supplies the product release.
 var launcherVersion = defaultPinnedImageVersion
 

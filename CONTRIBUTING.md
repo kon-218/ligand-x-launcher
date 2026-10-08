@@ -2,7 +2,7 @@
 
 This is the developer guide for building, running, and contributing to the launcher. For product info, downloads, and usage, see the [README](README.md).
 
-The launcher is a [Wails](https://wails.io/) v2 app: a Go backend (Docker SDK integration in [`app.go`](app.go)) with a pure HTML/CSS/JS frontend (no build step, no npm, no frameworks).
+The launcher is a [Wails](https://wails.io/) v2 app: a Go backend (Docker SDK integration in [`internal/launcher/app.go`](internal/launcher/app.go)) with a pure HTML/CSS/JS frontend (no build step, no npm, no frameworks).
 
 ## Requirements
 
@@ -53,13 +53,18 @@ No additional setup needed (uses WebView2).
 
 | Path | What it is |
 |------|------------|
-| `*.go` (root) | The Wails `main` package: app lifecycle and every method bound to the frontend |
-| `internal/` | Self-contained Go packages the app uses (no Wails bindings) |
+| `main.go`, `assets_*.go` | Wails entry point, release build variables, and frontend embedding |
+| `internal/launcher/` | Application backend, lifecycle, Wails bindings, and backend tests |
+| Other `internal/` packages | Runtime verification, licensing, credentials, metrics, and agent sessions |
 | `frontend-public/` | The shipped launcher UI (built with `-tags public`) |
 | `frontend/` | Developer/operator dashboard (default build); not shipped in releases |
 | `docker-compose.yml`, `docker-compose.gpu.yml`, `.env.production.template`, `config/`, `docker/` | Generated snapshot of the runtime topology from the core repository — regenerate with `make sync-runtime-topology`, never hand-edit. Release validation runs Compose from the repository root, so these stay here |
 | `scripts/` | Runtime-topology sync/check, staging validation and documentation checks |
 | `build/` | Icons and platform packaging assets used by Wails and the release workflow |
+
+The frontend calls `window.go.launcher.App`; Wails generates its bindings under
+`wailsjs/go/launcher/`. Release tooling still injects `main.runtimeBundlePublicKeyB64`
+and `main.launcherVersion`, which the entry point passes into the backend.
 
 ## Development mode
 

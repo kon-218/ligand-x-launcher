@@ -23,7 +23,7 @@ import (
 
 // Policy carries the build-time inputs that release verification and download
 // checks are made against. The launcher builds one from its ldflags-injected
-// values (see runtimePolicy in package main); tests build their own.
+// values (see runtimePolicy in internal/launcher); tests build their own.
 type Policy struct {
 	// PublicKeyB64 is the base64 raw Ed25519 key that signs runtime manifests
 	// and release indexes. Empty fails closed: nothing verifies.

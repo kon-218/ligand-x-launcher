@@ -1,7 +1,7 @@
 /* Ligand-X public launcher — guided linear flow.
  *
  * Reuses the same Go backend as the dev launcher via the Wails-injected
- * globals window.go.main.App.* and window.runtime.*. No ES-module imports;
+ * globals window.go.launcher.App.* and window.runtime.*. No ES-module imports;
  * the runtime binds these on the window object at startup.
  *
  * Flow:  preflight gate  ->  login  ->  license (optional)  ->  services
@@ -10,7 +10,7 @@
  * screen in its "ready to start" state.
  */
 
-const App = () => window.go.main.App;
+const App = () => window.go.launcher.App;
 const RT = () => window.runtime;
 
 // ---------- shared state ----------
