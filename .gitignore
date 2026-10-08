@@ -18,6 +18,7 @@ frontend-public/wailsjs/
 # Local runtime state and secrets
 .env.production
 /data/
+/runtime/data/
 
 # Local tooling
 .idea/

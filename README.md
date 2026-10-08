@@ -76,16 +76,16 @@ make build-public
 make check-runtime-topology
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for platform setup. The `frontend/` dashboard is a developer interface and is not shipped in public releases.
+See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for platform setup. The `frontend/` dashboard is a developer interface and is not shipped in public releases.
 
 ## Documentation
 
 - [FAQ](docs/FAQ.md)
 - [Runtime security](docs/security.md)
-- [Contributing](CONTRIBUTING.md)
+- [Contributing](docs/CONTRIBUTING.md)
 
 ## License
 
 Distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires commercial terms.
 
-Third-party Go modules are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Container images carry their own notices at `/app/THIRD_PARTY_NOTICES.md`.
+Third-party Go modules are listed in [`THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md). Container images carry their own notices at `/app/THIRD_PARTY_NOTICES.md`.
