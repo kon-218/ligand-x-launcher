@@ -98,7 +98,7 @@ function setupTabSwitching() {
 async function checkDocker() {
     try {
         // Add a 3-second timeout for Docker check
-        const checkPromise = window.go.main.App.CheckDocker();
+        const checkPromise = window.go.launcher.App.CheckDocker();
         const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Docker check timed out')), 3000)
         );
@@ -141,7 +141,7 @@ function updateDockerStatus(running, message) {
 
 async function updateStatus() {
     try {
-        const status = await window.go.main.App.GetSystemStatus();
+        const status = await window.go.launcher.App.GetSystemStatus();
         
         // Update docker status
         updateDockerStatus(status.dockerRunning, '');
@@ -172,7 +172,7 @@ async function updateStatus() {
 
 async function updateProjectPath() {
     try {
-        const path = await window.go.main.App.GetProjectPath();
+        const path = await window.go.launcher.App.GetProjectPath();
         document.getElementById('projectPath').textContent = path || 'Not set';
     } catch (err) {
         document.getElementById('projectPath').textContent = 'Error';
@@ -205,10 +205,10 @@ async function startServices() {
 
     try {
         if (serviceTabSelection.length > 0) {
-            await window.go.main.App.StartServiceGroups(env, serviceTabSelection);
+            await window.go.launcher.App.StartServiceGroups(env, serviceTabSelection);
             addLog('launcher', `Services started in ${env} mode (${serviceTabSelection.length} groups selected)`);
         } else {
-            await window.go.main.App.StartServices(env);
+            await window.go.launcher.App.StartServices(env);
             addLog('launcher', `Services started in ${env} mode`);
         }
         await updateStatus();
@@ -227,7 +227,7 @@ async function stopServices() {
     setControlButtonsLoading(icon);
 
     try {
-        await window.go.main.App.StopServices();
+        await window.go.launcher.App.StopServices();
         await updateStatus();
         addLog('launcher', 'Services stopped');
     } catch (err) {
@@ -246,10 +246,10 @@ async function restartServices() {
 
     try {
         if (serviceTabSelection.length > 0) {
-            await window.go.main.App.RestartServiceGroups(serviceTabSelection);
+            await window.go.launcher.App.RestartServiceGroups(serviceTabSelection);
             addLog('launcher', `Services restarted (${serviceTabSelection.length} groups selected)`);
         } else {
-            await window.go.main.App.RestartServices();
+            await window.go.launcher.App.RestartServices();
             addLog('launcher', 'Services restarted');
         }
         await updateStatus();
@@ -274,7 +274,7 @@ async function pullImages() {
         }
 
         addLog('launcher', `Pulling services: ${serviceTabSelection.join(', ')}...`);
-        window.go.main.App.PullServiceGroups(serviceTabSelection);
+        window.go.launcher.App.PullServiceGroups(serviceTabSelection);
     } catch (err) {
         addLog('launcher', `Error: ${err.message || err}`, 'error');
     } finally {
@@ -288,15 +288,15 @@ async function pullImages() {
 // ============================================================
 
 async function openFrontend() {
-    await window.go.main.App.OpenFrontend();
+    await window.go.launcher.App.OpenFrontend();
 }
 
 async function openAPI() {
-    await window.go.main.App.OpenAPI();
+    await window.go.launcher.App.OpenAPI();
 }
 
 async function openFlower() {
-    await window.go.main.App.OpenFlower();
+    await window.go.launcher.App.OpenFlower();
 }
 
 // ============================================================
@@ -305,11 +305,11 @@ async function openFlower() {
 
 async function selectProjectFolder() {
     try {
-        const path = await window.go.main.App.SelectProjectFolder();
+        const path = await window.go.launcher.App.SelectProjectFolder();
         if (path) {
             document.getElementById('projectPath').textContent = path;
             addLog('launcher', `Runtime path set to: ${path}`);
-            distributionStatus = await window.go.main.App.GetDistributionStatus();
+            distributionStatus = await window.go.launcher.App.GetDistributionStatus();
         }
     } catch (err) {
         addLog('launcher', `Error: ${err.message || err}`, 'error');
@@ -325,7 +325,7 @@ async function cleanDocker() {
     icon.style.animation = 'spin 0.8s linear infinite';
 
     try {
-        await window.go.main.App.CleanDocker();
+        await window.go.launcher.App.CleanDocker();
         addLog('launcher', 'Docker cleanup completed');
     } catch (err) {
         addLog('launcher', `Error: ${err.message || err}`, 'error');
@@ -415,7 +415,7 @@ function clearLogs() {
 async function changeLogService() {
     const service = document.getElementById('logService').value;
     try {
-        await window.go.main.App.ViewLogs(service);
+        await window.go.launcher.App.ViewLogs(service);
         addLog('launcher', `Now viewing logs for: ${service}`);
     } catch (err) {
         addLog('launcher', `Error: ${err.message || err}`, 'error');
@@ -599,7 +599,7 @@ function renderLicenseModalContent(license) {
 
 async function importLicenseFromModal() {
     try {
-        const status = await window.go.main.App.SelectLicenseFile()
+        const status = await window.go.launcher.App.SelectLicenseFile()
         wizardLicenseStatus = status
         renderLicenseBadge(status)
         renderLicenseModalContent(status)
@@ -631,11 +631,11 @@ let distributionStatus = null;
 async function initializeWizard() {
     try {
         const [config, groups, imageStatus, license, distro] = await Promise.all([
-            window.go.main.App.GetLauncherConfig(),
-            window.go.main.App.GetServiceGroups(),
-            window.go.main.App.CheckImagePresence(),
-            window.go.main.App.GetLicenseStatus(),
-            window.go.main.App.GetDistributionStatus(),
+            window.go.launcher.App.GetLauncherConfig(),
+            window.go.launcher.App.GetServiceGroups(),
+            window.go.launcher.App.CheckImagePresence(),
+            window.go.launcher.App.GetLicenseStatus(),
+            window.go.launcher.App.GetDistributionStatus(),
         ]);
 
         distributionStatus = distro;
@@ -719,8 +719,8 @@ function renderWizardLicenseSummary() {
 
 async function refreshWizardLicenseAndGroups() {
     const [groups, license] = await Promise.all([
-        window.go.main.App.GetServiceGroups(),
-        window.go.main.App.GetLicenseStatus(),
+        window.go.launcher.App.GetServiceGroups(),
+        window.go.launcher.App.GetLicenseStatus(),
     ]);
     wizardServiceGroups = groups;
     wizardLicenseStatus = license;
@@ -740,7 +740,7 @@ async function refreshWizardLicenseAndGroups() {
 
 async function importWizardLicense() {
     try {
-        const status = await window.go.main.App.SelectLicenseFile();
+        const status = await window.go.launcher.App.SelectLicenseFile();
         wizardLicenseStatus = status;
         renderLicenseBadge(status);
         renderWizardLicenseSummary();
@@ -765,7 +765,7 @@ async function ensureWizardAccount() {
     const confirm = document.getElementById('wizardPasswordConfirm').value;
 
     if (wizardAccountSaved && !password && !confirm) {
-        return await window.go.main.App.GetLauncherConfig();
+        return await window.go.launcher.App.GetLauncherConfig();
     }
     if (!username) {
         throw new Error('Enter a username.');
@@ -777,7 +777,7 @@ async function ensureWizardAccount() {
         throw new Error('Passwords do not match.');
     }
 
-    const config = await window.go.main.App.SaveLocalAccount(username, email, password);
+    const config = await window.go.launcher.App.SaveLocalAccount(username, email, password);
     wizardAccountSaved = true;
     document.getElementById('wizardPassword').value = '';
     document.getElementById('wizardPasswordConfirm').value = '';
@@ -919,7 +919,7 @@ async function startWizardPull() {
     try {
         if (!distributionStatus || distributionStatus.needsInstall) {
             addLog('launcher', 'Installing Ligand-X runtime files...');
-            distributionStatus = await window.go.main.App.InstallRuntimeBundle();
+            distributionStatus = await window.go.launcher.App.InstallRuntimeBundle();
             await updateProjectPath();
             renderWizardLicenseSummary();
         }
@@ -928,7 +928,7 @@ async function startWizardPull() {
         // Re-check which images are already present right before we start
         // downloading. This keeps "skip" correct even if the user pulled
         // some images earlier in the launcher session.
-        const imageStatus = await window.go.main.App.CheckImagePresence();
+        const imageStatus = await window.go.launcher.App.CheckImagePresence();
         wizardImageStatus = imageStatus || {};
         needDownload = wizardSelectedGroups.filter(id => !wizardImageStatus[id]);
         if (needDownload.length === 0) {
@@ -957,7 +957,7 @@ async function startWizardPull() {
 
     // Start pull
     window.isPulling = true;
-    window.go.main.App.PullServiceGroups(needDownload);
+    window.go.launcher.App.PullServiceGroups(needDownload);
 }
 
 async function skipWizardPull() {
@@ -1048,7 +1048,7 @@ async function saveWizardConfig() {
         renderLicenseBadge(wizardLicenseStatus || { edition: 'free' });
         config.configVersion = 2;
 
-        await window.go.main.App.SaveLauncherConfig(config);
+        await window.go.launcher.App.SaveLauncherConfig(config);
 
         // Close wizard
         const wizard = document.getElementById('firstRunWizard');
@@ -1075,10 +1075,10 @@ async function renderServicesTab() {
 
         // Fetch data with timeout (5 seconds)
         const fetchPromise = Promise.all([
-            window.go.main.App.GetServiceGroups(),
-            window.go.main.App.CheckImagePresence(),
-            window.go.main.App.GetLauncherConfig(),
-            window.go.main.App.CheckReinventModels(),
+            window.go.launcher.App.GetServiceGroups(),
+            window.go.launcher.App.CheckImagePresence(),
+            window.go.launcher.App.GetLauncherConfig(),
+            window.go.launcher.App.CheckReinventModels(),
         ]);
 
         const timeoutPromise = new Promise((_, reject) =>
@@ -1293,9 +1293,9 @@ async function toggleServiceSelection(groupId) {
 
     // Persist to config
     try {
-        const config = await window.go.main.App.GetLauncherConfig();
+        const config = await window.go.launcher.App.GetLauncherConfig();
         config.selectedGroups = serviceTabSelection.slice();
-        await window.go.main.App.SaveLauncherConfig(config);
+        await window.go.launcher.App.SaveLauncherConfig(config);
     } catch (err) {
         console.error('Failed to save selection:', err);
     }
@@ -1306,7 +1306,7 @@ async function toggleServiceSelection(groupId) {
 async function restartServiceGroup(groupId) {
     try {
         addLog('launcher', 'Restarting ' + groupId + '...');
-        await window.go.main.App.RestartServiceGroups([groupId]);
+        await window.go.launcher.App.RestartServiceGroups([groupId]);
         addLog('launcher', groupId + ' restarted');
     } catch (err) {
         addLog('launcher', 'Error restarting ' + groupId + ': ' + (err.message || err), 'error');
@@ -1316,7 +1316,7 @@ async function restartServiceGroup(groupId) {
 async function deleteServiceGroupImages(groupId) {
     try {
         addLog('launcher', 'Deleting images for ' + groupId + '...');
-        await window.go.main.App.DeleteServiceGroupImages(groupId);
+        await window.go.launcher.App.DeleteServiceGroupImages(groupId);
         addLog('launcher', 'Images deleted for ' + groupId);
     } catch (err) {
         addLog('launcher', 'Error deleting images: ' + err.message || err, 'error');
@@ -1341,7 +1341,7 @@ async function pullServiceGroup(groupId) {
     await renderServicesTab();
 
     // Start pull
-    window.go.main.App.PullServiceGroups([groupId]);
+    window.go.launcher.App.PullServiceGroups([groupId]);
 }
 
 // ============================================================
@@ -1359,7 +1359,7 @@ async function loadEnvConfig() {
     const mode = document.getElementById('envMode').value;
     const editor = document.getElementById('envEditor');
     try {
-        const content = await window.go.main.App.GetEnvContent(mode);
+        const content = await window.go.launcher.App.GetEnvContent(mode);
         editor.value = content;
     } catch (err) {
         addLog('launcher', `Error loading .env: ${err.message || err}`, 'error');
@@ -1370,7 +1370,7 @@ async function saveEnvConfig() {
     const mode = document.getElementById('envMode').value;
     const content = document.getElementById('envEditor').value;
     try {
-        await window.go.main.App.SaveEnvContent(mode, content);
+        await window.go.launcher.App.SaveEnvContent(mode, content);
         addLog('launcher', `.env${mode === 'prod' ? '.production' : ''} saved successfully`);
     } catch (err) {
         addLog('launcher', `Error saving .env: ${err.message || err}`, 'error');
@@ -1413,7 +1413,7 @@ async function downloadReinventModels() {
     reinventModelsReady = false;
     // Start download first, then re-render so the goroutine is already running
     // before we do the async render (avoids race where fast errors fire before render)
-    window.go.main.App.DownloadReinventModels();
+    window.go.launcher.App.DownloadReinventModels();
     renderServicesTab();
 }
 
@@ -1484,7 +1484,7 @@ function activateWorkbenchTab(tabName, label) {
 
 async function updateProjectPath() {
     try {
-        const path = await window.go.main.App.GetProjectPath();
+        const path = await window.go.launcher.App.GetProjectPath();
         ['projectPath', 'projectPathStatus'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.textContent = path || 'Not set';
@@ -1499,7 +1499,7 @@ async function updateProjectPath() {
 
 async function updateStatus() {
     try {
-        const status = await window.go.main.App.GetSystemStatus();
+        const status = await window.go.launcher.App.GetSystemStatus();
         lastSystemStatus = status;
         updateDockerStatus(status.dockerRunning, '');
         const total = Number(status.totalRunning || 0);
@@ -1536,10 +1536,10 @@ async function renderServicesTab() {
     if (!container) return;
     try {
         const fetchPromise = Promise.all([
-            window.go.main.App.GetServiceGroups(),
-            window.go.main.App.CheckImagePresence(),
-            window.go.main.App.GetLauncherConfig(),
-            window.go.main.App.CheckReinventModels(),
+            window.go.launcher.App.GetServiceGroups(),
+            window.go.launcher.App.CheckImagePresence(),
+            window.go.launcher.App.GetLauncherConfig(),
+            window.go.launcher.App.CheckReinventModels(),
         ]);
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Backend request timeout')), 5000));
         const [allGroups, imageStatus, config, reinventModelsPresent] = await Promise.race([fetchPromise, timeoutPromise]);
@@ -1765,7 +1765,7 @@ async function wizardBack() {
         // Back during pull means "stop download and go back to service selection".
         window.isPulling = false;
         try {
-            await window.go.main.App.StopPullServiceGroups();
+            await window.go.launcher.App.StopPullServiceGroups();
         } catch (e) { /* best-effort cancellation */ }
 
         const progress = document.getElementById('pullProgressContainer');
@@ -1813,7 +1813,7 @@ function showWizard() {
 
 async function cleanDocker() {
     try {
-        await window.go.main.App.CleanDocker();
+        await window.go.launcher.App.CleanDocker();
         addLog('launcher', 'Docker cleanup completed');
     } catch (err) {
         addLog('launcher', `Error: ${err.message || err}`, 'error');
@@ -1823,14 +1823,14 @@ async function cleanDocker() {
 
 async function selectProjectFolder() {
     try {
-        const path = await window.go.main.App.SelectProjectFolder();
+        const path = await window.go.launcher.App.SelectProjectFolder();
         if (path) {
             ['projectPath', 'projectPathStatus'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) el.textContent = path;
             });
             addLog('launcher', `Runtime path set to: ${path}`);
-            distributionStatus = await window.go.main.App.GetDistributionStatus();
+            distributionStatus = await window.go.launcher.App.GetDistributionStatus();
         }
     } catch (err) {
         addLog('launcher', `Error: ${err.message || err}`, 'error');
@@ -2085,7 +2085,7 @@ function updateAllSparklines() {
 async function updateResourceTelemetry() {
     try {
         if (!window.go?.main?.App?.GetResourceMetrics) return;
-        const metrics = await window.go.main.App.GetResourceMetrics();
+        const metrics = await window.go.launcher.App.GetResourceMetrics();
         latestResourceMetrics = metrics;
         renderResourceMetrics(metrics);
     } catch (err) {
@@ -2617,7 +2617,7 @@ function initDrawerActions() {
             if (!currentDrawerContainerService) return;
             try {
                 addLog('launcher', 'Restarting ' + currentDrawerContainerService + '...');
-                await window.go.main.App.RestartServicesCustom([currentDrawerContainerService]);
+                await window.go.launcher.App.RestartServicesCustom([currentDrawerContainerService]);
                 addLog('launcher', currentDrawerContainerService + ' restarted');
             } catch (err) {
                 addLog('launcher', 'Restart failed: ' + (err.message || err), 'error');

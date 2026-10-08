@@ -1,4 +1,4 @@
-package main
+package launcher
 
 import (
 	"bytes"
@@ -169,7 +169,7 @@ func TestLeaseActivationWithoutSelectionIncludesEveryUnlockedGroup(t *testing.T)
 }
 
 func TestCorePullListIncludesEveryFixedComposeImage(t *testing.T) {
-	compose, err := os.ReadFile("docker-compose.yml")
+	compose, err := os.ReadFile("../../docker-compose.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 	app := NewApp()
 	app.projectPath = runtimeDir
 
-	compose, err := os.ReadFile("docker-compose.yml")
+	compose, err := os.ReadFile("../../docker-compose.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1941,7 +1941,7 @@ func TestOverCPUServicesReadsTheResolvedModel(t *testing.T) {
 func TestComposeCPULimitKeysMapsServicesToTheirBackingEnvKey(t *testing.T) {
 	// Knowing which key backs a service's limit is what turns "worker-cpu wants
 	// 16 CPUs" into a value the launcher can actually clamp.
-	data, err := os.ReadFile("docker-compose.yml")
+	data, err := os.ReadFile("../../docker-compose.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2429,7 +2429,7 @@ func TestResetResourceLimitsFitsATemplateTooBigForThisMachine(t *testing.T) {
 const smallestSupportedCPUs = 4
 
 func TestShippedTemplateStartsOnTheSmallestSupportedMachine(t *testing.T) {
-	data, err := os.ReadFile(".env.production.template")
+	data, err := os.ReadFile("../../.env.production.template")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2457,11 +2457,11 @@ func TestShippedTemplateStartsOnTheSmallestSupportedMachine(t *testing.T) {
 // launcher pins VERSION/PRO_VERSION for the release it ships with), so parity
 // is enforced on the resource and concurrency keys rather than byte-for-byte.
 func TestTemplatesAgreeOnResourceKeys(t *testing.T) {
-	ours, err := os.ReadFile(".env.production.template")
+	ours, err := os.ReadFile("../../.env.production.template")
 	if err != nil {
 		t.Fatal(err)
 	}
-	theirs, err := os.ReadFile("../ligand-x/.env.production.template")
+	theirs, err := os.ReadFile("../../../ligand-x/.env.production.template")
 	if err != nil {
 		t.Skipf("sibling repo not checked out: %v", err)
 	}
@@ -2791,7 +2791,7 @@ func TestInstalledRuntimeVersionReadsMarker(t *testing.T) {
 }
 
 func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(".github", "workflows", "launcher-release.yml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "launcher-release.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2823,7 +2823,7 @@ func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
 }
 
 func TestLauncherQualityRunsForMainPushes(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(".github", "workflows", "quality.yml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "quality.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3063,7 +3063,7 @@ func TestVerifyFittedModelClampsComposeInlineOnlyDefault(t *testing.T) {
 // already running. The generated snapshot must keep the prefix overridable,
 // and the staging script must actually set it from COMPOSE_PROJECT_NAME.
 func TestValidateStagingIsolatesInfraContainerNames(t *testing.T) {
-	compose, err := os.ReadFile("docker-compose.yml")
+	compose, err := os.ReadFile("../../docker-compose.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3077,7 +3077,7 @@ func TestValidateStagingIsolatesInfraContainerNames(t *testing.T) {
 		}
 	}
 
-	script, err := os.ReadFile("scripts/validate-staging-startup.sh")
+	script, err := os.ReadFile("../../scripts/validate-staging-startup.sh")
 	if err != nil {
 		t.Fatal(err)
 	}

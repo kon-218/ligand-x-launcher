@@ -9,13 +9,3 @@ import "embed"
 //
 //go:embed all:frontend
 var assets embed.FS
-
-// Window metadata for the dev launcher.
-const (
-	isPublicBuild = false
-	appTitle      = "Ligand-X Launcher"
-	appWidth      = 600
-	appHeight     = 700
-	appMinWidth   = 500
-	appMinHeight  = 600
-)
