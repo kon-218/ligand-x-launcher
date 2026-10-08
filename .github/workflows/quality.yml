@@ -18,6 +18,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: kon-218/ligand-x
+          token: ${{ secrets.LIGANDX_SOURCE_READ_PAT }}
           ref: main
           path: .core-contracts
           sparse-checkout: lib/licensing/module_registry.py
