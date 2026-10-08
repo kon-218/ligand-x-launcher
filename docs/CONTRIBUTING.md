@@ -1,8 +1,8 @@
 # Contributing to the Ligand-X Launcher
 
-This is the developer guide for building, running, and contributing to the launcher. For product info, downloads, and usage, see the [README](README.md).
+This is the developer guide for building, running, and contributing to the launcher. For product info, downloads, and usage, see the [README](../README.md).
 
-The launcher is a [Wails](https://wails.io/) v2 app: a Go backend (Docker SDK integration in [`internal/launcher/app.go`](internal/launcher/app.go)) with a pure HTML/CSS/JS frontend (no build step, no npm, no frameworks).
+The launcher is a [Wails](https://wails.io/) v2 app: a Go backend (Docker SDK integration in [`internal/launcher/app.go`](../internal/launcher/app.go)) with a pure HTML/CSS/JS frontend (no build step, no npm, no frameworks).
 
 ## Requirements
 
@@ -58,7 +58,7 @@ No additional setup needed (uses WebView2).
 | Other `internal/` packages | Runtime verification, licensing, credentials, metrics, and agent sessions |
 | `frontend-public/` | The shipped launcher UI (built with `-tags public`) |
 | `frontend/` | Developer/operator dashboard (default build); not shipped in releases |
-| `docker-compose.yml`, `docker-compose.gpu.yml`, `.env.production.template`, `config/`, `docker/` | Generated snapshot of the runtime topology from the core repository — regenerate with `make sync-runtime-topology`, never hand-edit. Release validation runs Compose from the repository root, so these stay here |
+| `runtime/` | Generated snapshot of the runtime topology from the core repository — regenerate with `make sync-runtime-topology`, never hand-edit. Compose files, the environment template, and relative-path assets stay together here |
 | `scripts/` | Runtime-topology sync/check, staging validation and documentation checks |
 | `build/` | Icons and platform packaging assets used by Wails and the release workflow |
 
@@ -148,11 +148,11 @@ assets are:
 | Runtime bundle | `ligand-x-runtime.zip` (downloaded automatically by the launcher on first run) |
 | Stable release index | `ligand-x-release-index.json` + `.sig` (drives version selection) |
 
-> Keep the download links in [README.md](README.md) and on the website in sync with these exact asset names if the workflow output changes.
+> Keep the download links in [README.md](../README.md) and on the website in sync with these exact asset names if the workflow output changes.
 
 ## Regenerating icons
 
-If you update the app icon ([`build/appicon.svg`](build/appicon.svg)):
+If you update the app icon ([`build/appicon.svg`](../build/appicon.svg)):
 
 ```bash
 # From SVG source (requires ImageMagick)

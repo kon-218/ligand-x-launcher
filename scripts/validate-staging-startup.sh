@@ -3,15 +3,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+RUNTIME_DIR="$ROOT_DIR/runtime"
 
-ENV_FILE="${ENV_FILE:-.env.production}"
+ENV_FILE="${ENV_FILE:-runtime/.env.production}"
 OVERRIDE_ENV_FILE="${OVERRIDE_ENV_FILE:-}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-ligandx-staging}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-900}"
 POLL_SECONDS="${POLL_SECONDS:-10}"
 CLEANUP="${CLEANUP:-true}"
 LOG_DIR="${LOG_DIR:-}"
+
+# Preserve repository-relative override/log arguments while Compose resolves
+# all bind mounts beside the relocated runtime snapshot.
+[[ "$ENV_FILE" = /* ]] || ENV_FILE="$ROOT_DIR/$ENV_FILE"
+if [ -n "$OVERRIDE_ENV_FILE" ] && [[ "$OVERRIDE_ENV_FILE" != /* ]]; then
+  OVERRIDE_ENV_FILE="$ROOT_DIR/$OVERRIDE_ENV_FILE"
+fi
+if [ -n "$LOG_DIR" ] && [[ "$LOG_DIR" != /* ]]; then
+  LOG_DIR="$ROOT_DIR/$LOG_DIR"
+fi
+cd "$RUNTIME_DIR"
+
 
 # rabbitmq/redis/postgres/flower/proxy use a fixed container_name in the
 # canonical compose file (so a dev override stack can deliberately share them
@@ -49,7 +61,7 @@ fi
 # a genuine CPU-only production install must, so the smoke test still
 # validates the rest of the stack instead of failing on a check the base
 # compose file was never going to satisfy.
-if [ -f "$ROOT_DIR/docker-compose.gpu.yml" ] && command -v nvidia-smi >/dev/null 2>&1 \
+if [ -f "$RUNTIME_DIR/docker-compose.gpu.yml" ] && command -v nvidia-smi >/dev/null 2>&1 \
     && nvidia-smi >/dev/null 2>&1; then
   compose+=(-f docker-compose.yml -f docker-compose.gpu.yml)
   echo "NVIDIA GPU detected: layering docker-compose.gpu.yml onto staging validation."

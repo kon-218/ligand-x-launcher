@@ -8,7 +8,8 @@ if [ $# -lt 1 ]; then
 fi
 
 release="$1"
-env_file="${2:-.env.production}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+env_file="${2:-$ROOT_DIR/runtime/.env.production}"
 
 if [ ! -f "$env_file" ]; then
   echo "Missing env file: $env_file" >&2

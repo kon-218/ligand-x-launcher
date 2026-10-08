@@ -121,4 +121,4 @@ authority for the current build.
 - Windows preview artifacts may trigger SmartScreen when unsigned.
 - Linux AppImage execution may require FUSE and executable permissions.
 
-For source builds, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+For source builds, see [CONTRIBUTING.md](CONTRIBUTING.md).

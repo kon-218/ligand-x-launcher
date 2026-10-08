@@ -385,6 +385,7 @@ func (a *App) findProjectPath() (string, bool) {
 			filepath.Join(execDir, ".."),
 			filepath.Join(execDir, "..", "runtime"),
 			filepath.Join(execDir, "..", ".."),
+			filepath.Join(execDir, "..", "..", "runtime"),
 			filepath.Join(execDir, "..", "..", ".."),
 		)
 	}
