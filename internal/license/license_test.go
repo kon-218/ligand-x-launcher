@@ -182,19 +182,119 @@ func TestVerifyLicenseExpiredWithinGrace(t *testing.T) {
 	}
 }
 
-func TestVerifyLicenseUnknownEntitlement(t *testing.T) {
+func TestVerifyLicenseSkipsUnknownEntitlement(t *testing.T) {
+	// A licence that names a module newer than this launcher is still valid:
+	// the entitlements the launcher knows are kept and the rest are skipped.
 	bundle, pub := signTestLicense(t, map[string]interface{}{
 		"edition":      "pro",
 		"license_id":   "LX-TEST-6",
-		"entitlements": []interface{}{"definitely-not-a-real-module"},
+		"entitlements": []interface{}{"qc", "a-module-from-the-future"},
+		"expires_at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	got, err := VerifyWithPublicKey(bundle, pub)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Valid || got.Edition != "pro" || got.Reason != "ok" {
+		t.Fatalf("expected a valid pro licence, got %+v", got)
+	}
+	if !got.HasEntitlement("qc") {
+		t.Fatalf("the recognised entitlement was lost: %+v", got.Entitlements)
+	}
+	if got.HasEntitlement("a-module-from-the-future") {
+		t.Fatalf("an unrecognised entitlement must not be granted: %+v", got.Entitlements)
+	}
+	if len(got.Entitlements) != 1 || got.Entitlements[0] != "qc" {
+		t.Fatalf("expected only the recognised entitlement, got %+v", got.Entitlements)
+	}
+}
+
+func TestVerifyLicenseOnlyUnknownEntitlementsStaysValid(t *testing.T) {
+	// Nothing this launcher can offer, but not a broken licence either.
+	bundle, pub := signTestLicense(t, map[string]interface{}{
+		"edition":      "pro",
+		"license_id":   "LX-TEST-6B",
+		"entitlements": []interface{}{"a-module-from-the-future"},
 		"expires_at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
 	})
 	got, _ := VerifyWithPublicKey(bundle, pub)
-	if got.Valid {
-		t.Fatalf("expected unknown entitlement to invalidate license")
+	if !got.Valid || got.Edition != "pro" {
+		t.Fatalf("expected a valid pro licence, got %+v", got)
 	}
-	if got.Reason != "unknown_entitlement" {
-		t.Fatalf("expected unknown_entitlement, got %q", got.Reason)
+	if len(got.Entitlements) != 0 || got.HasEntitlement("qc") {
+		t.Fatalf("expected no recognised entitlements, got %+v", got.Entitlements)
+	}
+}
+
+func TestVerifyLicenseAcceptsEveryCoreEntitlement(t *testing.T) {
+	// kinetics and licensing are Core Pro entitlements; a licence listing them
+	// used to be rejected whole and the installation shown as Free.
+	bundle, pub := signTestLicense(t, map[string]interface{}{
+		"edition":      "pro",
+		"license_id":   "LX-TEST-6C",
+		"entitlements": []interface{}{"kinetics", "licensing", "free-energy"},
+		"expires_at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	got, _ := VerifyWithPublicKey(bundle, pub)
+	if !got.Valid || got.Edition != "pro" {
+		t.Fatalf("expected a valid pro licence, got %+v", got)
+	}
+	for _, entitlement := range []string{"kinetics", "licensing", "free-energy"} {
+		if !got.HasEntitlement(entitlement) {
+			t.Fatalf("expected %q to be granted, got %+v", entitlement, got.Entitlements)
+		}
+	}
+}
+
+// Core's module registry is the authority for which Pro entitlements exist.
+// This reads it from a Core checkout named by LIGANDX_PUBLIC_ROOT (the
+// cross-repository workflow sets it) and fails when Core defines one this
+// launcher does not list. Without a checkout it is skipped, and says so.
+func TestProEntitlementsMatchCoreRegistry(t *testing.T) {
+	root := os.Getenv("LIGANDX_PUBLIC_ROOT")
+	if root == "" {
+		t.Skip("LIGANDX_PUBLIC_ROOT is not set; the launcher's entitlement list was not compared with Core")
+	}
+	source, err := os.ReadFile(filepath.Join(root, "lib", "licensing", "module_registry.py"))
+	if err != nil {
+		t.Fatalf("could not read Core's module registry: %v", err)
+	}
+	// Each ModuleDefinition(...) block: a Pro module's entitlement is its
+	// entitlement_id when it sets one (qmmm is sold under "qc"), else its id.
+	field := func(block, name string) string {
+		marker := "\n        " + name + `="`
+		start := strings.Index(block, marker)
+		if start < 0 {
+			return ""
+		}
+		rest := block[start+len(marker):]
+		return rest[:strings.Index(rest, `"`)]
+	}
+	core := map[string]bool{}
+	for _, block := range strings.Split(string(source), "ModuleDefinition(")[1:] {
+		if field(block, "edition") != "pro" {
+			continue
+		}
+		entitlement := field(block, "entitlement_id")
+		if entitlement == "" {
+			entitlement = field(block, "id")
+		}
+		if entitlement != "" {
+			core[entitlement] = true
+		}
+	}
+	if len(core) < 5 {
+		t.Fatalf("parsed only %d Pro entitlements from Core; the registry's layout changed and this test went blind", len(core))
+	}
+	for entitlement := range core {
+		if !proEntitlements[entitlement] {
+			t.Errorf("Core defines Pro entitlement %q, which this launcher does not list", entitlement)
+		}
+	}
+	for entitlement := range proEntitlements {
+		if !core[entitlement] {
+			t.Errorf("launcher lists %q, which Core's registry does not define", entitlement)
+		}
 	}
 }
 
