@@ -14,10 +14,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Checkout Core entitlement authority
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: kon-218/ligand-x
+          ref: main
+          path: .core-contracts
+          sparse-checkout: lib/licensing/module_registry.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+
+      - name: Compare entitlements with Core
+        env:
+          LIGANDX_PUBLIC_ROOT: ${{ github.workspace }}/.core-contracts
+        run: |
+          git -C .core-contracts rev-parse HEAD
+          go test ./internal/license -run '^TestProEntitlementsMatchCoreRegistry$' -v
 
       - name: Check documentation boundary and links
         run: python3 scripts/check_documentation.py
