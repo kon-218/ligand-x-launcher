@@ -1,4 +1,4 @@
-package main
+package launcher
 
 import (
 	"ligandx-launcher/internal/envfile"

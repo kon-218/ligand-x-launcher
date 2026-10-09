@@ -1,4 +1,4 @@
-package main
+package launcher
 
 import (
 	"crypto/sha256"
@@ -13,12 +13,15 @@ import (
 	"strings"
 )
 
-//go:embed scripts/preview_bundles.json
+//go:embed preview_bundles.json
 var previewBundlesJSON []byte
 
 // enabledPreviewBundles is empty in stable builds. A public build can set
 // -X main.enabledPreviewBundles=proto-mutation. Unknown labels add no group.
 var enabledPreviewBundles string
+
+// SetPreviewBundles transfers the release selection injected into main.
+func SetPreviewBundles(selection string) { enabledPreviewBundles = selection }
 
 type previewBundle struct {
 	GroupID         string            `json:"group_id"`

@@ -59,12 +59,33 @@ type RegistryTokenResponse struct {
 	Repositories  []string `json:"repositories"`
 }
 
+// proEntitlements is every Pro entitlement Core's module registry defines
+// (ligand-x/lib/licensing/module_registry.py, the `entitlement` of each Pro
+// module). Core is the authority; TestProEntitlementsMatchCoreRegistry compares
+// the two when a Core checkout is available.
+//
+// An entitlement that is not listed here is skipped, not treated as an error:
+// a licence naming a module newer than this launcher is still a valid licence,
+// and rejecting it would downgrade a paying installation to Free until the
+// launcher was updated. The launcher simply cannot offer what it does not know.
 var proEntitlements = map[string]bool{
 	"admet":       true,
 	"qc":          true,
 	"boltz2":      true,
 	"free-energy": true,
 	"reinvent":    true,
+	"kinetics":    true,
+	"licensing":   true,
+}
+
+// knownEntitlements returns every entitlement this launcher recognises, sorted.
+func knownEntitlements() []string {
+	known := make([]string, 0, len(proEntitlements))
+	for entitlement := range proEntitlements {
+		known = append(known, entitlement)
+	}
+	slices.Sort(known)
+	return known
 }
 
 const PublicKeyPEM = `-----BEGIN PUBLIC KEY-----
@@ -126,7 +147,7 @@ func summarize(payload map[string]interface{}) Summary {
 	edition, _ := payload["edition"].(string)
 	entitlements := stringSlice(payload["entitlements"])
 	if edition == "academic" {
-		entitlements = []string{"admet", "boltz2", "free-energy", "qc", "reinvent"}
+		entitlements = knownEntitlements()
 	}
 
 	status := Summary{
@@ -153,14 +174,14 @@ func summarize(payload map[string]interface{}) Summary {
 		status.Reason = "pro_license_requires_entitlements"
 		return status
 	}
+	// Keep the entitlements this launcher knows; skip the rest (see proEntitlements).
+	recognised := make([]string, 0, len(entitlements))
 	for _, entitlement := range entitlements {
-		if !proEntitlements[entitlement] {
-			status.Edition = "free"
-			status.Valid = false
-			status.Reason = "unknown_entitlement"
-			return status
+		if proEntitlements[entitlement] {
+			recognised = append(recognised, entitlement)
 		}
 	}
+	status.Entitlements = recognised
 
 	now := time.Now().UTC()
 	if status.ExpiresAt != "" {

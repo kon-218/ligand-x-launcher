@@ -1,4 +1,4 @@
-package main
+package launcher
 
 import (
 	"os"
@@ -115,7 +115,7 @@ func TestProteinPilotAssetsMissing(t *testing.T) {
 }
 
 func TestPublicFrontendContainsProteinPilotOptIn(t *testing.T) {
-	data, err := os.ReadFile("frontend-public/app.js")
+	data, err := os.ReadFile("../../frontend-public/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}

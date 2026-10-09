@@ -1,4 +1,4 @@
-package main
+package launcher
 
 import (
 	"bytes"
@@ -16,7 +16,10 @@ import (
 	"ligandx-launcher/internal/runtimebundle"
 	"ligandx-launcher/internal/secretstore"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
@@ -169,7 +172,7 @@ func TestLeaseActivationWithoutSelectionIncludesEveryUnlockedGroup(t *testing.T)
 }
 
 func TestCorePullListIncludesEveryFixedComposeImage(t *testing.T) {
-	compose, err := os.ReadFile("docker-compose.yml")
+	compose, err := os.ReadFile("../../runtime/docker-compose.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +211,7 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 	app := NewApp()
 	app.projectPath = runtimeDir
 
-	compose, err := os.ReadFile("docker-compose.yml")
+	compose, err := os.ReadFile("../../runtime/docker-compose.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,6 +535,84 @@ func TestFindProjectPathPrefersSourceCheckoutForDevBuild(t *testing.T) {
 	}
 	if got != sourceDir {
 		t.Fatalf("expected source checkout %q, got %q", sourceDir, got)
+	}
+}
+
+func TestFindProjectPathFindsRepositoryRuntime(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := os.Mkdir(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "docker-compose.yml"), []byte("services: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIGANDX_PROJECT_PATH", "")
+	t.Setenv("LIGANDX_RUNTIME_DIR", filepath.Join(root, "missing-managed-runtime"))
+	t.Chdir(root)
+	got, ok := NewApp().findProjectPath()
+	if !ok || got != runtimeDir {
+		t.Fatalf("expected repository runtime %q, got %q (%v)", runtimeDir, got, ok)
+	}
+}
+
+func TestStagingValidationUsesRepositoryRuntime(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("staging validation is a Bash release-host script")
+	}
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubDir := t.TempDir()
+	commandLog := filepath.Join(stubDir, "commands.log")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	override := filepath.Join(stubDir, "override.env")
+	if err := os.WriteFile(override, []byte("VERSION=v1.2.3\nGATEWAY_PORT="+port+"\nFRONTEND_PORT="+port+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	relativeOverride, err := filepath.Rel(root, override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	docker := `#!/bin/sh
+printf '%s\n' "$PWD" >> "$COMMAND_LOG"
+case "$*" in
+  *"config --services") echo gateway ;;
+  *"ps -a --format json") echo '{"Service":"gateway","State":"running","Health":"healthy","ExitCode":0}' ;;
+esac
+`
+	for name, body := range map[string]string{"docker": docker, "nvidia-smi": "#!/bin/sh\nexit 1\n"} {
+		if err := os.WriteFile(filepath.Join(stubDir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("COMMAND_LOG", commandLog)
+	t.Setenv("ENV_FILE", "runtime/.env.production.template")
+	t.Setenv("OVERRIDE_ENV_FILE", relativeOverride)
+	t.Setenv("LOG_DIR", filepath.Join(stubDir, "diagnostics"))
+	t.Setenv("TIMEOUT_SECONDS", "5")
+	cmd := exec.Command("bash", filepath.Join(root, "scripts", "validate-staging-startup.sh"))
+	cmd.Dir = stubDir // Invoke outside the repo to check script-relative resolution.
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("staging script failed: %v\n%s", err, output)
+	}
+	log, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range strings.Split(strings.TrimSpace(string(log)), "\n") {
+		if cwd != filepath.Join(root, "runtime") {
+			t.Fatalf("Docker command ran outside runtime: %s", cwd)
+		}
 	}
 }
 
@@ -1941,7 +2022,7 @@ func TestOverCPUServicesReadsTheResolvedModel(t *testing.T) {
 func TestComposeCPULimitKeysMapsServicesToTheirBackingEnvKey(t *testing.T) {
 	// Knowing which key backs a service's limit is what turns "worker-cpu wants
 	// 16 CPUs" into a value the launcher can actually clamp.
-	data, err := os.ReadFile("docker-compose.yml")
+	data, err := os.ReadFile("../../runtime/docker-compose.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2429,7 +2510,7 @@ func TestResetResourceLimitsFitsATemplateTooBigForThisMachine(t *testing.T) {
 const smallestSupportedCPUs = 4
 
 func TestShippedTemplateStartsOnTheSmallestSupportedMachine(t *testing.T) {
-	data, err := os.ReadFile(".env.production.template")
+	data, err := os.ReadFile("../../runtime/.env.production.template")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2457,11 +2538,11 @@ func TestShippedTemplateStartsOnTheSmallestSupportedMachine(t *testing.T) {
 // launcher pins VERSION/PRO_VERSION for the release it ships with), so parity
 // is enforced on the resource and concurrency keys rather than byte-for-byte.
 func TestTemplatesAgreeOnResourceKeys(t *testing.T) {
-	ours, err := os.ReadFile(".env.production.template")
+	ours, err := os.ReadFile("../../runtime/.env.production.template")
 	if err != nil {
 		t.Fatal(err)
 	}
-	theirs, err := os.ReadFile("../ligand-x/.env.production.template")
+	theirs, err := os.ReadFile("../../../ligand-x/.env.production.template")
 	if err != nil {
 		t.Skipf("sibling repo not checked out: %v", err)
 	}
@@ -2791,7 +2872,7 @@ func TestInstalledRuntimeVersionReadsMarker(t *testing.T) {
 }
 
 func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(".github", "workflows", "launcher-release.yml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "launcher-release.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2823,7 +2904,7 @@ func TestReleaseWorkflowDefersLatestAndRecordsSigningEvidence(t *testing.T) {
 }
 
 func TestLauncherQualityRunsForMainPushes(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(".github", "workflows", "quality.yml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "quality.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3063,7 +3144,7 @@ func TestVerifyFittedModelClampsComposeInlineOnlyDefault(t *testing.T) {
 // already running. The generated snapshot must keep the prefix overridable,
 // and the staging script must actually set it from COMPOSE_PROJECT_NAME.
 func TestValidateStagingIsolatesInfraContainerNames(t *testing.T) {
-	compose, err := os.ReadFile("docker-compose.yml")
+	compose, err := os.ReadFile("../../runtime/docker-compose.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3077,7 +3158,7 @@ func TestValidateStagingIsolatesInfraContainerNames(t *testing.T) {
 		}
 	}
 
-	script, err := os.ReadFile("scripts/validate-staging-startup.sh")
+	script, err := os.ReadFile("../../scripts/validate-staging-startup.sh")
 	if err != nil {
 		t.Fatal(err)
 	}

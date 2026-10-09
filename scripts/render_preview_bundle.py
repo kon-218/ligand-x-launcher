@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-ALLOWLIST_PATH = Path(__file__).with_name("preview_bundles.json")
+ALLOWLIST_PATH = Path(__file__).resolve().parents[1] / "internal" / "launcher" / "preview_bundles.json"
 LEAKED_PREVIEW_SERVICES = frozenset({
     "kinetics", "worker-kinetics", "qmmm", "worker-qmmm", "licensing", "licensing-broker",
 })
