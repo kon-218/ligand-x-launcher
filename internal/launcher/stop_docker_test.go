@@ -151,3 +151,42 @@ func TestStopProjectContainersOnRealDocker(t *testing.T) {
 	}
 	t.Logf("stopped five containers in %s", took.Round(time.Second))
 }
+
+// TestStopNamedProjectOnRealDocker stops one existing compose project, named
+// by LIGANDX_DOCKER_TEST_PROJECT, with the launcher's own stop. It is for
+// running the stop against a throwaway copy of the real product stack; the
+// order and exit codes are read from `docker events` by whoever runs it.
+func TestStopNamedProjectOnRealDocker(t *testing.T) {
+	project := os.Getenv("LIGANDX_DOCKER_TEST_PROJECT")
+	if project == "" {
+		t.Skip("set LIGANDX_DOCKER_TEST_PROJECT to the compose project to stop")
+	}
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), stopBudgetSeconds*time.Second)
+	defer cancel()
+	listed, err := cli.ContainerList(ctx, client.ContainerListOptions{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := map[string]bool{project: true}
+	if len(stopWaves(listed.Items, projects)) == 0 {
+		t.Fatalf("no containers found for project %q", project)
+	}
+	began := time.Now()
+	if failed := stopProjectContainers(ctx, cli, listed.Items, projects, func(msg string) { t.Log(msg) }); len(failed) != 0 {
+		t.Fatalf("could not stop %v", failed)
+	}
+	remaining, err := cli.ContainerList(ctx, client.ContainerListOptions{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range remaining.Items {
+		if c.Labels["com.docker.compose.project"] == project {
+			t.Fatalf("%v was left behind", c.Names)
+		}
+	}
+	t.Logf("stopped project %s in %s", project, time.Since(began).Round(time.Second))
+}

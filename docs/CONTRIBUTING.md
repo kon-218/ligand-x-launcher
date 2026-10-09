@@ -107,6 +107,17 @@ none is killed mid-work, that the gateway is asked to stop only after the
 workers finish and the stores only after the gateway, and that workers stop
 together. Run it after changing `internal/launcher/stop_order.go`.
 
+To run the same stop against a real stack, bring one up under a compose
+project of its own and name it:
+
+```bash
+LIGANDX_DOCKER_TEST_PROJECT=<project> go test ./internal/launcher/ -run TestStopNamedProjectOnRealDocker -v
+```
+
+It stops and removes every container of that project and nothing else. Watch
+`docker events --filter label=com.docker.compose.project=<project>` alongside
+it for the order and the exit codes.
+
 ## Building
 
 ### Current platform
