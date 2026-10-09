@@ -1516,7 +1516,7 @@ func (a *App) StopServices() error {
 		})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), stopBudgetSeconds*time.Second)
 	defer cancel()
 
 	listResult, err := a.dockerClient.ContainerList(ctx, client.ContainerListOptions{All: true})
@@ -1537,28 +1537,11 @@ func (a *App) StopServices() error {
 		return nil
 	}
 
-	emit("Stopping services...")
-	stopTimeout := 30
-	var failed []string
-	for _, c := range containers {
-		if !ligandProjects[c.Labels["com.docker.compose.project"]] {
-			continue
-		}
-		name := strings.TrimPrefix(firstContainerName(c.Names), "/")
-		if c.State == container.StateRunning || c.State == container.StateRestarting {
-			if _, err := a.dockerClient.ContainerStop(ctx, c.ID, client.ContainerStopOptions{Timeout: &stopTimeout}); err != nil {
-				emit(fmt.Sprintf("Warning: could not stop %s: %v", name, err))
-				failed = append(failed, name)
-				continue
-			}
-		}
-		if _, err := a.dockerClient.ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
-			emit(fmt.Sprintf("Warning: could not remove %s: %v", name, err))
-			failed = append(failed, name)
-		}
-	}
+	emit("Stopping services. A calculation that is nearly done is given up to two minutes to finish...")
+	failed := stopProjectContainers(ctx, a.dockerClient, containers, ligandProjects, emit)
 
 	if len(failed) > 0 {
+		slices.Sort(failed)
 		return fmt.Errorf("could not stop %d service(s): %s", len(failed), strings.Join(failed, ", "))
 	}
 	emit("Services stopped")

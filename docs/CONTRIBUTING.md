@@ -93,6 +93,31 @@ make test   # documentation check, then go test for both the dev and public buil
 make vet
 ```
 
+One test drives the launcher's Stop against a real Docker daemon. It is
+opt-in because it needs a daemon and a local `alpine:3.21` image and takes
+about 40 seconds:
+
+```bash
+LIGANDX_DOCKER_TEST=1 go test ./internal/launcher/ -run TestStopProjectContainersOnRealDocker -v
+```
+
+It starts five stand-in containers in a compose project of its own, so a
+Ligand-X stack running on the same machine is not touched, and checks that
+none is killed mid-work, that the gateway is asked to stop only after the
+workers finish and the stores only after the gateway, and that workers stop
+together. Run it after changing `internal/launcher/stop_order.go`.
+
+To run the same stop against a real stack, bring one up under a compose
+project of its own and name it:
+
+```bash
+LIGANDX_DOCKER_TEST_PROJECT=<project> go test ./internal/launcher/ -run TestStopNamedProjectOnRealDocker -v
+```
+
+It stops and removes every container of that project and nothing else. Watch
+`docker events --filter label=com.docker.compose.project=<project>` alongside
+it for the order and the exit codes.
+
 ## Building
 
 ### Current platform
