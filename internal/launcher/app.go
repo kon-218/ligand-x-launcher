@@ -1516,7 +1516,7 @@ func (a *App) StopServices() error {
 		})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), stopBudgetSeconds*time.Second)
 	defer cancel()
 
 	listResult, err := a.dockerClient.ContainerList(ctx, client.ContainerListOptions{All: true})
@@ -1537,28 +1537,49 @@ func (a *App) StopServices() error {
 		return nil
 	}
 
-	emit("Stopping services...")
-	stopTimeout := 30
+	emit("Stopping services. A calculation that is nearly done is given up to two minutes to finish...")
+	// Workers and services, then the gateway, then the stores (stop_order.go).
+	// Within a wave the containers stop together: each waits out its own
+	// period, so stopping them one after another would add those periods up.
 	var failed []string
-	for _, c := range containers {
-		if !ligandProjects[c.Labels["com.docker.compose.project"]] {
-			continue
+	for _, wave := range stopWaves(containers, ligandProjects) {
+		var (
+			wg sync.WaitGroup
+			mu sync.Mutex
+		)
+		for _, c := range wave {
+			wg.Add(1)
+			go func(c container.Summary) {
+				defer wg.Done()
+				name := strings.TrimPrefix(firstContainerName(c.Names), "/")
+				fail := func(action string, err error) {
+					emit(fmt.Sprintf("Warning: could not %s %s: %v", action, name, err))
+					mu.Lock()
+					failed = append(failed, name)
+					mu.Unlock()
+				}
+				if c.State == container.StateRunning || c.State == container.StateRestarting {
+					// The container's own stop_grace_period decides how long it
+					// gets; the launcher only keeps its old 30s as a floor.
+					var configured *int
+					if inspected, err := a.dockerClient.ContainerInspect(ctx, c.ID, client.ContainerInspectOptions{}); err == nil && inspected.Container.Config != nil {
+						configured = inspected.Container.Config.StopTimeout
+					}
+					if _, err := a.dockerClient.ContainerStop(ctx, c.ID, client.ContainerStopOptions{Timeout: stopTimeoutFor(configured)}); err != nil {
+						fail("stop", err)
+						return
+					}
+				}
+				if _, err := a.dockerClient.ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
+					fail("remove", err)
+				}
+			}(c)
 		}
-		name := strings.TrimPrefix(firstContainerName(c.Names), "/")
-		if c.State == container.StateRunning || c.State == container.StateRestarting {
-			if _, err := a.dockerClient.ContainerStop(ctx, c.ID, client.ContainerStopOptions{Timeout: &stopTimeout}); err != nil {
-				emit(fmt.Sprintf("Warning: could not stop %s: %v", name, err))
-				failed = append(failed, name)
-				continue
-			}
-		}
-		if _, err := a.dockerClient.ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
-			emit(fmt.Sprintf("Warning: could not remove %s: %v", name, err))
-			failed = append(failed, name)
-		}
+		wg.Wait()
 	}
 
 	if len(failed) > 0 {
+		slices.Sort(failed)
 		return fmt.Errorf("could not stop %d service(s): %s", len(failed), strings.Join(failed, ", "))
 	}
 	emit("Services stopped")

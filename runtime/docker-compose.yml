@@ -97,6 +97,7 @@ services:
     image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:-latest}
     command:
     - gateway
+    stop_grace_period: 30s
     ports:
     - ${LIGANDX_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000
     networks:
@@ -884,6 +885,7 @@ services:
     init: true
     command:
     - worker-qc
+    stop_grace_period: 120s
     networks:
     - backend
     environment:
@@ -954,6 +956,7 @@ services:
     init: true
     command:
     - worker-gpu-short
+    stop_grace_period: 120s
     networks:
     - backend
     environment:
@@ -1021,6 +1024,7 @@ services:
     init: true
     command:
     - worker-gpu-long
+    stop_grace_period: 120s
     networks:
     - backend
     group_add:
@@ -1093,6 +1097,7 @@ services:
     init: true
     command:
     - worker-cpu
+    stop_grace_period: 120s
     networks:
     - backend
     environment:
@@ -1160,6 +1165,7 @@ services:
     init: true
     command:
     - worker-control
+    stop_grace_period: 120s
     networks:
     - backend
     environment:
@@ -1229,6 +1235,7 @@ services:
     init: true
     command:
     - worker-reinvent
+    stop_grace_period: 120s
     networks:
     - backend
     environment:
@@ -1353,6 +1360,7 @@ services:
         max-file: '3'
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
+    stop_grace_period: 60s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-rabbitmq
     hostname: rabbitmq
     networks:
@@ -1392,6 +1400,7 @@ services:
         max-file: '3'
   redis:
     image: redis:7-alpine
+    stop_grace_period: 30s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-redis
     hostname: redis
     command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
@@ -1426,6 +1435,7 @@ services:
         max-file: '3'
   postgres:
     image: postgres:16-alpine
+    stop_grace_period: 60s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-postgres
     networks:
     - backend
