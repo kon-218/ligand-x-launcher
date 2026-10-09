@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNTIME_DIR="$ROOT_DIR/runtime"
+RUNTIME_DIR="${RUNTIME_ROOT:-$ROOT_DIR/runtime}"
 
 ENV_FILE="${ENV_FILE:-runtime/.env.production}"
 OVERRIDE_ENV_FILE="${OVERRIDE_ENV_FILE:-}"

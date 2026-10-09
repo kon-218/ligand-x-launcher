@@ -11,6 +11,7 @@ import (
 // Keep these symbols in main: local and CI release builds inject them with -X.
 var runtimeBundlePublicKeyB64 string
 var launcherVersion string
+var enabledPreviewBundles string
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "agent-mcp" {
@@ -20,5 +21,6 @@ func main() {
 		}
 		return
 	}
+	launcher.SetPreviewBundles(enabledPreviewBundles)
 	launcher.Run(assets, runtimeBundlePublicKeyB64, launcherVersion)
 }

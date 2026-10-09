@@ -17,15 +17,21 @@ would unpin the release and break requirePinnedProductionVersion.
 Usage:
     sync_env_template.py CANONICAL TARGET           # rewrite TARGET in place
     sync_env_template.py CANONICAL TARGET --check   # exit 1 on drift, no writes
+    sync_env_template.py CANONICAL TARGET --preview-bundles proto-mutation
+        # also set the allowlisted preview keys; does not copy the canonical template
 """
 
+import importlib.util
 import sys
+from pathlib import Path
+
+PROTO_CONTROL_KEYS = frozenset({"LIGANDX_PROTO_PILOT_ENABLED", "PROTO_HOME", "PROTO_MODEL_CACHE", "PROTO_HOME_HOST", "PROTO_MODEL_CACHE_HOST", "PROTO_RUNTIME_MANIFEST_HOST", "PROTO_RUNTIME_MANIFEST_SHA256_HOST"})
 
 RESOURCE_SUFFIXES = ("_CPU_LIMIT", "_CPU_RES", "_MEM_LIMIT", "_MEM_RES", "_CONCURRENCY")
 
 
 def is_resource_key(key):
-    return key.endswith(RESOURCE_SUFFIXES)
+    return key.endswith(RESOURCE_SUFFIXES) or key in PROTO_CONTROL_KEYS
 
 
 def parse(path):
@@ -45,12 +51,33 @@ def parse(path):
     return values
 
 
+def _preview_bundles(argv):
+    if "--preview-bundles" not in argv:
+        return ""
+    index = argv.index("--preview-bundles")
+    if index + 1 >= len(argv) or argv[index + 1].startswith("--"):
+        print("ERROR: --preview-bundles requires a comma-separated label list", file=sys.stderr)
+        return None
+    return argv[index + 1]
+
+
+def _apply_preview_env(template, labels):
+    path = Path(__file__).with_name("render_preview_bundle.py")
+    spec = importlib.util.spec_from_file_location("render_preview_bundle", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.apply_preview_env(template, module.parse_labels(labels))
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
     canonical_path, target_path = argv[1], argv[2]
     check_only = "--check" in argv[3:]
+    preview_bundles = _preview_bundles(argv)
+    if preview_bundles is None:
+        return 2
 
     canonical = parse(canonical_path)
     target = parse(target_path)
@@ -64,7 +91,7 @@ def main(argv):
 
     if not drift and not extra:
         print(f"Resource settings in {target_path} match {canonical_path}.")
-        return 0
+        return _finish_preview_env(target_path, preview_bundles, check_only)
 
     for key in sorted(drift):
         print(f"  {key}: launcher={target.get(key)!r} canonical={wanted[key]!r}")
@@ -97,10 +124,41 @@ def main(argv):
         if key in drift:
             newline = "\n" if line.endswith("\n") else ""
             lines[i] = f"{key}={drift[key]}{newline}"
+    missing = {key: value for key, value in drift.items() if key not in target}
+    if missing:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append("# Canonical prepared-runtime controls (preview remains disabled by default).\n")
+        lines.extend(f"{key}={value}\n" for key, value in sorted(missing.items()))
     with open(target_path, "w", encoding="utf-8") as handle:
         handle.writelines(lines)
 
     print(f"Synchronized {len(drift)} resource setting(s) into {target_path}.")
+    return _finish_preview_env(target_path, preview_bundles, check_only)
+
+
+def _finish_preview_env(target_path, preview_bundles, check_only):
+    """Apply allowlisted preview keys only. An empty selection leaves the file."""
+    if not preview_bundles:
+        return 0
+    current = Path(target_path).read_text(encoding="utf-8")
+    try:
+        updated = _apply_preview_env(current, preview_bundles)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if updated == current:
+        print(f"Preview bundle env rules ({preview_bundles}) already match {target_path}.")
+        return 0
+    if check_only:
+        print(
+            "ERROR: preview bundle env rules are not in the launcher template.\n"
+            "       Run: make sync-runtime-topology PREVIEW_BUNDLES=... PREVIEW_OUTPUT=...",
+            file=sys.stderr,
+        )
+        return 1
+    Path(target_path).write_text(updated, encoding="utf-8")
+    print(f"Applied preview bundle env rules ({preview_bundles}) to {target_path}.")
     return 0
 
 

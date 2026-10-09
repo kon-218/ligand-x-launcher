@@ -192,6 +192,7 @@ var gpuRequiredRuntime = map[string]bool{
 	"rbfe":            true,
 	"boltz2":          true,
 	"worker-gpu-long": true,
+	"worker-proto":    true,
 }
 
 // ligandxServiceSet is every docker-compose service name that belongs to the
@@ -204,7 +205,7 @@ var ligandxServiceSet = map[string]bool{
 	"abfe": true, "rbfe": true, "reinvent": true,
 	"pocket-finder": true, "postgres": true, "redis": true, "rabbitmq": true,
 	"worker-qc": true, "worker-gpu-short": true, "worker-gpu-long": true,
-	"worker-cpu": true, "worker-reinvent": true, "flower": true,
+	"worker-cpu": true, "worker-reinvent": true, "worker-proto": true, "flower": true,
 }
 
 // isLigandxProject reports whether a compose project name looks like a Ligand-X
@@ -895,6 +896,9 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 	if err := runtimebundle.Extract(zipPath, extractedDir); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to extract runtime bundle: %w", err)
 	}
+	if err := verifySelectedRuntimePreview(extractedDir, enabledPreviewBundles); err != nil {
+		return a.GetDistributionStatus(), err
+	}
 	previousProjectPath := a.projectPath
 	a.projectPath = runtimeDir
 	_, existingComposeErr := os.Stat(filepath.Join(runtimeDir, "docker-compose.yml"))
@@ -1412,6 +1416,9 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 		return fmt.Errorf("no unlocked services to start; check your license or service selection")
 	}
 
+	if err := a.proteinPilotUnavailable(groupIDs); err != nil {
+		return err
+	}
 	if err := a.checkGPUForServices(services); err != nil {
 		return err
 	}
@@ -3320,6 +3327,9 @@ func (a *App) ensureProductionEnv() error {
 	if err := a.syncGPUShortImage(); err != nil {
 		return err
 	}
+	if err := a.syncProteinPilotEnv(); err != nil {
+		return err
+	}
 
 	// The template's resource limits describe a multi-GPU workstation. Docker
 	// rejects any container whose `cpus` exceeds the daemon's CPU count, so on a
@@ -3352,6 +3362,56 @@ func (a *App) syncGPUShortImage() error {
 		return nil
 	}
 	return a.setProductionEnvValue("LIGANDX_GPU_SHORT_IMAGE", want)
+}
+
+// syncProteinPilotEnv writes the allowlisted operator flags for a compiled-in
+// preview bundle. A stable build leaves the env file untouched. Selecting the
+// pilot group turns both flags on; leaving it unselected turns them off so a
+// stale opt-in cannot keep the pilot exposed.
+func (a *App) syncProteinPilotEnv() error {
+	if strings.TrimSpace(enabledPreviewBundles) == "" {
+		return nil
+	}
+	config, err := a.GetLauncherConfig()
+	if err != nil {
+		config = LauncherConfig{}
+	}
+	updates, err := previewEnvUpdates(enabledPreviewBundles, config.SelectedGroups)
+	if err != nil {
+		return err
+	}
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return err
+	}
+	current := envfile.Parse(content)
+	changed := map[string]string{}
+	for key, value := range updates {
+		if strings.TrimSpace(current[key]) != value {
+			changed[key] = value
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	return a.setProductionEnvValues(changed)
+}
+
+func (a *App) proteinPilotUnavailable(groupIDs []string) error {
+	if strings.TrimSpace(enabledPreviewBundles) == "" || !selectedGroup(groupIDs, "protein-mutation") {
+		return nil
+	}
+	if !a.CheckGPU() {
+		return fmt.Errorf("protein mutation pilot is unavailable: NVIDIA GPU was not found. A healthy worker is not model readiness")
+	}
+	if err := verifySelectedRuntimePreview(a.projectPath, enabledPreviewBundles); err != nil {
+		return err
+	}
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return err
+	}
+	return preparedProteinRuntimeAvailable(envfile.Parse(content))
 }
 
 // templatePinnedVersion returns the VERSION pinned in .env.production.template,
@@ -4108,6 +4168,11 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			groups[i].Locked = false
 		}
 	}
+	extra, err := previewServiceGroups(enabledPreviewBundles, version)
+	if err != nil {
+		extra = nil
+	}
+	groups = append(groups, extra...)
 	return groups
 }
 
@@ -4530,13 +4595,20 @@ func (a *App) checkGPUForServices(services []string) error {
 		}
 	}
 	if len(gpuSvcs) > 0 && !a.CheckGPU() {
-		return fmt.Errorf(
+		message := fmt.Sprintf(
 			"NVIDIA GPU not available (driver not loaded). Cannot start GPU-only "+
 				"services: %s. Deselect the Binding Free Energy, Boltz-2, and "+
 				"Kinetics service groups in the Services tab. Molecular Dynamics "+
 				"runs on CPU without a GPU (slower).",
 			strings.Join(gpuSvcs, ", "),
 		)
+		for _, svc := range gpuSvcs {
+			if svc == "worker-proto" {
+				message += " Protein mutation pilot stays unavailable without a GPU and prepared model assets; a healthy worker is not model readiness."
+				break
+			}
+		}
+		return fmt.Errorf("%s", message)
 	}
 	return nil
 }
@@ -4820,6 +4892,20 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 			return
 		} else if warning != "" {
 			a.emitAndLog("launcher", warning)
+		}
+
+		if err := a.proteinPilotUnavailable(groupIDs); err != nil {
+			reason := "assets_unavailable"
+			if strings.Contains(err.Error(), "NVIDIA GPU") {
+				reason = "gpu_not_found"
+			}
+			a.emitAndLog("launcher", err.Error())
+			wailsRuntime.EventsEmit(a.ctx, "pullComplete", map[string]interface{}{
+				"success":      false,
+				"failedGroups": groupIDs,
+				"reason":       reason,
+			})
+			return
 		}
 
 		hasGPUService := false

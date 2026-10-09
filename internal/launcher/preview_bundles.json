@@ -1,0 +1,23 @@
+{
+  "schema": "ligandx-launcher-preview-bundles/1",
+  "bundles": {
+    "proto-mutation": {
+      "group_id": "protein-mutation",
+      "name": "Protein mutation pilot",
+      "description": "Optional Free preview on queue proto-gpu using ghcr.io/kon-218/ligand-x/worker-proto. Selecting this group sets LIGANDX_ENABLE_PREVIEW_MODULES and LIGANDX_PROTO_PILOT_ENABLED. A healthy worker is not model readiness; missing GPU or model assets stay unavailable.",
+      "services": ["worker-proto"],
+      "image_repository": "ghcr.io/kon-218/ligand-x",
+      "image_name": "worker-proto",
+      "queue": "proto-gpu",
+      "edition": "free",
+      "requires_gpu": true,
+      "catalog_id": "public/worker-proto",
+      "env": {
+        "LIGANDX_ENABLE_PREVIEW_MODULES": "1",
+        "LIGANDX_PROTO_PILOT_ENABLED": "1",
+        "PROTO_HOME": "/opt/proto",
+        "PROTO_MODEL_CACHE": "/models/proto"
+      }
+    }
+  }
+}

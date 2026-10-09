@@ -24,6 +24,25 @@ for required in "$RENDERER" "$CANONICAL" "$ENV_SYNC" "$CANONICAL_ENV" "$TARGET_E
 done
 
 python3 "$RENDERER" "$CANONICAL" "$TARGET"
+python3 "$PUBLIC_REPO/scripts/render_runtime_overlay.py" "$PUBLIC_REPO/docker-compose.gpu.yml" "$TARGET" "$RUNTIME_DIR/docker-compose.gpu.yml"
 echo "Synchronized generated launcher topology: $TARGET"
 
 python3 "$ENV_SYNC" "$CANONICAL_ENV" "$TARGET_ENV"
+
+# Preview bundles are opt-in and must not replace the committed stable snapshot.
+# PREVIEW_OUTPUT is required so a selected bundle cannot be written over
+# docker-compose.yml by accident. Unknown labels fail inside the renderer.
+if [ -n "${PREVIEW_BUNDLES:-}" ]; then
+  if [ -z "${PREVIEW_OUTPUT:-}" ]; then
+    echo "ERROR: PREVIEW_BUNDLES is set but PREVIEW_OUTPUT is empty. Refusing to overwrite the stable snapshot." >&2
+    exit 1
+  fi
+  PREVIEW_ENV_OUTPUT="${PREVIEW_ENV_OUTPUT:-${PREVIEW_OUTPUT}.env}"
+  python3 "$ROOT_DIR/scripts/render_preview_bundle.py" \
+    --canonical "$CANONICAL" \
+    --renderer "$RENDERER" \
+    --bundles "$PREVIEW_BUNDLES" \
+    --output "$PREVIEW_OUTPUT" \
+    --env-template "$TARGET_ENV" \
+    --env-output "$PREVIEW_ENV_OUTPUT"
+fi

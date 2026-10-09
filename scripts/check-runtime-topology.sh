@@ -26,6 +26,13 @@ if ! cmp -s "$CANDIDATE" "$SNAPSHOT"; then
   exit 1
 fi
 
+python3 "$PUBLIC_REPO/scripts/render_runtime_overlay.py" "$PUBLIC_REPO/docker-compose.gpu.yml" "$CANDIDATE" "$TMP_DIR/docker-compose.gpu.yml"
+if ! cmp -s "$TMP_DIR/docker-compose.gpu.yml" "$RUNTIME_DIR/docker-compose.gpu.yml"; then
+  echo "ERROR: launcher GPU overlay has drifted from the selected stable service set." >&2
+  exit 1
+fi
+docker compose --env-file "$RUNTIME_DIR/.env.production.template" -f "$CANDIDATE" -f "$TMP_DIR/docker-compose.gpu.yml" config --quiet
+
 # The env template ships in the same runtime bundle and drifted from the
 # canonical copy once already, which is what made the stack unstartable on a
 # small machine. Checked here so CI catches it rather than a user.
