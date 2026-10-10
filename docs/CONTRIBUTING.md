@@ -55,7 +55,7 @@ No additional setup needed (uses WebView2).
 |------|------------|
 | `main.go`, `assets_*.go` | Wails entry point, release build variables, and frontend embedding |
 | `internal/launcher/` | Application backend, lifecycle, Wails bindings, and backend tests |
-| Other `internal/` packages | Runtime verification, licensing, credentials, metrics, and agent sessions |
+| Other `internal/` packages | Runtime verification, licensing, credentials, and metrics |
 | `frontend-public/` | The shipped launcher UI (built with `-tags public`) |
 | `frontend/` | Developer/operator dashboard (default build); not shipped in releases |
 | `runtime/` | Generated snapshot of the runtime topology from the core repository — regenerate with `make sync-runtime-topology`, never hand-edit. Compose files, the environment template, and relative-path assets stay together here |
