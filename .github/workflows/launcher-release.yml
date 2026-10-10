@@ -11,7 +11,12 @@ on:
         description: 'Product release channel.'
         required: true
         type: choice
-        options: [stable]
+        options: [stable, preview]
+      preview_bundle:
+        description: Selected tester preview bundle; stable must use none.
+        type: choice
+        options: [none, proto-mutation]
+        default: none
       launcher_ref:
         description: 'Exact ligand-x-launcher commit SHA to build.'
         required: true
@@ -54,10 +59,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate-selection:
+    runs-on: ubuntu-latest
+    outputs:
+      preview_bundles: ${{ steps.selection.outputs.preview_bundles }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {ref: "${{ inputs.launcher_ref }}"}
+      - name: Validate channel and preview selection before building
+        id: selection
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+          BUNDLE: ${{ inputs.preview_bundle }}
+          PROMOTE_LATEST: ${{ inputs.promote_latest }}
+          REUSE_FROM: ${{ inputs.reuse_from_version }}
+        run: |
+          python3 scripts/preview_release_policy.py --channel "$CHANNEL" --version "$VERSION" \
+            --bundle "$BUNDLE" --promote-latest "$PROMOTE_LATEST" --reuse-from "$REUSE_FROM" >> "$GITHUB_OUTPUT"
   # ============================================================
   # Linux Build - Creates AppImage
   # ============================================================
   build-linux:
+    needs: validate-selection
     if: inputs.reuse_from_version == ''
     runs-on: ubuntu-24.04
     steps:
@@ -84,7 +108,7 @@ jobs:
           set -euo pipefail
           WAILS_BIN="$(go env GOPATH)/bin/wails"
           : "${RUNTIME_BUNDLE_PUBLIC_KEY_B64:?Repository variable LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 is required}"
-          "$WAILS_BIN" build -platform linux/amd64 -tags "public,webkit2_41" -ldflags "-X main.runtimeBundlePublicKeyB64=${RUNTIME_BUNDLE_PUBLIC_KEY_B64} -X main.launcherVersion=${{ inputs.version }}" -o ligandx
+          "$WAILS_BIN" build -platform linux/amd64 -tags "public,webkit2_41" -ldflags "-X main.runtimeBundlePublicKeyB64=${RUNTIME_BUNDLE_PUBLIC_KEY_B64} -X main.launcherVersion=${{ inputs.version }} -X main.enabledPreviewBundles=${{ needs.validate-selection.outputs.preview_bundles }}" -o ligandx
           # Fail loudly if this is the non-production stub (it embeds
           # internal/app/app_default_unix.go, which is //go:build !production).
           if grep -aq "app_default_unix.go" build/bin/ligandx; then
@@ -146,6 +170,7 @@ jobs:
   # Windows Build - Portable production binary (double-click to run)
   # ============================================================
   build-windows:
+    needs: validate-selection
     if: inputs.reuse_from_version == ''
     runs-on: windows-latest
     env:
@@ -182,7 +207,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:RUNTIME_BUNDLE_PUBLIC_KEY_B64)) {
             throw "Repository variable LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 is required"
           }
-          wails build -platform windows/amd64 -tags public -ldflags "-X main.runtimeBundlePublicKeyB64=$env:RUNTIME_BUNDLE_PUBLIC_KEY_B64 -X main.launcherVersion=${{ inputs.version }}" -o ligandx
+          wails build -platform windows/amd64 -tags public -ldflags "-X main.runtimeBundlePublicKeyB64=$env:RUNTIME_BUNDLE_PUBLIC_KEY_B64 -X main.launcherVersion=${{ inputs.version }} -X main.enabledPreviewBundles=${{ needs.validate-selection.outputs.preview_bundles }}" -o ligandx
           if ($LASTEXITCODE -ne 0) { throw "wails build failed (exit $LASTEXITCODE)" }
 
           # Discover the produced binary by name, NOT by extension: this Wails
@@ -244,6 +269,7 @@ jobs:
   # macOS Universal Build - Creates DMG (Intel + Apple Silicon)
   # ============================================================
   build-macos-universal:
+    needs: validate-selection
     if: inputs.reuse_from_version == ''
     runs-on: macos-latest
     env:
@@ -278,7 +304,7 @@ jobs:
           set -euo pipefail
           WAILS_BIN="$(go env GOPATH)/bin/wails"
           : "${RUNTIME_BUNDLE_PUBLIC_KEY_B64:?Repository variable LIGANDX_RUNTIME_BUNDLE_PUBLIC_KEY_B64 is required}"
-          "$WAILS_BIN" build -platform darwin/universal -tags public -ldflags "-X main.runtimeBundlePublicKeyB64=${RUNTIME_BUNDLE_PUBLIC_KEY_B64} -X main.launcherVersion=${{ inputs.version }}" -o ligandx
+          "$WAILS_BIN" build -platform darwin/universal -tags public -ldflags "-X main.runtimeBundlePublicKeyB64=${RUNTIME_BUNDLE_PUBLIC_KEY_B64} -X main.launcherVersion=${{ inputs.version }} -X main.enabledPreviewBundles=${{ needs.validate-selection.outputs.preview_bundles }}" -o ligandx
           # Wails names the .app bundle after wails.json's "name"
           # (ligandx-launcher), not the -o binary name (ligandx) - that flag
           # only applies to non-bundle platforms. Resolve it by discovery so
@@ -396,8 +422,8 @@ jobs:
   # Create GitHub Release
   # ============================================================
   release:
-    needs: [build-linux, build-windows, build-macos-universal]
-    if: always() && (inputs.reuse_from_version != '' || (needs.build-linux.result == 'success' && needs.build-windows.result == 'success' && needs.build-macos-universal.result == 'success'))
+    needs: [validate-selection, build-linux, build-windows, build-macos-universal]
+    if: always() && needs.validate-selection.result == 'success' && (inputs.reuse_from_version != '' || (needs.build-linux.result == 'success' && needs.build-windows.result == 'success' && needs.build-macos-universal.result == 'success'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -492,6 +518,7 @@ jobs:
 
       - name: Build and validate exact canonical runtime bundle
         env:
+          PREVIEW_BUNDLES: ${{ needs.validate-selection.outputs.preview_bundles }}
           VERSION: ${{ steps.runtime.outputs.version }}
           # Pro images ship on their own cadence, and the canonical template
           # leaves PRO_VERSION commented out ("follow VERSION"). Without an
@@ -761,7 +788,8 @@ jobs:
           # manifest and only then publishes this draft. Candidates never reach
           # GitHub Releases at all.
           draft: true
-          prerelease: false
+          # Stable remains prerelease: false; only explicit previews are prereleases.
+          prerelease: ${{ inputs.channel == 'preview' }}
           make_latest: false
           overwrite_files: false
           files: |
@@ -821,7 +849,7 @@ jobs:
             ./ligandx-linux-amd64.AppImage
             ```
 
-      - name: Enforce draft stable publication policy
+      - name: Enforce draft stable publication policy and preview separation
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.create_release.outputs.id }}
@@ -838,8 +866,10 @@ jobs:
           case "$release_id" in
             ''|*[!0-9]*) echo "::error::create_release step produced no numeric id output"; exit 1 ;;
           esac
+          prerelease=false
+          if [ "$CHANNEL" = preview ]; then prerelease=true; fi
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-            -f make_latest=false -F prerelease=false -F draft=true
+            -f make_latest=false -F prerelease="$prerelease" -F draft=true
           state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")"
           test "$(jq -r .draft <<<"$state")" = true
-          test "$(jq -r .prerelease <<<"$state")" = false
+          test "$(jq -r .prerelease <<<"$state")" = "$prerelease"
