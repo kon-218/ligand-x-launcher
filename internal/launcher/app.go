@@ -12,12 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"ligandx-launcher/internal/agentsession"
 	"ligandx-launcher/internal/envfile"
 	"ligandx-launcher/internal/hostmetrics"
 	"ligandx-launcher/internal/license"
 	"ligandx-launcher/internal/runtimebundle"
-	"ligandx-launcher/internal/secretstore"
 	"net/http"
 	"net/url"
 	"os"
@@ -167,16 +165,6 @@ type UserSettings struct {
 	BoltzMSAApiKey       string `json:"boltzMsaApiKey"`
 }
 
-// AgentSetup is intentionally short-lived. It contains paste-ready MCP setup text
-// and a workspace-token expiry timestamp, never the user's password.
-type AgentSetup struct {
-	Instructions   string `json:"instructions"`
-	ExpiresAt      string `json:"expiresAt"`
-	SessionID      string `json:"sessionId"`
-	CredentialID   string `json:"credentialId"`
-	MigratedLegacy bool   `json:"migratedLegacy"`
-}
-
 // gpuRequiredRuntime lists services that genuinely cannot run without a GPU and
 // must be hard-blocked on CPU-only hosts. The core services md and
 // worker-gpu-short are deliberately absent: OpenMM falls back to its CPU
@@ -282,24 +270,12 @@ type App struct {
 	// configured Linux ORCA install is executable by the QC worker runtime.
 	// Nil in production; tests inject it to inspect arguments without Docker.
 	orcaProbeFn func(context.Context, []string) ([]byte, error)
-
-	// secretStore holds assistant MCP credentials. Tests inject a memory
-	// store; production uses OS Keychain / Credential Manager / Secret Service.
-	secretStore secretstore.Store
 }
 
 func NewApp() *App {
 	return &App{
-		logStreams:  make(map[string]context.CancelFunc),
-		secretStore: secretstore.Default(),
+		logStreams: make(map[string]context.CancelFunc),
 	}
-}
-
-func (a *App) sessionStore() secretstore.Store {
-	if a.secretStore != nil {
-		return a.secretStore
-	}
-	return secretstore.Default()
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -2623,323 +2599,6 @@ func (a *App) OpenFrontend() {
 
 func (a *App) OpenAPI() {
 	a.OpenBrowser(fmt.Sprintf("http://localhost:%d/docs", a.envPort("GATEWAY_PORT", 8000)))
-}
-
-// CreateAgentSetup authenticates locally using the launcher's protected runtime
-// configuration, then returns a paste-ready workspace handoff. The password is
-// used only for this loopback request and is never included in the result.
-func (a *App) CreateAgentSetup() (AgentSetup, error) {
-	return a.createAgentSetup(false)
-}
-
-// CreateAgentSetupWithExecution makes the execution authority an explicit
-// per-session choice in the launcher UI. The default Connect path remains
-// planning/read-only.
-func (a *App) CreateAgentSetupWithExecution(allowExecution bool) (AgentSetup, error) {
-	return a.createAgentSetup(allowExecution)
-}
-
-func (a *App) withLocalBrowserSession(fn func(client *http.Client, port int, apiKey string) error) error {
-	content, err := a.GetEnvContent("prod")
-	if err != nil {
-		return err
-	}
-	env := envfile.Parse(content)
-	username := strings.TrimSpace(env["LIGANDX_USERNAME"])
-	password := env["LIGANDX_PASSWORD"]
-	if username == "" || password == "" || password == "CHANGE_ME" {
-		return fmt.Errorf("finish setting a local Ligand-X account before managing assistant access")
-	}
-	port := a.envPort("GATEWAY_PORT", 8000)
-	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/api/auth/login", port), "application/json", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("Ligand-X must be running before managing assistant access: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("could not authenticate to manage assistant access (gateway returned HTTP %d)", resp.StatusCode)
-	}
-	var login struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&login); err != nil || login.Token == "" {
-		return fmt.Errorf("gateway returned an invalid assistant access response")
-	}
-	defer func() {
-		logoutReq, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/auth/logout", port), nil)
-		logoutReq.Header.Set("X-API-Key", login.Token)
-		if logoutResp, _ := client.Do(logoutReq); logoutResp != nil {
-			logoutResp.Body.Close()
-		}
-	}()
-	return fn(client, port, login.Token)
-}
-
-func (a *App) createAgentSetup(allowExecution bool) (AgentSetup, error) {
-	store := a.sessionStore()
-	if err := store.Available(); err != nil {
-		return AgentSetup{}, fmt.Errorf("%s. Ligand-X itself still works; unlock %s and reconnect the assistant", err.Error(), store.Name())
-	}
-	sessionID, err := agentsession.NewSessionID()
-	if err != nil {
-		return AgentSetup{}, err
-	}
-	privateHex, publicHex, err := agentsession.NewSigningKey()
-	if err != nil {
-		return AgentSetup{}, err
-	}
-	legacyFiles := agentsession.ListLegacyTokenFiles(a.projectPath)
-	scopes := []string{"projects:read", "projects:create", "inputs:prepare", "jobs:read", "jobs:plan"}
-	if allowExecution {
-		scopes = append(scopes, "jobs:submit")
-	}
-	var credential struct {
-		Token        string `json:"token"`
-		ExpiresAt    string `json:"expires_at"`
-		CredentialID string `json:"credential_id"`
-	}
-	err = a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
-		if len(legacyFiles) > 0 {
-			revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials", port), nil)
-			revokeReq.Header.Set("X-API-Key", apiKey)
-			revokeResp, revokeErr := client.Do(revokeReq)
-			if revokeErr != nil {
-				return fmt.Errorf("could not revoke the previous file-based assistant session: %w", revokeErr)
-			}
-			revokeResp.Body.Close()
-			if revokeResp.StatusCode != http.StatusNoContent {
-				return fmt.Errorf("could not revoke the previous file-based assistant session (HTTP %d)", revokeResp.StatusCode)
-			}
-		}
-		credentialRequest, _ := json.Marshal(map[string]interface{}{
-			"expires_in_minutes": 480,
-			"scopes":             scopes,
-			"session_id":         sessionID,
-			"public_key":         publicHex,
-		})
-		credentialReq, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials", port), bytes.NewReader(credentialRequest))
-		credentialReq.Header.Set("Content-Type", "application/json")
-		credentialReq.Header.Set("X-API-Key", apiKey)
-		credentialResp, credErr := client.Do(credentialReq)
-		if credErr != nil {
-			return fmt.Errorf("could not create dedicated assistant access: %w", credErr)
-		}
-		defer credentialResp.Body.Close()
-		if credentialResp.StatusCode != http.StatusCreated {
-			return fmt.Errorf("could not create dedicated assistant access (gateway returned HTTP %d)", credentialResp.StatusCode)
-		}
-		if err := json.NewDecoder(io.LimitReader(credentialResp.Body, 64*1024)).Decode(&credential); err != nil || credential.Token == "" || credential.CredentialID == "" {
-			return fmt.Errorf("gateway returned an invalid assistant credential")
-		}
-		return nil
-	})
-	if err != nil {
-		return AgentSetup{}, err
-	}
-	meta := agentsession.Meta{
-		SessionID:        sessionID,
-		CredentialID:     credential.CredentialID,
-		ExpiresAt:        credential.ExpiresAt,
-		ExecutionEnabled: allowExecution,
-		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
-	}
-	secret := agentsession.Secret{
-		Token:        credential.Token,
-		SigningKey:   privateHex,
-		CredentialID: credential.CredentialID,
-		Scopes:       scopes,
-	}
-	if err := agentsession.Persist(store, a.projectPath, meta, secret); err != nil {
-		_ = a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
-			revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials/%s", port, credential.CredentialID), nil)
-			revokeReq.Header.Set("X-API-Key", apiKey)
-			if revokeResp, revokeErr := client.Do(revokeReq); revokeResp != nil {
-				revokeResp.Body.Close()
-			} else if revokeErr != nil {
-				return revokeErr
-			}
-			return nil
-		})
-		return AgentSetup{}, err
-	}
-	if len(legacyFiles) > 0 {
-		agentsession.DeleteLegacyTokenFiles(a.projectPath)
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return AgentSetup{}, fmt.Errorf("resolve launcher connector executable: %w", err)
-	}
-	mcpConfig, err := agentsession.MCPConfigJSON(executable, a.projectPath, sessionID)
-	if err != nil {
-		return AgentSetup{}, err
-	}
-	config, _ := a.GetLauncherConfig()
-	instructions := agentsession.SetupInstructions(string(mcpConfig), credential.ExpiresAt, agentSetupGPUShortWarning(config.SelectedGroups), allowExecution)
-	return AgentSetup{
-		Instructions:   instructions,
-		ExpiresAt:      credential.ExpiresAt,
-		SessionID:      sessionID,
-		CredentialID:   credential.CredentialID,
-		MigratedLegacy: len(legacyFiles) > 0,
-	}, nil
-}
-
-func (a *App) GetAgentStorageStatus() agentsession.StorageStatus {
-	return agentsession.Status(a.sessionStore())
-}
-
-func (a *App) ListAgentSessions() (agentsession.List, error) {
-	store := a.sessionStore()
-	status := agentsession.Status(store)
-	sessions, err := agentsession.LoadMetadata(a.projectPath)
-	if err != nil {
-		return agentsession.List{Storage: status, LegacyFiles: len(agentsession.ListLegacyTokenFiles(a.projectPath))}, err
-	}
-	infos := make([]agentsession.Info, 0, len(sessions))
-	for _, meta := range sessions {
-		info := agentsession.Info{
-			SessionID:        meta.SessionID,
-			CredentialID:     meta.CredentialID,
-			ExpiresAt:        meta.ExpiresAt,
-			ExecutionEnabled: meta.ExecutionEnabled,
-			CreatedAt:        meta.CreatedAt,
-		}
-		if status.Available {
-			if _, err := agentsession.LoadSecret(store, meta.SessionID); err == nil {
-				info.SecretPresent = true
-			}
-		}
-		infos = append(infos, info)
-	}
-	return agentsession.List{
-		Sessions:    infos,
-		LegacyFiles: len(agentsession.ListLegacyTokenFiles(a.projectPath)),
-		Storage:     status,
-	}, nil
-}
-
-func (a *App) CopyAgentSessionConfig(sessionID string) (string, error) {
-	if _, err := hex.DecodeString(sessionID); err != nil || len(sessionID) != 32 {
-		return "", fmt.Errorf("assistant session identifier is invalid")
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve launcher connector executable: %w", err)
-	}
-	raw, err := agentsession.MCPConfigJSON(executable, a.projectPath, sessionID)
-	if err != nil {
-		return "", err
-	}
-	if strings.Contains(string(raw), "LIGANDX_AGENT_TOKEN") || strings.Contains(string(raw), "signing_key") {
-		return "", fmt.Errorf("refusing to copy a configuration that would expose assistant secrets")
-	}
-	return string(raw), nil
-}
-
-func (a *App) CheckAgentSessionHealth(sessionID string) (agentsession.Health, error) {
-	store := a.sessionStore()
-	health := agentsession.Health{SessionID: sessionID, Status: "unhealthy"}
-	if err := store.Available(); err != nil {
-		health.Status = "storage_unavailable"
-		health.Detail = fmt.Sprintf("%s. Ligand-X itself still works; unlock %s to use this assistant session.", err.Error(), store.Name())
-		return health, nil
-	}
-	secret, err := agentsession.LoadSecret(store, sessionID)
-	if err != nil {
-		health.Status = "missing_secret"
-		health.Detail = "This session is missing from protected storage. Reconnect the assistant from Ligand-X Launcher."
-		return health, nil
-	}
-	headers, err := agentsession.ProofHeaders(secret, http.MethodGet, "/api/agent/v1/capabilities", nil)
-	if err != nil {
-		health.Detail = err.Error()
-		return health, nil
-	}
-	port := a.envPort("GATEWAY_PORT", 8000)
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/capabilities", port), nil)
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		health.Status = "unreachable"
-		health.Detail = "Ligand-X must be running before an assistant session can be checked."
-		return health, nil
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
-	switch resp.StatusCode {
-	case http.StatusOK:
-		health.Status = "healthy"
-		health.Detail = "This assistant session can reach Ligand-X with a signed proof."
-	case http.StatusUnauthorized, http.StatusForbidden:
-		health.Status = "revoked_or_expired"
-		health.Detail = "The server rejected this session. Reconnect the assistant from Ligand-X Launcher."
-	default:
-		health.Detail = fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode)
-	}
-	return health, nil
-}
-
-func (a *App) RevokeAgentSession(sessionID string) error {
-	store := a.sessionStore()
-	sessions, _ := agentsession.LoadMetadata(a.projectPath)
-	var credentialID string
-	for _, meta := range sessions {
-		if meta.SessionID == sessionID {
-			credentialID = meta.CredentialID
-			break
-		}
-	}
-	if credentialID != "" {
-		err := a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
-			revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials/%s", port, credentialID), nil)
-			revokeReq.Header.Set("X-API-Key", apiKey)
-			revokeResp, revokeErr := client.Do(revokeReq)
-			if revokeErr != nil {
-				return fmt.Errorf("could not revoke assistant session: %w", revokeErr)
-			}
-			revokeResp.Body.Close()
-			if revokeResp.StatusCode != http.StatusNoContent && revokeResp.StatusCode != http.StatusNotFound {
-				return fmt.Errorf("gateway could not revoke assistant session (HTTP %d)", revokeResp.StatusCode)
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return agentsession.Delete(store, a.projectPath, sessionID)
-}
-
-// RevokeAgentAccess invalidates all dedicated assistant workspace tokens for
-// this local user without changing browser credentials or account passwords.
-func (a *App) RevokeAgentAccess() error {
-	store := a.sessionStore()
-	err := a.withLocalBrowserSession(func(client *http.Client, port int, apiKey string) error {
-		revokeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("http://127.0.0.1:%d/api/agent/v1/credentials", port), nil)
-		revokeReq.Header.Set("X-API-Key", apiKey)
-		revokeResp, revokeErr := client.Do(revokeReq)
-		if revokeErr != nil {
-			return fmt.Errorf("could not revoke assistant access: %w", revokeErr)
-		}
-		revokeResp.Body.Close()
-		if revokeResp.StatusCode != http.StatusNoContent {
-			return fmt.Errorf("gateway could not revoke assistant access (HTTP %d)", revokeResp.StatusCode)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	sessions, _ := agentsession.LoadMetadata(a.projectPath)
-	for _, meta := range sessions {
-		_ = agentsession.Delete(store, a.projectPath, meta.SessionID)
-	}
-	agentsession.DeleteLegacyTokenFiles(a.projectPath)
-	return nil
 }
 
 func (a *App) OpenFlower() {
