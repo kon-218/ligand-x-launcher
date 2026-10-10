@@ -568,6 +568,10 @@ func (a *App) ListRuntimeReleaseOptions() (ReleaseOptions, error) {
 // includePrereleases reports whether this install has opted into release
 // candidates. Unreadable config means stable, the safe default.
 func (a *App) includePrereleases() bool {
+	// A compiled preview cannot install a stable bundle: select its channel on first run.
+	if strings.TrimSpace(enabledPreviewBundles) != "" {
+		return true
+	}
 	config, err := a.GetLauncherConfig()
 	if err != nil {
 		return false
@@ -3370,6 +3374,10 @@ func (a *App) syncProteinPilotEnv() error {
 	current := envfile.Parse(content)
 	changed := map[string]string{}
 	for key, value := range updates {
+		// The prepared manifest records these paths; preserve explicit operator roots.
+		if (key == "PROTO_HOME" || key == "PROTO_MODEL_CACHE") && strings.TrimSpace(current[key]) != "" {
+			continue
+		}
 		if strings.TrimSpace(current[key]) != value {
 			changed[key] = value
 		}

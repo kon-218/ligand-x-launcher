@@ -341,14 +341,17 @@ func normalizedEntryName(name string) string {
 
 func EntryAllowed(name string) bool {
 	allowedFiles := map[string]bool{
-		"docker-compose.yml":        true,
-		"docker-compose.gpu.yml":    true,
-		".env.production.template":  true,
-		"LICENSE":                   true,
-		"README.md":                 true,
-		"docker/nginx/ligandx.conf": true,
-		"config/rabbitmq.conf":      true,
-		"config/flower_config.py":   true,
+		"docker-compose.yml":               true,
+		"docker-compose.gpu.yml":           true,
+		".env.production.template":         true,
+		"LICENSE":                          true,
+		"README.md":                        true,
+		"docker/nginx/ligandx.conf":        true,
+		"config/rabbitmq.conf":             true,
+		"config/flower_config.py":          true,
+		"scripts/prepare_proto_runtime.py": true,
+		"tools/proto_runtime_assets.py":    true,
+		"docs/PROTO_TESTER_PREVIEW.md":     true,
 	}
 	if allowedFiles[name] {
 		return true

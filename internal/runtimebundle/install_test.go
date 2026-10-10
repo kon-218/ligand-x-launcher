@@ -348,3 +348,16 @@ func TestEntryAllowedAcceptsGPUOverlay(t *testing.T) {
 		t.Fatal("EntryAllowed should accept docker-compose.gpu.yml")
 	}
 }
+
+func TestEntryAllowedAcceptsExactProtoPreparationFiles(t *testing.T) {
+	for _, name := range []string{"scripts/prepare_proto_runtime.py", "tools/proto_runtime_assets.py", "docs/PROTO_TESTER_PREVIEW.md"} {
+		if !EntryAllowed(name) {
+			t.Errorf("bundled Proto preparation file rejected: %s", name)
+		}
+	}
+	for _, name := range []string{"scripts/unreviewed.py", "tools/unreviewed.py", "docs/unreviewed.md"} {
+		if EntryAllowed(name) {
+			t.Errorf("unexpected file allowed: %s", name)
+		}
+	}
+}
