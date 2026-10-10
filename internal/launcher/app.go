@@ -114,6 +114,9 @@ type ServiceGroup struct {
 	Entitlement        string   `json:"entitlement"`
 	Licensed           bool     `json:"licensed"`
 	Locked             bool     `json:"locked"`
+	// RequiresGPU marks a group that cannot run on a CPU-only host, so the
+	// picker can say so before the download instead of failing after it.
+	RequiresGPU bool `json:"requiresGpu"`
 }
 
 type LauncherConfig struct {
@@ -127,6 +130,10 @@ type LauncherConfig struct {
 	// false, so an install that never touches the toggle keeps seeing only
 	// stable releases.
 	ShowPrereleases bool `json:"showPrereleases"`
+
+	// DismissedUpdateVersion is the optional runtime update the user chose not
+	// to install yet. The reminder stays quiet until a newer release appears.
+	DismissedUpdateVersion string `json:"dismissedUpdateVersion,omitempty"`
 }
 
 type UserProfile struct {
@@ -693,14 +700,9 @@ func (a *App) rollbackComposeCommand(arguments ...string) *exec.Cmd {
 // scientific artifacts before an explicitly authorized downgrade. Failure is
 // fail-closed: no runtime files or version pins have changed at this point.
 func (a *App) createPreRollbackBackup(currentVersion, targetVersion string) (string, error) {
-	query := "SELECT count(*) FROM jobs WHERE status IN ('pending','queued','running','processing','preparing');"
-	countBytes, err := a.rollbackComposeCommand("exec", "-T", "postgres", "psql", "-U", "ligandx", "-d", "ligandx", "-Atc", query).Output()
+	count, err := a.activeJobCount(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("could not verify active jobs (the current stack must be running): %w", err)
-	}
-	count, err := strconv.Atoi(strings.TrimSpace(string(countBytes)))
-	if err != nil {
-		return "", fmt.Errorf("invalid active-job count")
 	}
 	if count > 0 {
 		return "", fmt.Errorf("%d active job(s) must finish or be cancelled first", count)
@@ -3815,6 +3817,13 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 		extra = nil
 	}
 	groups = append(groups, extra...)
+	for i := range groups {
+		for _, service := range groups[i].Services {
+			if gpuRequiredRuntime[service] {
+				groups[i].RequiresGPU = true
+			}
+		}
+	}
 	return groups
 }
 
@@ -4530,6 +4539,7 @@ func (a *App) PullServiceGroups(groupIDs []string) {
 				"success":      false,
 				"failedGroups": groupIDs,
 				"reason":       "insufficient_disk",
+				"message":      err.Error(),
 			})
 			return
 		} else if warning != "" {

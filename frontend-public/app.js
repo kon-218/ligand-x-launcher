@@ -1,36 +1,65 @@
-/* Ligand-X public launcher — guided linear flow.
+/* Ligand-X public launcher.
  *
  * Reuses the same Go backend as the dev launcher via the Wails-injected
  * globals window.go.launcher.App.* and window.runtime.*. No ES-module imports;
- * the runtime binds these on the window object at startup.
+ * the runtime binds these on the window object at startup. Pure decision
+ * logic lives in state.js (window.LXState) so it can be tested under Node.
  *
- * Flow:  preflight gate  ->  login  ->  license (optional)  ->  services
- *        ->  pull images  ->  running.
- * Returning users (firstRunDone) skip onboarding and land on the running
- * screen in its "ready to start" state.
+ * First run is a wizard:  preflight gate -> login -> license (optional)
+ *                         -> services -> pull images.
+ * After that the launcher is a small app with four tabs — Home, Services,
+ * Settings, Help — so every place is one click from anywhere. One poller keeps
+ * state.status current on every tab; renderHome() derives all Home buttons
+ * and headlines from it, so no screen keeps its own idea of what is running.
  */
 
 const App = () => window.go.launcher.App;
 const RT = () => window.runtime;
+const S = () => window.LXState;
 
 // ---------- shared state ----------
 const state = {
+  mode: "gate",          // "gate" | "onboarding" | "app"
+  screen: "gate",        // data-screen currently shown
   config: null,          // LauncherConfig
   license: null,         // LicenseSummary
+  info: null,            // AppInfo (versions, paths, address, GPU)
+  update: null,          // RuntimeUpdateStatus from the boot check
   groups: [],            // []ServiceGroup
+  present: {},           // group ID -> images already downloaded
   selected: new Set(),   // selected group IDs (excludes implicit required handling)
+  servicesMode: "onboarding", // "onboarding" | "manage"
+  estimateSeq: 0,
+  status: null,          // last SystemStatus
+  stack: "stopped",      // derived: stopped | starting | running | degraded | stopping
+  busy: null,            // "starting" | "restarting" | "stopping" while a call is in flight
+  runError: "",
+  startNeedsPull: false, // last start failed on missing images
+  restartPending: false, // a saved change is waiting for a restart
+  fullRestartPending: false, // ...and needs stop + start (a module was removed)
   statusTimer: null,
+  statusMarkup: "",
   pulling: false,
+  pullCancelTimer: null,
   proExpanded: false,    // whether the locked-Pro disclosure is open
   pendingRuntimePull: false,
   releaseOnDone: null,
   releaseInstalled: "",
+  settingsLoaded: null,  // UserSettings as read from the env file
+  settingsInitial: null, // what the form showed right after loading
+  settingsDirty: false,
+  envDirty: false,
+  logService: null,      // service whose logs the log dialog is following
+  recentLog: [],         // last launcher messages, for diagnostics
   _orcaPrompt: null,     // { resolve, confirmed } while the ORCA dialog is open
 };
 
 const ONBOARDING_STEPS = ["login", "license", "services", "pull"];
+const TABBED_SCREENS = ["home", "services", "settings", "advanced", "help"];
 const DOCS_FIRST_LAUNCH_URL = "https://www.ligand-x.com/docs/first-launch/";
 const DOCKER_INSTALL_URL = "https://docs.docker.com/get-docker/";
+const SUPPORT_ISSUE_URL = "https://github.com/kon-218/ligand-x-support/issues/new/choose";
+const SUPPORT_DISCUSS_URL = "https://github.com/kon-218/ligand-x-support/discussions";
 
 function openExternal(url) {
   try { App().OpenBrowser(url); } catch (e) { /* best-effort */ }
@@ -40,12 +69,31 @@ function openExternal(url) {
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const el = (id) => document.getElementById(id);
+const cleanError = (e) => String(e).replace(/^Error:\s*/, "");
 
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { return false; }
+}
+
+// ---------- navigation ----------
 function showScreen(name) {
+  state.screen = name;
   $$(".screen").forEach((s) => s.classList.toggle("active", s.dataset.screen === name));
-  const onboarding = ONBOARDING_STEPS.includes(name);
+
+  const onboarding = state.mode === "onboarding" && ONBOARDING_STEPS.includes(name);
   el("steps").hidden = !onboarding;
   if (onboarding) updateSteps(name);
+
+  const tabbed = state.mode === "app" && TABBED_SCREENS.includes(name);
+  el("tabBar").hidden = !tabbed;
+  const activeTab = name === "advanced" ? "settings" : name;
+  $$("#tabBar .tab").forEach((tab) => {
+    const on = tabbed && tab.dataset.tab === activeTab;
+    tab.classList.toggle("active", on);
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+    tab.tabIndex = on || !tabbed ? 0 : -1;
+  });
+  $(".screen-host").scrollTop = 0;
 }
 
 function updateSteps(current) {
@@ -56,11 +104,36 @@ function updateSteps(current) {
   });
 }
 
+// Unsaved edits are never dropped silently when the user navigates away.
+function canLeaveScreen() {
+  if (state.screen === "settings" && state.settingsDirty) {
+    if (!window.confirm("Discard your unsaved settings changes?")) return false;
+    setSettingsDirty(false);
+  }
+  if (state.screen === "advanced" && state.envDirty) {
+    if (!window.confirm("Discard your unsaved changes to the environment file?")) return false;
+    state.envDirty = false;
+  }
+  if (state.screen === "services" && state.servicesMode === "manage" && servicesChanged()) {
+    if (!window.confirm("Discard your service changes?")) return false;
+  }
+  return true;
+}
+
+function showTab(tab) {
+  if (state.mode !== "app" || !canLeaveScreen()) return;
+  if (tab === "home") enterHome();
+  else if (tab === "services") enterServices("manage");
+  else if (tab === "settings") enterSettings();
+  else if (tab === "help") enterHelp();
+}
+
 function setEdition(edition) {
   const badge = el("editionBadge");
   const label = edition ? edition.charAt(0).toUpperCase() + edition.slice(1) : "Free";
   badge.textContent = label;
   badge.dataset.edition = (edition || "free").toLowerCase();
+  badge.setAttribute("aria-label", `License: ${label}. View or add a license`);
 }
 
 // ---------- boot ----------
@@ -72,31 +145,66 @@ window.addEventListener("DOMContentLoaded", () => {
   boot();
 });
 
-async function boot() {
-  await preflight(async () => {
-    try {
-      state.config = await App().GetLauncherConfig();
-    } catch (e) {
-      state.config = { firstRunDone: false, selectedGroups: [], userProfile: {} };
-    }
-    try {
-      state.license = await App().GetLicenseStatus();
-      setEdition(state.license && state.license.edition);
-    } catch (e) { /* free by default */ }
-
-    if (state.config && state.config.firstRunDone && state.pendingRuntimePull) {
-      state.pendingRuntimePull = false;
-      enterServices(true);
-    } else if (state.config && state.config.firstRunDone) {
-      enterRunning("idle");
-    } else {
-      showScreen("login");
-      const p = state.config && state.config.userProfile;
-      if (p) { el("username").value = p.username || ""; el("email").value = p.email || ""; }
-    }
-  });
+function boot() {
+  return preflight(afterRuntimeReady, { checkUpdate: true });
 }
 
+// Docker is up and the runtime files are installed: decide where the user lands.
+// Also the continuation after any runtime install or version change.
+async function afterRuntimeReady() {
+  try {
+    state.config = await App().GetLauncherConfig();
+  } catch (e) {
+    state.config = { firstRunDone: false, selectedGroups: [], userProfile: {} };
+  }
+  try {
+    state.license = await App().GetLicenseStatus();
+    setEdition(state.license && state.license.edition);
+  } catch (e) { /* free by default */ }
+  refreshAppInfo();
+
+  if (!(state.config && state.config.firstRunDone)) {
+    state.mode = "onboarding";
+    showScreen("login");
+    const p = state.config && state.config.userProfile;
+    if (p) { el("username").value = p.username || ""; el("email").value = p.email || ""; }
+    return;
+  }
+
+  state.mode = "app";
+  startStatusPolling();
+  if (state.pendingRuntimePull) {
+    // A new runtime version pins new images: fetch whatever the saved
+    // selection is now missing, and remind the user to restart onto them.
+    state.pendingRuntimePull = false;
+    markRestartNeeded(true);
+    const ids = savedGroups();
+    let present = {};
+    try { present = await App().CheckImagePresence(); } catch (e) { /* pull all */ }
+    const missing = ids.filter((id) => present[id] !== true);
+    if (missing.length) {
+      state.servicesMode = "manage";
+      state.selected = new Set(ids);
+      startPull(missing);
+      return;
+    }
+  }
+  enterHome();
+}
+
+async function refreshAppInfo() {
+  try {
+    state.info = await App().GetAppInfo();
+  } catch (e) { /* keep what we had */ }
+  if (state.screen === "home") renderHome();
+  if (state.screen === "help") renderAbout();
+  if (state.screen === "services") renderServices();
+}
+
+function savedGroups() {
+  return (state.config && state.config.selectedGroups && state.config.selectedGroups.length)
+    ? state.config.selectedGroups : ["core"];
+}
 
 function normalizeDockerCheck(res) {
   if (Array.isArray(res)) return { ok: !!res[0], message: res[1] || "" };
@@ -108,12 +216,20 @@ function normalizeDockerCheck(res) {
   return { ok: false, message: "" };
 }
 
+
 // ---------- preflight gate (docker + runtime) ----------
-// Runs before any start. Calls onReady() once Docker is up and the runtime
-// bundle (docker-compose.yml + env templates) is installed.
-async function preflight(onReady) {
-  showScreen("gate");
-  gate({ spinner: true, title: "Checking Docker…", msg: "Making sure the container engine is available." });
+// Runs at boot and before every start. Calls onReady() once Docker is up and
+// the runtime bundle (docker-compose.yml + env templates) is installed.
+//   opts.checkUpdate  ask the release index for a newer runtime (boot only, so
+//                     an optional update never stands between the user and Start)
+//   opts.quiet        stay on the current screen unless something needs attention
+async function preflight(onReady, opts = {}) {
+  const retry = () => preflight(onReady, Object.assign({}, opts, { quiet: false }));
+  const backHome = state.mode === "app" ? { label: "Back to Home", fn: () => enterHome() } : null;
+  if (!opts.quiet) {
+    showScreen("gate");
+    gate({ spinner: true, title: "Checking Docker…", msg: "Making sure the container engine is available." });
+  }
 
   let dockerOk = false, dockerMsg = "";
   try {
@@ -122,11 +238,13 @@ async function preflight(onReady) {
   } catch (e) { dockerMsg = String(e); }
 
   if (!dockerOk) {
+    showScreen("gate");
     gate({
       icon: "🐳", title: "Docker isn't running",
       msg: dockerMsg || "Start Docker Desktop (or the Docker engine), then try again. If Docker is not installed yet, use Install Docker.",
-      action: { label: "Try again", fn: () => preflight(onReady) },
+      action: { label: "Try again", fn: retry },
       secondary: { label: "Install Docker", fn: () => openExternal(DOCKER_INSTALL_URL) },
+      tertiary: backHome,
     });
     return;
   }
@@ -136,37 +254,45 @@ async function preflight(onReady) {
   try {
     dist = await App().GetDistributionStatus();
   } catch (e) {
+    showScreen("gate");
     gate({ icon: "⚠️", title: "Setup check failed", msg: String(e),
-      action: { label: "Try again", fn: () => preflight(onReady) } });
+      action: { label: "Try again", fn: retry }, tertiary: backHome });
     return;
   }
 
   if (dist && dist.needsInstall) {
+    showScreen("gate");
     gate({
       icon: "📦", title: "Set up runtime files",
       msg: dist.message || "Ligand-X needs to download its runtime files (~small) before the first launch.",
-      action: { label: "Download runtime", fn: () => installRuntime(onReady) },
-      secondary: { label: "Choose version", fn: () => openReleaseSelector(onReady, false) },
+      action: { label: "Download runtime", fn: () => installRuntime(afterRuntimeReady) },
+      secondary: { label: "Choose version", fn: () => openReleaseSelector(afterRuntimeReady, false) },
     });
     return;
   }
 
-  try {
-    const upd = await App().CheckForRuntimeUpdate();
-    if (upd && upd.updateAvailable) {
-      gate({
-        icon: "⬆️", title: "Update available",
-        msg: upd.message || ("A newer Ligand-X runtime (" + upd.latestVersion + ") is available."),
-        action: { label: "Update now", fn: () => installRuntime(onReady, upd.latestVersion, true) },
-        secondary: { label: "Choose version", fn: () => openReleaseSelector(onReady, true) },
-        tertiary: upd.updateRequired ? null : { label: "Not now", fn: () => onReady() },
-      });
-      return;
+  if (opts.checkUpdate) {
+    try {
+      state.update = await App().CheckForRuntimeUpdate();
+    } catch (e) {
+      // Update checking is best-effort: offline or a rate-limited API must not
+      // stop someone launching the runtime they already have installed.
+      console.warn("update check failed", e);
     }
-  } catch (e) {
-    // Update checking is best-effort: offline or a rate-limited API must not
-    // stop someone launching the runtime they already have installed.
-    console.warn("update check failed", e);
+  }
+  // Only an update the release index marks as required may block. An optional
+  // one is offered as a banner on Home instead (see renderHome).
+  const upd = state.update;
+  if (upd && upd.updateAvailable && upd.updateRequired) {
+    showScreen("gate");
+    gate({
+      icon: "⬆️", title: "Update required",
+      msg: upd.message || ("Ligand-X runtime " + upd.latestVersion + " must be installed before services can start."),
+      action: { label: "Update now", fn: () => installRuntime(afterRuntimeReady, upd.latestVersion, true) },
+      secondary: { label: "Choose version", fn: () => openReleaseSelector(afterRuntimeReady, true) },
+      tertiary: backHome,
+    });
+    return;
   }
 
   onReady();
@@ -179,6 +305,7 @@ async function installRuntime(onReady, version = "", pullAfter = false) {
     if (version) await App().InstallRuntimeBundleVersion(version);
     else await App().InstallRuntimeBundle();
     state.pendingRuntimePull = pullAfter;
+    state.update = null; // re-checked at next launch
     onReady();
   } catch (e) {
     gate({ icon: "⚠️", title: "Download failed", msg: String(e), log: true,
@@ -268,7 +395,7 @@ async function installSelectedRelease() {
     const confirmed = window.confirm("Roll back to " + version + "? Ligand-X will refuse if jobs are active and will create a database and scientific-artifact backup before changing runtime files.");
     if (!confirmed) return;
   }
-  const continuation = state.releaseOnDone || { fn: () => enterRunning("idle"), pullAfter: true };
+  const continuation = state.releaseOnDone || { fn: afterRuntimeReady, pullAfter: true };
   el("releaseModal").close();
   await installRuntime(continuation.fn, version, continuation.pullAfter);
 }
@@ -393,73 +520,159 @@ async function addLicense() {
 }
 
 // ---------- services ----------
-async function enterServices(fromChange) {
+// One panel, two uses: a wizard step on first run ("onboarding") and the
+// Services tab afterwards ("manage"). keepSelection re-shows what the user had
+// picked (e.g. coming back from a failed download) instead of resetting it.
+async function enterServices(mode, keepSelection) {
+  state.servicesMode = mode;
   showScreen("services");
   state.proExpanded = false;
-  el("svcNext").textContent = "Continue";
+  el("svcError").textContent = "";
+  el("svcNotice").hidden = true;
+  const manage = mode === "manage";
+  el("svcTitle").textContent = manage ? "Services" : "Choose services";
+  el("svcSub").textContent = manage
+    ? "Add or remove modules. Core services are required and always included."
+    : "Pick the modules to install. Core services are required and always included.";
+
   try {
     state.groups = await App().GetServiceGroups();
   } catch (e) {
     state.groups = [];
   }
+  try {
+    state.present = await App().CheckImagePresence();
+  } catch (e) { state.present = {}; }
 
-  // Initialise selection.
-  state.selected = new Set();
-  const saved = (state.config && state.config.selectedGroups) || [];
-  state.groups.forEach((g) => {
-    const wasSaved = fromChange && saved.includes(g.id);
-    if (g.required || g.defaultOn || wasSaved) {
-      if (!g.locked || g.required) state.selected.add(g.id);
-    }
-  });
+  if (!(keepSelection && state.selected.size)) {
+    state.selected = new Set();
+    const saved = (state.config && state.config.selectedGroups) || [];
+    state.groups.forEach((g) => {
+      const wanted = manage ? saved.includes(g.id) : g.defaultOn;
+      if (g.required || (wanted && !g.locked)) state.selected.add(g.id);
+    });
+  }
+  renderServices();
+}
+
+// Whether the picker differs from what is saved (manage mode only).
+function servicesChanged() {
+  if (!state.groups.length) return false;
+  return !S().sameSelection(selectedGroupIds(), withRequired(savedGroups()));
+}
+
+function withRequired(ids) {
+  const all = new Set(ids);
+  state.groups.forEach((g) => { if (g.required) all.add(g.id); });
+  return Array.from(all);
+}
+
+// A GPU-only module on a machine without one would download and then refuse
+// to start, so it cannot be newly selected. info is null until the check ran.
+function gpuMissingFor(g) {
+  return !!(g.requiresGpu && state.info && state.info.gpuAvailable === false);
+}
+
+async function toggleGroup(g) {
+  if (state.selected.has(g.id)) {
+    state.selected.delete(g.id);
+    renderServices();
+    return;
+  }
+  if (gpuMissingFor(g)) return;
+  if (g.id === "qc" && !(await ensureOrcaForQC())) return;
+  state.selected.add(g.id);
   renderServices();
 }
 
 // Build one selectable/locked service card.
 function svcCard(g) {
   const selected = state.selected.has(g.id) || g.required;
+  const noGpu = gpuMissingFor(g) && !selected;
   const item = document.createElement("div");
-  item.className = "svc-item" + (selected ? " selected" : "") + (g.locked ? " locked" : "");
+  item.className = "svc-item" + (selected ? " selected" : "") + (g.locked ? " locked" : "") + (noGpu ? " unavailable" : "");
+  item.tabIndex = 0;
 
   let tag = "";
   if (g.required) tag = `<span class="svc-tag required">Required</span>`;
   else if (g.edition && g.edition !== "free") tag = `<span class="svc-tag pro">${esc(g.edition)}</span>`;
+  if (g.requiresGpu) tag += `<span class="svc-tag gpu">NVIDIA GPU</span>`;
 
-  const sizeTxt = g.sizeMb ? `${(g.sizeMb / 1024).toFixed(g.sizeMb >= 1024 ? 1 : 2)} GB download` : "";
+  const downloaded = state.present[g.id] === true;
+  let sizeTxt = g.sizeMb ? `${(g.sizeMb / 1024).toFixed(g.sizeMb >= 1024 ? 1 : 2)} GB download` : "";
+  if (downloaded) sizeTxt = sizeTxt ? `Downloaded · ${sizeTxt.replace(" download", "")}` : "Downloaded";
   const unlock = g.locked ? `<div class="svc-unlock">Add a license to unlock</div>` : "";
+  const gpuNote = noGpu
+    ? `<div class="svc-warn">No NVIDIA GPU was detected on this computer, so this module can't run here.</div>`
+    : "";
   const pilotNote = g.id === "protein-mutation"
     ? `<div class="svc-size">Protein mutation pilot opt-in. Sets LIGANDX_ENABLE_PREVIEW_MODULES and LIGANDX_PROTO_PILOT_ENABLED. A healthy worker is not model readiness.</div>`
     : "";
 
   item.innerHTML = `
-    <div class="svc-check">${selected ? "✓" : ""}</div>
+    <div class="svc-check" aria-hidden="true">${selected ? "✓" : ""}</div>
     <div class="svc-body">
       <div class="svc-name">${esc(g.name)}${tag}</div>
       <div class="svc-desc">${esc(g.description || "")}</div>
       ${sizeTxt ? `<div class="svc-size">${sizeTxt}</div>` : ""}
       ${pilotNote}
+      ${gpuNote}
       ${unlock}
     </div>`;
 
-  if (!g.locked && !g.required) {
-    item.onclick = async () => {
-      if (state.selected.has(g.id)) {
-        state.selected.delete(g.id);
-        renderServices();
-        return;
-      }
-      if (g.id === "qc" && !(await ensureOrcaForQC())) return;
-      state.selected.add(g.id);
-      renderServices();
+  let activate = null;
+  if (g.locked) {
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `${g.name}: add a license to unlock`);
+    activate = () => openLicenseModal();
+  } else {
+    item.setAttribute("role", "checkbox");
+    item.setAttribute("aria-checked", selected ? "true" : "false");
+    item.setAttribute("aria-label", g.name);
+    if (g.required || noGpu) item.setAttribute("aria-disabled", "true");
+    if (!g.required) activate = () => toggleGroup(g);
+  }
+  if (activate) {
+    item.onclick = (e) => { if (!e.target.closest("button")) activate(); };
+    item.onkeydown = (e) => {
+      if (e.target !== item) return;
+      if (e.key === " " || e.key === "Enter") { e.preventDefault(); activate(); }
     };
-  } else if (g.locked) {
-    item.onclick = () => { enterLicense(); };
+  }
+
+  // Images of a module the user no longer runs keep taking disk space until
+  // they are removed; offer that right where the module is listed.
+  const savedIds = withRequired(savedGroups());
+  if (state.servicesMode === "manage" && downloaded && !selected && !g.locked && !savedIds.includes(g.id)) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "link-btn svc-remove";
+    remove.textContent = "Remove downloaded images";
+    remove.onclick = () => removeGroupImages(g, remove);
+    item.querySelector(".svc-body").appendChild(remove);
   }
   return item;
 }
 
+async function removeGroupImages(g, button) {
+  if (!window.confirm(`Remove the downloaded images for ${g.name}? They will need to be downloaded again if you add it back.`)) return;
+  el("svcError").textContent = "";
+  button.disabled = true;
+  button.textContent = "Removing…";
+  try {
+    const kept = Array.from(new Set([...withRequired(savedGroups()), ...selectedGroupIds()]));
+    await App().RemoveUnusedGroupImages([g.id], kept);
+  } catch (e) {
+    el("svcError").textContent = cleanError(e);
+  }
+  try { state.present = await App().CheckImagePresence(); } catch (e) { /* keep */ }
+  renderServices();
+}
+
 function renderServices() {
   const list = el("svcList");
+  const focused = document.activeElement && list.contains(document.activeElement)
+    ? Array.from(list.children).indexOf(document.activeElement) : -1;
   list.innerHTML = "";
 
   // Free or already-licensed groups stay in the main list; locked Pro modules
@@ -473,7 +686,8 @@ function renderServices() {
     const disc = document.createElement("button");
     disc.type = "button";
     disc.className = "svc-disclosure" + (state.proExpanded ? " open" : "");
-    disc.innerHTML = `<span class="svc-disclosure-caret">▸</span>
+    disc.setAttribute("aria-expanded", state.proExpanded ? "true" : "false");
+    disc.innerHTML = `<span class="svc-disclosure-caret" aria-hidden="true">▸</span>
       <span>Pro modules (${lockedPro.length}) — add a license to unlock</span>`;
     disc.onclick = () => { state.proExpanded = !state.proExpanded; renderServices(); };
     list.appendChild(disc);
@@ -481,6 +695,41 @@ function renderServices() {
     if (state.proExpanded) {
       lockedPro.forEach((g) => list.appendChild(svcCard(g)));
     }
+  }
+  // Re-rendering replaced the card that had keyboard focus; give it back.
+  if (focused >= 0 && list.children[focused]) list.children[focused].focus();
+  updateServicesFooter();
+}
+
+// Size-versus-free-space line and the two buttons, which say exactly what
+// pressing them will do.
+async function updateServicesFooter() {
+  const manage = state.servicesMode === "manage";
+  const changed = manage && servicesChanged();
+  const back = el("svcBack");
+  const next = el("svcNext");
+  back.textContent = manage ? "Discard changes" : "Back";
+  back.disabled = manage && !changed;
+
+  const seq = ++state.estimateSeq;
+  let est = null;
+  try {
+    est = await App().GetStorageEstimate(selectedGroupIds());
+  } catch (e) { /* no estimate; the pull pre-flight still checks */ }
+  if (seq !== state.estimateSeq) return; // a newer selection is already being sized
+
+  const summary = S().storageSummary(est);
+  const line = el("svcSummary");
+  line.textContent = summary.text;
+  line.dataset.level = summary.level;
+
+  const download = !!(est && est.downloadBytes);
+  if (manage) {
+    next.textContent = download ? "Download & apply" : (changed ? "Apply" : "No changes");
+    next.disabled = !!(est && est.blocked) || (!changed && !download);
+  } else {
+    next.textContent = download ? "Download & continue" : "Continue";
+    next.disabled = !!(est && est.blocked);
   }
 }
 
@@ -492,15 +741,22 @@ function selectedGroupIds() {
   return Array.from(ids);
 }
 
-// Confirm the service selection: download only the groups whose images aren't
-// already present, then land on the running screen in "ready to start" state.
-// If everything is already downloaded we skip the pull screen entirely — this
-// is what makes "Change services" cheap when nothing new was added.
-async function confirmServices() {
-  if (selectedGroupIds().includes("qc") && !(await ensureOrcaForQC())) return;
+function leaveServices() {
+  if (state.servicesMode === "manage") {
+    // "Discard changes": back to what is saved, staying on the tab.
+    enterServices("manage");
+    return;
+  }
+  enterLicense();
+}
 
+// Confirm the service selection: download only the groups whose images aren't
+// already present, then land on Home. If everything is already downloaded we
+// skip the pull screen entirely — this is what makes changing services cheap
+// when nothing new was added.
+async function confirmServices() {
   const ids = selectedGroupIds();
-  const btn = el("svcNext");
+  if (ids.includes("qc") && !(await ensureOrcaForQC())) return;
 
   let present = {};
   try {
@@ -508,14 +764,30 @@ async function confirmServices() {
   } catch (e) { /* treat as nothing present -> pull all */ }
 
   const missing = ids.filter((id) => present[id] !== true);
-  btn.textContent = missing.length ? "Download & continue" : "Continue";
-
   if (missing.length) {
     startPull(missing); // full selection is persisted on completion
     return;
   }
+  await finishSelection();
+}
+
+// The selection is downloaded: save it and go Home. Shared by the picker and
+// by a completed download.
+async function finishSelection() {
+  const before = withRequired(savedGroups());
+  const after = selectedGroupIds();
+  const wasSetUp = !!(state.config && state.config.firstRunDone);
   await persistSelection();
-  enterRunning("idle");
+  if (wasSetUp && !S().sameSelection(before, after)) {
+    // `up -d` starts added modules but leaves removed ones running, so a
+    // removal needs a full stop + start to take effect.
+    markRestartNeeded(before.some((id) => !after.includes(id)));
+  }
+  if (state.mode !== "app") {
+    state.mode = "app";
+    startStatusPolling();
+  }
+  enterHome();
 }
 
 // ---------- pull ----------
@@ -525,6 +797,9 @@ function startPull(groupIds) {
   state._pullGroups = groupIds;
   el("pullError").textContent = "";
   el("pullActions").hidden = true;
+  el("pullRunningActions").hidden = false;
+  el("pullCancel").disabled = false;
+  el("pullCancel").textContent = "Cancel download";
   el("pullLog").textContent = "";
   el("pullFill").style.width = "0%";
   el("pullGroup").textContent = "Preparing…";
@@ -535,6 +810,20 @@ function startPull(groupIds) {
   } catch (e) {
     pullFailed(String(e));
   }
+}
+
+async function cancelPull() {
+  if (!state.pulling) return;
+  const btn = el("pullCancel");
+  btn.disabled = true;
+  btn.textContent = "Cancelling…";
+  try { await App().StopPullServiceGroups(); } catch (e) { /* fall through to the timer */ }
+  // The backend confirms with a pullComplete("cancelled") event. If the pull
+  // was between steps and never reports back, do not leave the user waiting.
+  clearTimeout(state.pullCancelTimer);
+  state.pullCancelTimer = setTimeout(() => {
+    if (state.pulling) pullFailed(S().pullFailureMessage({ reason: "cancelled" }));
+  }, 15000);
 }
 
 function onPullProgress(p) {
@@ -549,43 +838,23 @@ function onPullProgress(p) {
 async function onPullComplete(res) {
   if (!state.pulling) return;
   state.pulling = false;
+  clearTimeout(state.pullCancelTimer);
 
   if (res && res.success) {
     el("pullFill").style.width = "100%";
     el("pullGroup").textContent = "Download complete";
-    await persistSelection();
-    // Land on "ready to start"; the user clicks Start, which routes through the
-    // working startFromRunning() -> StartServiceGroups() path.
-    enterRunning("idle");
+    state.startNeedsPull = false;
+    await finishSelection();
     return;
   }
-
-  // Failure paths.
-  const reason = res && res.reason;
-  if (reason === "gpu_not_found") {
-    // Drop GPU-requiring groups and bounce back to selection.
-    pullFailed("Some selected modules need an NVIDIA GPU that wasn't found. Remove them or continue with the rest.");
-    return;
-  }
-  if (reason === "assets_unavailable") {
-    pullFailed("Protein mutation pilot model assets are unavailable. A healthy worker is not model readiness.");
-    return;
-  }
-  if (reason === "license_required") {
-    pullFailed("A selected module requires a license. Add a license, or deselect it.");
-    return;
-  }
-  if (reason === "registry_login_failed") {
-    pullFailed("Couldn't authenticate to the image registry. Check your license and connection.");
-    return;
-  }
-  const failed = (res && res.failedGroups) || [];
-  pullFailed(failed.length ? `Failed to download: ${failed.join(", ")}.` : "Image download failed.");
+  pullFailed(S().pullFailureMessage(res));
 }
 
 function pullFailed(msg) {
   state.pulling = false;
+  clearTimeout(state.pullCancelTimer);
   el("pullError").textContent = msg;
+  el("pullRunningActions").hidden = true;
   el("pullActions").hidden = false;
 }
 
@@ -601,180 +870,266 @@ async function persistSelection() {
   } catch (e) { /* non-fatal: start can still proceed */ }
 }
 
-// ---------- running ----------
-// sub: "idle" (ready to start), "starting" (just kicked off / starting up).
-async function enterRunning(sub) {
-  showScreen("running");
-  el("runError").textContent = "";
-  stopStatusPolling();
-
-  if (sub === "idle") {
-    setRunHeader("○", "", "Ready to start", "Click Start services, then Open Ligand-X.");
-    el("startBtn").hidden = false;
-    el("restartBtn").hidden = true;
-    el("stopBtn").hidden = true;
-    el("openApp").disabled = true;
-    el("runTip").hidden = false;
-    renderStatusList([]);
-    // Reflect any already-running stack.
-    refreshStatus();
-    return;
-  }
-
-  // "starting": services were just (or are being) started.
-  el("startBtn").hidden = true;
-  el("restartBtn").hidden = false;
-  el("stopBtn").hidden = false;
-  setRunHeader("◐", "starting", "Starting services…", "This can take a minute on first run.");
-  startStatusPolling();
+// ---------- home ----------
+function enterHome() {
+  showScreen("home");
+  renderHome();
+  refreshStatus();
 }
 
-async function startFromRunning() {
-  const groupIds = (state.config && state.config.selectedGroups && state.config.selectedGroups.length)
-    ? state.config.selectedGroups : ["core"];
-  if (groupIds.includes("qc") && !(await ensureOrcaForQC())) return;
-
-  await preflight(async () => {
-    showScreen("running");
-    el("startBtn").hidden = true;
-    el("restartBtn").hidden = false;
-    el("stopBtn").hidden = false;
-    el("runError").textContent = "";
-    setRunHeader("◐", "starting", "Starting services…", "This can take a minute.");
-    startStatusPolling();
-    try {
-      await App().StartServiceGroups("prod", groupIds);
-    } catch (e) {
-      stopStatusPolling();
-      handleStartError(String(e), groupIds);
-    }
-  });
+// One poller for the whole app: it keeps running on every tab, so Home is
+// already current when the user comes back to it.
+function startStatusPolling() {
+  if (state.statusTimer) return;
+  refreshStatus();
+  state.statusTimer = setInterval(refreshStatus, 4000);
 }
 
-function handleStartError(msg, groupIds) {
-  const clean = msg.replace(/^Error:\s*/, "");
-  el("runError").textContent = clean;
-  setRunHeader("○", "", "Couldn't start", "");
-  el("restartBtn").hidden = true;
-  el("stopBtn").hidden = true;
-  // Missing images? Offer a re-download.
-  if (/pull|not found|no such image|manifest/i.test(clean)) {
-    el("startBtn").hidden = false;
-    el("startBtn").textContent = "Re-download images";
-    el("startBtn").onclick = () => startPull(groupIds || selectedFallback());
-  } else {
-    el("startBtn").hidden = false;
-    el("startBtn").textContent = "Start services";
-    el("startBtn").onclick = startFromRunning;
-  }
+async function refreshStatus() {
+  if (state.mode !== "app") return;
+  try {
+    state.status = await App().GetSystemStatus();
+  } catch (e) { return; }
+  renderHome();
 }
 
-function selectedFallback() {
-  return (state.config && state.config.selectedGroups && state.config.selectedGroups.length)
-    ? state.config.selectedGroups : ["core"];
+// A saved change needs the stack restarted before it applies. Harmless when
+// nothing is running: the next start picks the change up and clears the flag.
+function markRestartNeeded(full) {
+  state.restartPending = true;
+  if (full) state.fullRestartPending = true;
+  renderHome();
 }
 
-function setRunHeader(glyph, cls, headline, subline) {
+const STACK_HEADERS = {
+  stopped:  ["○", "", "Ready to start", "Start services, then open Ligand-X in your browser."],
+  starting: ["◐", "starting", "Starting services…", "This can take a minute on first run."],
+  running:  ["●", "up", "Ligand-X is running", ""],
+  degraded: ["◐", "starting", "Some services need attention", ""],
+  stopping: ["◐", "starting", "Stopping services…", "Waiting for running work to shut down cleanly."],
+};
+
+// Everything on Home is a function of state; nothing else shows or hides its
+// buttons. Safe to call from any screen.
+function renderHome() {
+  const status = state.status;
+  const services = (status && status.services) || [];
+  const running = (status && status.totalRunning) || 0;
+  const total = (status && status.totalServices) || services.length;
+  const stack = S().deriveStack(status, state.busy);
+  state.stack = stack;
+
+  let [glyph, cls, headline, subline] = STACK_HEADERS[stack];
+  const counts = `${running} of ${total} services up.`;
+  if (stack === "starting" && state.busy === "restarting") headline = "Restarting services…";
+  if (stack === "starting" && running > 0) subline = counts;
+  if (stack === "running") subline = counts;
+  if (stack === "degraded") subline = `${counts} Select a service below to see why.`;
+  if (stack === "stopped" && state.runError) headline = "Couldn't start";
   const pulse = el("runPulse");
   pulse.textContent = glyph;
   pulse.className = "run-pulse" + (cls ? " " + cls : "");
   el("runHeadline").textContent = headline;
   el("runSubline").textContent = subline;
-}
+  el("runError").textContent = state.runError;
 
-function startStatusPolling() {
-  stopStatusPolling();
-  refreshStatus();
-  state.statusTimer = setInterval(refreshStatus, 4000);
-}
-function stopStatusPolling() {
-  if (state.statusTimer) { clearInterval(state.statusTimer); state.statusTimer = null; }
-}
+  const up = stack !== "stopped";
+  const busy = !!state.busy;
+  el("startBtn").hidden = up;
+  el("startBtn").disabled = busy;
+  el("startBtn").textContent = state.startNeedsPull ? "Re-download images" : "Start services";
+  el("openApp").hidden = !up;
+  el("openApp").disabled = running === 0 || stack === "stopping";
+  el("restartBtn").hidden = !up;
+  el("stopBtn").hidden = !up;
+  el("restartBtn").disabled = busy;
+  el("stopBtn").disabled = busy;
 
-async function refreshStatus() {
-  let status;
-  try {
-    status = await App().GetSystemStatus();
-  } catch (e) { return; }
-
-  const services = (status && status.services) || [];
-  renderStatusList(services);
-
-  const running = (status && status.totalRunning) || 0;
-  const total = (status && status.totalServices) || services.length;
-
-  el("openApp").disabled = running === 0;
-
-  if (running > 0 && running >= total && total > 0) {
-    setRunHeader("●", "up", "Ligand-X is running", `${running} of ${total} services up.`);
-    el("startBtn").hidden = true;
-    el("restartBtn").hidden = false;
-    el("stopBtn").hidden = false;
-    el("runTip").hidden = false;
-  } else if (running > 0) {
-    setRunHeader("◐", "starting", "Starting services…", `${running} of ${total} services up.`);
-    el("restartBtn").hidden = false;
-    el("stopBtn").hidden = false;
-    el("runTip").hidden = true;
-  } else if (!state.statusTimer) {
-    // idle state with nothing running — leave the "ready to start" header.
-    el("runTip").hidden = false;
+  // Where the application lives and who to sign in as.
+  const info = state.info;
+  el("runAddress").hidden = !(up && info && info.appUrl);
+  if (info && info.appUrl) {
+    el("runAddressText").textContent = info.username
+      ? `${info.appUrl} — sign in as ${info.username}`
+      : info.appUrl;
   }
+
+  // Banners.
+  el("restartBanner").hidden = !(state.restartPending && up && !busy);
+  const dismissed = (state.config && state.config.dismissedUpdateVersion) || "";
+  const showUpdate = S().shouldShowUpdateBanner(state.update, dismissed);
+  el("updateBanner").hidden = !showUpdate;
+  if (showUpdate) {
+    el("updateBannerText").textContent = `Ligand-X ${state.update.latestVersion} is available.`;
+  }
+
+  renderStatusList(services);
 }
 
 function renderStatusList(services) {
-  const list = el("svcStatusList");
-  if (!services.length) { list.innerHTML = ""; return; }
-  list.innerHTML = services.map((s) => {
-    let dot = "down", label = s.status || "stopped";
-    if (s.running && (s.health === "healthy" || !s.health)) { dot = "running"; label = s.health || "running"; }
-    else if (s.running) { dot = "starting"; label = s.health || "starting"; }
-    return `<div class="svc-status">
-      <span class="dot ${dot}"></span>
+  el("svcStatusTitle").hidden = !services.length;
+  const markup = services.map((s) => {
+    const { dot, label } = S().serviceState(s);
+    return `<button type="button" class="svc-status" data-service="${esc(s.name)}" aria-label="${esc(s.name)}: ${esc(label)}. Show logs">
+      <span class="dot ${dot}" aria-hidden="true"></span>
       <span class="svc-status-name">${esc(s.name)}</span>
       <span class="svc-status-state">${esc(label)}</span>
-    </div>`;
+    </button>`;
   }).join("");
+  // Re-rendering identical rows every poll would steal keyboard focus.
+  if (markup === state.statusMarkup) return;
+  state.statusMarkup = markup;
+  const list = el("svcStatusList");
+  const focused = document.activeElement && list.contains(document.activeElement)
+    ? document.activeElement.dataset.service : null;
+  list.innerHTML = markup;
+  if (focused) {
+    const again = Array.from(list.children).find((row) => row.dataset.service === focused);
+    if (again) again.focus();
+  }
+}
+
+// Stop and Restart interrupt whatever is running. Ask first when jobs are
+// active; when the count cannot be read (database down) there is nothing to
+// lose by proceeding.
+async function confirmInterrupt(verb) {
+  let count = 0;
+  try { count = await App().ActiveJobCount(); } catch (e) { return true; }
+  if (!count) return true;
+  const jobs = count === 1 ? "1 job is" : `${count} jobs are`;
+  return window.confirm(`${jobs} still running or queued. ${verb} anyway? Running work will be interrupted.`);
+}
+
+async function startServices() {
+  if (state.busy) return;
+  const groupIds = savedGroups();
+  if (state.startNeedsPull) {
+    // The last start failed on missing images: fetch them, then come back.
+    state.runError = "";
+    state.servicesMode = "manage";
+    state.selected = new Set(groupIds);
+    startPull(groupIds);
+    return;
+  }
+  if (groupIds.includes("qc") && !(await ensureOrcaForQC())) return;
+
+  state.runError = "";
+  await preflight(async () => {
+    if (state.screen !== "home") showScreen("home");
+    state.busy = "starting";
+    renderHome();
+    try {
+      await App().StartServiceGroups("prod", groupIds);
+      state.restartPending = false;
+      state.fullRestartPending = false;
+    } catch (e) {
+      state.runError = cleanError(e);
+      state.startNeedsPull = /pull|not found|no such image|manifest/i.test(state.runError);
+    } finally {
+      state.busy = null;
+      await refreshStatus();
+      renderHome();
+    }
+  }, { quiet: true });
 }
 
 async function stopServices() {
-  el("stopBtn").disabled = true;
-  el("runError").textContent = "";
-  let stopErr = "";
+  if (state.busy) return;
+  if (!(await confirmInterrupt("Stop"))) return;
+  state.runError = "";
+  state.busy = "stopping";
+  renderHome();
   try {
     await App().StopServices();
   } catch (e) {
-    stopErr = String(e).replace(/^Error:\s*/, "");
+    // Surface the failure; the next status refresh shows what is still up.
+    state.runError = cleanError(e);
   } finally {
-    el("stopBtn").disabled = false;
+    state.busy = null;
+    await refreshStatus();
+    renderHome();
   }
-  stopStatusPolling();
-
-  if (stopErr) {
-    // Don't transition to idle (that clears #runError) — surface the failure and
-    // re-reflect the real container state, which likely shows services still up.
-    el("runError").textContent = stopErr;
-    refreshStatus();
-    return;
-  }
-  enterRunning("idle");
 }
 
 async function restartServices() {
-  const groupIds = selectedFallback();
+  if (state.busy) return;
+  const groupIds = savedGroups();
   if (groupIds.includes("qc") && !(await ensureOrcaForQC())) return;
+  if (!(await confirmInterrupt("Restart"))) return;
 
-  el("restartBtn").disabled = true;
-  el("runError").textContent = "";
-  setRunHeader("◐", "starting", "Restarting services…", "This can take a minute.");
+  state.runError = "";
+  state.busy = "restarting";
+  renderHome();
   try {
-    await App().RestartServiceGroups(groupIds);
+    if (state.fullRestartPending) {
+      await App().StopServices();
+      await App().StartServiceGroups("prod", groupIds);
+    } else {
+      await App().RestartServiceGroups(groupIds);
+    }
+    state.restartPending = false;
+    state.fullRestartPending = false;
   } catch (e) {
-    el("runError").textContent = String(e).replace(/^Error:\s*/, "");
+    state.runError = cleanError(e);
   } finally {
-    el("restartBtn").disabled = false;
+    state.busy = null;
+    await refreshStatus();
+    renderHome();
   }
-  startStatusPolling();
+}
+
+async function dismissUpdate() {
+  if (!state.update) return;
+  const cfg = Object.assign({}, state.config, { dismissedUpdateVersion: state.update.latestVersion });
+  state.config = cfg;
+  renderHome();
+  try { await App().SaveLauncherConfig(cfg); } catch (e) { /* asks again next launch */ }
+}
+
+function installUpdate() {
+  if (!state.update || !canLeaveScreen()) return;
+  installRuntime(afterRuntimeReady, state.update.latestVersion, true);
+}
+
+// ---------- service logs ----------
+async function openServiceLogs(name) {
+  state.logService = name;
+  el("logModalTitle").textContent = `${name} — logs`;
+  el("logModalBox").textContent = "";
+  el("logModalError").textContent = "";
+  const modal = el("logModal");
+  modal.showModal();
+  modal.focus();
+  try {
+    await App().ViewLogs(name);
+  } catch (e) {
+    el("logModalError").textContent = cleanError(e);
+  }
+}
+
+function onLogModalClose() {
+  const name = state.logService;
+  state.logService = null;
+  if (name) { try { App().StopLogStream(name); } catch (e) { /* already gone */ } }
+}
+
+async function restartOneService() {
+  const name = state.logService;
+  if (!name) return;
+  if (!(await confirmInterrupt(`Restart ${name}`))) return;
+  const btn = el("logModalRestart");
+  el("logModalError").textContent = "";
+  btn.disabled = true;
+  btn.textContent = "Restarting…";
+  try {
+    await App().RestartService(name);
+    refreshStatus();
+  } catch (e) {
+    el("logModalError").textContent = cleanError(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Restart this service";
+  }
 }
 
 // ---------- user modal ----------
@@ -829,6 +1184,7 @@ async function changePassword() {
     await App().UpdatePassword(pwd);
     el("newPassword").value = "";
     el("changePasswordSaved").hidden = false;
+    markRestartNeeded();
   } catch (e) {
     el("changePasswordError").textContent = String(e).replace(/^Error:\s*/, "");
   } finally {
@@ -885,6 +1241,10 @@ async function importLicenseFromModal() {
       state.license = lic;
       setEdition(lic.edition);
       renderLicenseModal(lic);
+      // A new license can unlock modules: refresh whichever screen shows them.
+      if (state.screen === "services") enterServices(state.servicesMode, true);
+      if (state.screen === "license") renderLicense();
+      if (state.screen === "help") renderAbout();
     }
   } catch (e) {
     const msg = String(e).replace(/^Error:\s*/, "");
@@ -899,6 +1259,7 @@ async function enterSettings() {
   showScreen("settings");
   el("settingsError").textContent = "";
   el("settingsSaved").hidden = true;
+  el("resetResourcesMsg").hidden = true;
   await loadSettings();
   try {
     const dist = await App().GetDistributionStatus();
@@ -907,32 +1268,23 @@ async function enterSettings() {
     el("installedRuntimeVersion").textContent = "Installed version could not be read.";
   }
   updateSettingsSections();
-  loadEnvEditor();
 }
 
-async function loadEnvEditor() {
-  el("envEditorError").textContent = "";
-  el("envEditorSaved").hidden = true;
-  try {
-    el("envEditor").value = await App().GetEnvContent("prod");
-  } catch (e) {
-    el("envEditorError").textContent = String(e).replace(/^Error:\s*/, "");
-  }
+function setSettingsDirty(dirty) {
+  state.settingsDirty = dirty;
+  el("settingsSave").disabled = !dirty;
+  if (dirty) el("settingsSaved").hidden = true;
 }
 
-async function saveEnvEditor() {
-  el("envEditorError").textContent = "";
-  el("envEditorSaved").hidden = true;
-  const btn = el("envEditorSave");
-  btn.disabled = true;
-  try {
-    await App().SaveEnvContent("prod", el("envEditor").value);
-    el("envEditorSaved").hidden = false;
-  } catch (e) {
-    el("envEditorError").textContent = String(e).replace(/^Error:\s*/, "");
-  } finally {
-    btn.disabled = false;
-  }
+function readSettingsForm() {
+  return {
+    cpuWorkerConcurrency: Number(el("cpuConcurrency").value),
+    gpuShortConcurrency:  Number(el("gpuShortConcurrency").value),
+    gpuLongConcurrency:   Number(el("gpuLongConcurrency").value),
+    orcaHostPath:         el("orcaPath").value.trim(),
+    boltzMsaUsername:     el("boltzMsaUser").value.trim(),
+    boltzMsaPassword:     el("boltzMsaPass").value,
+  };
 }
 
 async function loadSettings() {
@@ -948,6 +1300,12 @@ async function loadSettings() {
   el("orcaPath").value = s.orcaHostPath || "";
   el("boltzMsaUser").value = s.boltzMsaUsername || "";
   el("boltzMsaPass").value = s.boltzMsaPassword || "";
+  state.settingsLoaded = s;
+  // What the form shows can differ from the file (a select snaps a
+  // hand-edited value to its nearest option). Remember it so a save writes
+  // only what the user actually changed.
+  state.settingsInitial = readSettingsForm();
+  setSettingsDirty(false);
 }
 
 function setSelectValue(id, val) {
@@ -977,29 +1335,132 @@ async function saveSettings() {
   btn.disabled = true;
   btn.textContent = "Saving…";
 
-  const s = {
-    cpuWorkerConcurrency: Number(el("cpuConcurrency").value),
-    gpuShortConcurrency:  Number(el("gpuShortConcurrency").value),
-    gpuLongConcurrency:   Number(el("gpuLongConcurrency").value),
-    orcaHostPath:         el("orcaPath").value.trim(),
-    boltzMsaUsername:     el("boltzMsaUser").value.trim(),
-    boltzMsaPassword:     el("boltzMsaPass").value,
-    boltzMsaApiKey:       "",
-  };
+  const form = readSettingsForm();
+  const initial = state.settingsInitial || {};
+  const changed = {};
+  Object.keys(form).forEach((key) => { if (form[key] !== initial[key]) changed[key] = form[key]; });
+  const merged = S().mergeSettings(state.settingsLoaded, changed);
 
   const selected = (state.config && state.config.selectedGroups) || [];
   try {
     if (selected.includes("qc")) {
-      await App().ValidateOrcaHostPath(s.orcaHostPath);
+      await App().ValidateOrcaHostPath(merged.orcaHostPath);
     }
-    await App().SaveUserSettings(s);
+    await App().SaveUserSettings(merged);
+    state.settingsLoaded = merged;
+    state.settingsInitial = form;
+    setSettingsDirty(false);
     el("settingsSaved").hidden = false;
+    markRestartNeeded();
   } catch (e) {
-    el("settingsError").textContent = String(e).replace(/^Error:\s*/, "");
-  } finally {
+    el("settingsError").textContent = cleanError(e);
     btn.disabled = false;
+  } finally {
     btn.textContent = "Save changes";
   }
+}
+
+// ---------- advanced: raw environment file ----------
+// Kept on its own screen and reloaded on every visit, as Settings is, so the
+// form and the editor can never hold two different copies of the same file.
+function enterAdvanced() {
+  if (!canLeaveScreen()) return;
+  showScreen("advanced");
+  loadEnvEditor();
+}
+
+async function loadEnvEditor() {
+  el("envEditorError").textContent = "";
+  el("envEditorSaved").hidden = true;
+  try {
+    el("envEditor").value = await App().GetEnvContent("prod");
+    state.envDirty = false;
+  } catch (e) {
+    el("envEditorError").textContent = cleanError(e);
+  }
+}
+
+async function saveEnvEditor() {
+  el("envEditorError").textContent = "";
+  el("envEditorSaved").hidden = true;
+  const btn = el("envEditorSave");
+  btn.disabled = true;
+  try {
+    await App().SaveEnvContent("prod", el("envEditor").value);
+    state.envDirty = false;
+    el("envEditorSaved").hidden = false;
+    markRestartNeeded();
+    refreshAppInfo(); // the port or username may have changed
+  } catch (e) {
+    el("envEditorError").textContent = cleanError(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- help ----------
+function enterHelp() {
+  showScreen("help");
+  el("diagnosticsCopied").hidden = true;
+  renderAbout();
+  refreshAppInfo();
+}
+
+function aboutRows() {
+  const info = state.info || {};
+  const lic = state.license || {};
+  const edition = (lic.edition || "free").replace(/^\w/, (c) => c.toUpperCase());
+  return [
+    ["Launcher", info.launcherVersion || "unknown"],
+    ["Runtime", info.runtimeVersion || "not recorded"],
+    ["Edition", edition],
+    ["Address", info.appUrl || "—"],
+    ["Signed in as", info.username || "—"],
+    ["NVIDIA GPU", state.info ? (info.gpuAvailable ? "Detected" : "Not detected") : "Checking…"],
+    ["Install folder", info.projectPath || "—"],
+    ["Launcher log", info.logPath || "—"],
+  ];
+}
+
+function renderAbout() {
+  const box = el("aboutRows");
+  box.textContent = "";
+  aboutRows().forEach(([k, v]) => {
+    const row = document.createElement("div");
+    row.className = "license-row about-row";
+    const dt = document.createElement("dt"); dt.textContent = k;
+    const dd = document.createElement("dd"); dd.textContent = v;
+    row.append(dt, dd);
+    box.appendChild(row);
+  });
+}
+
+// Plain text a user can paste into a support request. Deliberately built from
+// what is already on screen: no password, license contents or env file.
+function diagnosticsText() {
+  const lines = ["Ligand-X launcher diagnostics", ""];
+  aboutRows().forEach(([k, v]) => lines.push(`${k}: ${v}`));
+  lines.push(`Platform: ${navigator.platform || "unknown"}`);
+  lines.push(`Selected modules: ${savedGroups().join(", ")}`);
+  lines.push(`Stack: ${state.stack}`);
+  const services = (state.status && state.status.services) || [];
+  if (services.length) {
+    lines.push("", "Services:");
+    services.forEach((s) => lines.push(`  ${s.name}: ${S().serviceState(s).label}`));
+  }
+  if (state.runError) lines.push("", `Last error: ${state.runError}`);
+  if (state.recentLog.length) {
+    lines.push("", "Recent launcher messages:");
+    state.recentLog.forEach((l) => lines.push(`  ${l}`));
+  }
+  return lines.join("\n");
+}
+
+async function copyDiagnostics() {
+  const ok = await copyText(diagnosticsText());
+  const note = el("diagnosticsCopied");
+  note.textContent = ok ? "Copied. Paste it into your support request." : "Couldn't reach the clipboard.";
+  note.hidden = false;
 }
 
 // ---------- ORCA path prompt ----------
@@ -1076,9 +1537,17 @@ function onOrcaModalClose() {
   finishOrcaPrompt(!!(pending && pending.confirmed));
 }
 
-// ---------- logs (gate + pull) ----------
+// ---------- logs (gate + pull + service log dialog) ----------
 function onLog(entry) {
   const line = `${entry.timestamp || ""} ${entry.message || ""}`.trim();
+  if (entry.service === "launcher") {
+    state.recentLog.push(line);
+    if (state.recentLog.length > 30) state.recentLog.shift();
+  }
+  if (state.logService && entry.service === state.logService) {
+    appendLog(el("logModalBox"), line);
+    return;
+  }
   if (state.pulling) appendLog(el("pullLog"), line);
   else if (!el("gateLog").hidden) appendLog(el("gateLog"), line);
 }
@@ -1092,9 +1561,34 @@ function appendLog(box, line) {
 }
 
 // ---------- wiring ----------
+function closeOnBackdrop(id) {
+  el(id).addEventListener("click", (e) => { if (e.target === el(id)) el(id).close(); });
+}
+
 function wireEvents() {
+  // Tabs. Arrow keys move between them, as the tablist role promises.
+  const tabs = $$("#tabBar .tab");
+  tabs.forEach((tab, i) => {
+    tab.onclick = () => showTab(tab.dataset.tab);
+    tab.onkeydown = (e) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+      next.focus();
+      showTab(next.dataset.tab);
+    };
+  });
+
+  // Header.
+  el("helpBtn").onclick = () => {
+    if (state.mode === "app") showTab("help");
+    else openExternal(DOCS_FIRST_LAUNCH_URL);
+  };
+  el("userBtn").onclick = openUserModal;
+  el("editionBadge").onclick = openLicenseModal;
+
+  // Release selector.
   el("releaseModalClose").onclick = () => el("releaseModal").close();
-  el("releaseModal").addEventListener("click", (e) => { if (e.target === el("releaseModal")) el("releaseModal").close(); });
+  closeOnBackdrop("releaseModal");
   el("releaseInstall").onclick = installSelectedRelease;
   el("releasePrereleaseToggle").onchange = async (event) => {
     const toggle = event.target;
@@ -1105,56 +1599,98 @@ function wireEvents() {
     } catch (e) {
       // Put the checkbox back where it was: the channel did not actually change.
       toggle.checked = !toggle.checked;
-      el("releaseError").textContent = String(e).replace(/^Error:\s*/, "");
+      el("releaseError").textContent = cleanError(e);
     } finally {
       toggle.disabled = false;
     }
   };
-  el("editionBadge").onclick = openLicenseModal;
+
+  // License + account dialogs.
   el("licenseModalClose").onclick = () => el("licenseModal").close();
-  el("licenseModal").addEventListener("click", (e) => { if (e.target === el("licenseModal")) el("licenseModal").close(); });
+  closeOnBackdrop("licenseModal");
   el("licenseModalImport").onclick = importLicenseFromModal;
-  el("orcaModalClose").onclick = () => el("orcaModal").close();
-  el("orcaModal").addEventListener("click", (e) => { if (e.target === el("orcaModal")) el("orcaModal").close(); });
-  el("orcaModal").addEventListener("close", onOrcaModalClose);
-  el("orcaModalBrowse").onclick = browseOrcaModal;
-  el("orcaModalConfirm").onclick = confirmOrcaModal;
-  el("loginNext").onclick = handleLogin;
-  el("password").addEventListener("keydown", (e) => { if (e.key === "Enter") handleLogin(); });
-
-  el("addLicense").onclick = addLicense;
-  el("licenseNext").onclick = () => enterServices(false);
-
-  el("svcBack").onclick = () => enterLicense();
-  el("svcNext").onclick = confirmServices;
-
-  el("pullBack").onclick = () => enterServices(true);
-  el("pullRetry").onclick = () => startPull(state._pullGroups || selectedGroupIds());
-
-  el("openApp").onclick = () => { try { App().OpenFrontend(); } catch (e) {} };
-  el("startBtn").onclick = startFromRunning;
-  el("restartBtn").onclick = restartServices;
-  el("stopBtn").onclick = stopServices;
-  el("envEditorReload").onclick = loadEnvEditor;
-  el("envEditorSave").onclick = saveEnvEditor;
-  el("changeServices").onclick = () => enterServices(true);
-  el("helpBtn").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
-  el("openDocs").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
-  el("userBtn").onclick = openUserModal;
   el("userModalClose").onclick = () => el("userModal").close();
-  el("userModal").addEventListener("click", (e) => { if (e.target === el("userModal")) el("userModal").close(); });
+  closeOnBackdrop("userModal");
+  el("accountManageLicense").onclick = () => { el("userModal").close(); openLicenseModal(); };
   el("changePasswordToggle").onclick = () => {
     const form = el("changePasswordForm");
     form.hidden = !form.hidden;
     el("changePasswordToggle").textContent = form.hidden ? "Change password" : "Cancel";
+    if (!form.hidden) el("newPassword").focus();
   };
   el("changePasswordSave").onclick = changePassword;
   el("newPassword").addEventListener("keydown", (e) => { if (e.key === "Enter") changePassword(); });
-  el("openSettings").onclick = enterSettings;
-  el("settingsBackTop").onclick = () => enterRunning("idle");
-  el("settingsSave").onclick = saveSettings;
-  el("chooseRuntimeVersion").onclick = () => openReleaseSelector(() => enterServices(true), true);
+
+  // ORCA dialog.
+  el("orcaModalClose").onclick = () => el("orcaModal").close();
+  closeOnBackdrop("orcaModal");
+  el("orcaModal").addEventListener("close", onOrcaModalClose);
+  el("orcaModalBrowse").onclick = browseOrcaModal;
+  el("orcaModalConfirm").onclick = confirmOrcaModal;
+
+  // Onboarding.
+  el("loginForm").addEventListener("submit", (e) => { e.preventDefault(); handleLogin(); });
+  el("showPassword").onchange = (e) => { el("password").type = e.target.checked ? "text" : "password"; };
+  el("addLicense").onclick = addLicense;
+  el("licenseNext").onclick = () => enterServices("onboarding");
+
+  // Services + download.
+  el("svcBack").onclick = leaveServices;
+  el("svcNext").onclick = confirmServices;
+  el("pullCancel").onclick = cancelPull;
+  el("pullBack").onclick = () => enterServices(state.servicesMode, true);
+  el("pullRetry").onclick = () => startPull(state._pullGroups || selectedGroupIds());
+
+  // Home.
+  el("openApp").onclick = () => { try { App().OpenFrontend(); } catch (e) {} };
+  el("startBtn").onclick = startServices;
+  el("restartBtn").onclick = restartServices;
+  el("restartBannerBtn").onclick = restartServices;
+  el("stopBtn").onclick = stopServices;
+  el("updateNow").onclick = installUpdate;
+  el("updateLater").onclick = dismissUpdate;
+  el("copyAddress").onclick = async () => {
+    const ok = state.info && await copyText(state.info.appUrl);
+    el("copyAddress").textContent = ok ? "Copied" : "Copy";
+    setTimeout(() => { el("copyAddress").textContent = "Copy"; }, 1500);
+  };
+  el("svcStatusList").addEventListener("click", (e) => {
+    const row = e.target.closest(".svc-status");
+    if (row) openServiceLogs(row.dataset.service);
+  });
+
+  // Service log dialog.
+  el("logModalClose").onclick = () => el("logModal").close();
+  closeOnBackdrop("logModal");
+  el("logModal").addEventListener("close", onLogModalClose);
+  el("logModalRestart").onclick = restartOneService;
+  el("logModalCopy").onclick = async () => {
+    const ok = await copyText(el("logModalBox").innerText);
+    el("logModalCopy").textContent = ok ? "Copied" : "Copy";
+    setTimeout(() => { el("logModalCopy").textContent = "Copy"; }, 1500);
+  };
+
+  // Settings.
+  el("settingsForm").addEventListener("submit", (e) => { e.preventDefault(); saveSettings(); });
+  el("settingsForm").addEventListener("input", () => setSettingsDirty(true));
+  el("settingsForm").addEventListener("change", () => setSettingsDirty(true));
+  el("browseOrca").onclick = async () => {
+    try {
+      const p = await App().BrowseForFolder("Select ORCA Installation Folder");
+      if (p) { el("orcaPath").value = p; setSettingsDirty(true); }
+    } catch (e) { /* cancelled */ }
+  };
+  el("chooseRuntimeVersion").onclick = () => {
+    if (canLeaveScreen()) openReleaseSelector(afterRuntimeReady, true);
+  };
   el("resetResources").onclick = resetResourceLimits;
+  el("openAdvanced").onclick = enterAdvanced;
+  el("advancedBack").onclick = () => { if (canLeaveScreen()) enterSettings(); };
+  el("envEditor").addEventListener("input", () => { state.envDirty = true; el("envEditorSaved").hidden = true; });
+  el("envEditorReload").onclick = loadEnvEditor;
+  el("envEditorSave").onclick = saveEnvEditor;
+
+  // Uninstall.
   el("openUninstall").onclick = openUninstallModal;
   el("uninstallModalClose").onclick = () => el("uninstallModal").close();
   // Typing the phrase is the only thing that arms the button, mirroring the
@@ -1164,12 +1700,15 @@ function wireEvents() {
   };
   el("uninstallGo").onclick = runUninstall;
   el("uninstallQuit").onclick = () => { try { window.runtime.Quit(); } catch (e) {} };
-  el("browseOrca").onclick = async () => {
-    try {
-      const p = await App().BrowseForFolder("Select ORCA Installation Folder");
-      if (p) el("orcaPath").value = p;
-    } catch (e) { /* cancelled */ }
-  };
+
+  // Help.
+  el("helpDocs").onclick = () => openExternal(DOCS_FIRST_LAUNCH_URL);
+  el("helpSupport").onclick = () => openExternal(SUPPORT_ISSUE_URL);
+  el("helpDiscuss").onclick = () => openExternal(SUPPORT_DISCUSS_URL);
+  el("openFolder").onclick = () => { try { App().OpenProjectFolder(); } catch (e) {} };
+  el("copyDiagnostics").onclick = copyDiagnostics;
+  el("helpAccount").onclick = openUserModal;
+  el("helpLicense").onclick = openLicenseModal;
 }
 
 // ---------- troubleshooting ----------
@@ -1182,6 +1721,7 @@ async function resetResourceLimits() {
     const summary = await App().ResetResourceLimits();
     el("resetResourcesMsg").textContent = summary || "Resource limits reset.";
     el("resetResourcesMsg").hidden = false;
+    markRestartNeeded();
   } catch (e) {
     el("settingsError").textContent = String(e).replace(/^Error:\s*/, "");
   } finally {

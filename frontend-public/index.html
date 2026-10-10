@@ -10,28 +10,28 @@
   <div class="app">
     <header class="app-header">
       <div class="brand">
-        <div class="brand-mark">LX</div>
+        <div class="brand-mark" aria-hidden="true">LX</div>
         <div class="brand-name">Ligand-X</div>
       </div>
       <div class="header-actions">
-        <button id="helpBtn" class="header-icon-btn" aria-label="Help" title="Open docs">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <button id="helpBtn" class="header-icon-btn" type="button" aria-label="Help" title="Help">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.5"/>
             <path d="M6.2 6.1a1.8 1.8 0 113.2 1.1c-.55.5-.9.85-.9 1.55" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             <circle cx="8" cy="11.4" r="0.7" fill="currentColor"/>
           </svg>
         </button>
-        <button id="userBtn" class="header-icon-btn" aria-label="Account">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <button id="userBtn" class="header-icon-btn" type="button" aria-label="Account" title="Account">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <circle cx="8" cy="5.5" r="2.75" stroke="currentColor" stroke-width="1.5"/>
             <path d="M2 14.5c0-3.314 2.686-5.5 6-5.5s6 2.186 6 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
-        <span id="editionBadge" class="edition-badge" data-edition="free">Free</span>
+        <button id="editionBadge" class="edition-badge" type="button" data-edition="free" title="View or add a license">Free</button>
       </div>
     </header>
 
-    <!-- Onboarding progress dots (hidden on gate / running screens) -->
+    <!-- Onboarding progress dots (first run only) -->
     <div id="steps" class="steps" hidden>
       <div class="step-dot" data-step="login"></div>
       <div class="step-dot" data-step="license"></div>
@@ -47,11 +47,11 @@
           <div id="gateSpinner" class="spinner" hidden></div>
           <div id="gateIcon" class="gate-icon" hidden></div>
           <h2 id="gateTitle" class="gate-title">Starting up…</h2>
-          <p id="gateMsg" class="gate-msg">Checking your environment.</p>
+          <p id="gateMsg" class="gate-msg selectable" role="status">Checking your environment.</p>
           <button id="gateAction" class="btn btn-primary" hidden></button>
           <button id="gateSecondary" class="btn btn-ghost" hidden></button>
           <button id="gateTertiary" class="link-btn" hidden></button>
-          <div id="gateLog" class="log-box" hidden></div>
+          <div id="gateLog" class="log-box selectable" hidden></div>
         </div>
       </section>
 
@@ -59,22 +59,25 @@
       <section class="screen" data-screen="login">
         <h1 class="screen-title">Create your account</h1>
         <p class="screen-sub">Sets the credentials for your local Ligand-X instance.</p>
-        <div class="field">
-          <label for="username">Username</label>
-          <input id="username" class="input" autocomplete="username" placeholder="admin">
-        </div>
-        <div class="field">
-          <label for="email">Email <span style="color:var(--text-faint)">(optional)</span></label>
-          <input id="email" class="input" type="email" autocomplete="email" placeholder="name@example.com">
-        </div>
-        <div class="field">
-          <label for="password">Password</label>
-          <input id="password" class="input" type="password" autocomplete="new-password" placeholder="At least 8 characters">
-        </div>
-        <div id="loginError" class="inline-error"></div>
-        <div class="actions">
-          <button id="loginNext" class="btn btn-primary btn-block">Continue</button>
-        </div>
+        <form id="loginForm" novalidate>
+          <div class="field">
+            <label for="username">Username</label>
+            <input id="username" class="input" autocomplete="username" placeholder="admin">
+          </div>
+          <div class="field">
+            <label for="email">Email <span style="color:var(--text-faint)">(optional)</span></label>
+            <input id="email" class="input" type="email" autocomplete="email" placeholder="name@example.com">
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" class="input" type="password" autocomplete="new-password" placeholder="At least 8 characters">
+            <label class="check-line"><input id="showPassword" type="checkbox"> Show password</label>
+          </div>
+          <div id="loginError" class="inline-error" role="alert"></div>
+          <div class="actions">
+            <button id="loginNext" class="btn btn-primary btn-block" type="submit">Continue</button>
+          </div>
+        </form>
       </section>
 
       <!-- LICENSE (optional) -->
@@ -85,75 +88,93 @@
           <div class="license-row"><dt>Edition</dt><dd id="licEdition">Free</dd></div>
           <div id="licExtraRows"></div>
         </div>
-        <div id="licenseError" class="inline-error"></div>
+        <div id="licenseError" class="inline-error" role="alert"></div>
         <div class="actions actions-stack">
-          <button id="addLicense" class="btn btn-ghost btn-block">Add a license file…</button>
-          <button id="licenseNext" class="btn btn-primary btn-block">Continue with Free</button>
+          <button id="addLicense" class="btn btn-ghost btn-block" type="button">Add a license file…</button>
+          <button id="licenseNext" class="btn btn-primary btn-block" type="button">Continue with Free</button>
         </div>
       </section>
 
-      <!-- SERVICES -->
+      <!-- SERVICES: onboarding step and, afterwards, the Services tab -->
       <section class="screen" data-screen="services">
-        <h1 class="screen-title">Choose services</h1>
-        <p class="screen-sub">Pick the modules to install. Core services are required and always included.</p>
+        <h1 id="svcTitle" class="screen-title">Choose services</h1>
+        <p id="svcSub" class="screen-sub">Pick the modules to install. Core services are required and always included.</p>
+        <div id="svcNotice" class="banner" hidden></div>
         <div id="svcList" class="svc-list"></div>
+        <p id="svcSummary" class="svc-summary selectable" role="status"></p>
+        <div id="svcError" class="inline-error" role="alert"></div>
         <div class="actions">
-          <button id="svcBack" class="btn btn-ghost">Back</button>
-          <button id="svcNext" class="btn btn-primary" style="flex:2">Continue</button>
+          <button id="svcBack" class="btn btn-ghost" type="button">Back</button>
+          <button id="svcNext" class="btn btn-primary" type="button" style="flex:2">Continue</button>
         </div>
       </section>
 
       <!-- PULL -->
       <section class="screen" data-screen="pull">
         <h1 class="screen-title">Downloading images</h1>
-        <p class="screen-sub">Fetching the container images for your selected services.</p>
+        <p class="screen-sub">Fetching the container images for your selected services. You can cancel and resume later; finished images are kept.</p>
         <div class="progress-head">
-          <span id="pullGroup" class="muted">Preparing…</span>
+          <span id="pullGroup" class="muted" role="status">Preparing…</span>
           <span id="pullCounter"></span>
         </div>
         <div class="progress-track"><div id="pullFill" class="progress-fill"></div></div>
         <div id="pullCaption" class="progress-caption"></div>
-        <div id="pullError" class="inline-error"></div>
-        <div id="pullActions" class="actions" hidden>
-          <button id="pullBack" class="btn btn-ghost">Back</button>
-          <button id="pullRetry" class="btn btn-primary" style="flex:2">Retry</button>
+        <div id="pullError" class="inline-error selectable" role="alert"></div>
+        <div id="pullRunningActions" class="actions">
+          <button id="pullCancel" class="btn btn-ghost btn-block" type="button">Cancel download</button>
         </div>
-        <div id="pullLog" class="log-box"></div>
+        <div id="pullActions" class="actions" hidden>
+          <button id="pullBack" class="btn btn-ghost" type="button">Back</button>
+          <button id="pullRetry" class="btn btn-primary" type="button" style="flex:2">Retry</button>
+        </div>
+        <div id="pullLog" class="log-box selectable"></div>
       </section>
 
-      <!-- RUNNING -->
-      <section class="screen" data-screen="running">
-        <div class="run-summary">
-          <div id="runPulse" class="run-pulse">○</div>
+      <!-- HOME -->
+      <section class="screen" data-screen="home">
+        <div id="updateBanner" class="banner" hidden>
+          <span id="updateBannerText"></span>
+          <span class="banner-actions">
+            <button id="updateNow" class="link-btn" type="button">Update</button>
+            <button id="updateLater" class="link-btn muted-link" type="button">Later</button>
+          </span>
+        </div>
+        <div id="restartBanner" class="banner banner-warn" hidden>
+          <span>Restart services to apply your changes.</span>
+          <span class="banner-actions">
+            <button id="restartBannerBtn" class="link-btn" type="button">Restart now</button>
+          </span>
+        </div>
+        <div class="run-summary" role="status" aria-live="polite">
+          <div id="runPulse" class="run-pulse" aria-hidden="true">○</div>
           <div>
-            <div id="runHeadline" class="run-headline">Ready to start</div>
-            <div id="runSubline" class="run-subline">Your services are installed.</div>
+            <div id="runHeadline" class="run-headline">Checking…</div>
+            <div id="runSubline" class="run-subline"></div>
           </div>
         </div>
+        <div id="runError" class="inline-error selectable" role="alert"></div>
+        <div class="actions actions-stack" style="margin-top:14px">
+          <button id="openApp" class="btn btn-primary btn-lg btn-block" type="button" disabled>Open Ligand-X</button>
+          <button id="startBtn" class="btn btn-primary btn-lg btn-block" type="button" hidden>Start services</button>
+          <div class="actions-row">
+            <button id="restartBtn" class="btn btn-secondary" type="button" hidden>Restart</button>
+            <button id="stopBtn" class="btn btn-danger" type="button" hidden>Stop</button>
+          </div>
+        </div>
+        <p id="runAddress" class="note selectable" hidden>
+          <span id="runAddressText"></span>
+          <button id="copyAddress" class="link-btn" type="button">Copy</button>
+        </p>
+        <h2 id="svcStatusTitle" class="list-title" hidden>Services <span class="list-title-hint">select one to see its logs</span></h2>
         <div id="svcStatusList" class="svc-status-list"></div>
-        <div id="runError" class="inline-error"></div>
-        <div class="actions actions-stack" style="margin-top:18px">
-          <button id="openApp" class="btn btn-primary btn-lg btn-block" disabled>Open Ligand-X</button>
-          <button id="startBtn" class="btn btn-primary btn-lg btn-block" hidden>Start services</button>
-          <button id="restartBtn" class="btn btn-secondary btn-block" hidden>Restart</button>
-          <button id="stopBtn" class="btn btn-danger btn-block" hidden>Stop</button>
-        </div>
-        <p id="runTip" class="note">After Open Ligand-X, log in with the account you created.</p>
-        <div class="run-links">
-          <button id="changeServices" class="link-btn">Change services</button>
-          <span class="run-links-sep">·</span>
-          <button id="openSettings" class="link-btn">Settings</button>
-          <span class="run-links-sep">·</span>
-          <button id="openDocs" class="link-btn">Help</button>
-        </div>
       </section>
 
       <!-- SETTINGS -->
       <section class="screen" data-screen="settings">
-        <button id="settingsBackTop" class="back-btn">&#8592; Back</button>
         <h1 class="screen-title">Settings</h1>
         <p class="screen-sub">Tune performance and configure optional integrations. Changes take effect after restarting services.</p>
 
+        <form id="settingsForm" novalidate>
         <div class="settings-section">
           <h3 class="settings-section-title">Performance</h3>
           <div class="field">
@@ -194,7 +215,7 @@
             <p class="field-hint">Choose the extracted Linux x86-64 ORCA folder containing a file named <code>orca</code>. This is required even on Windows or macOS because Quantum Chemistry runs in a Linux container. Ligand-X tests the install inside the pinned QC worker before every start.</p>
             <div class="path-field">
               <input id="orcaPath" class="input" placeholder="/opt/orca" readonly>
-              <button id="browseOrca" class="btn btn-ghost">Browse…</button>
+              <button id="browseOrca" class="btn btn-ghost" type="button">Browse…</button>
             </div>
           </div>
         </div>
@@ -212,12 +233,19 @@
           </div>
         </div>
 
+          <div id="settingsError" class="inline-error" role="alert"></div>
+          <div class="actions">
+            <button id="settingsSave" class="btn btn-primary btn-block" type="submit" disabled>Save changes</button>
+          </div>
+          <div id="settingsSaved" class="settings-saved" role="status" hidden>Saved.</div>
+        </form>
+
         <div class="settings-section">
           <h3 class="settings-section-title">Updates</h3>
           <div class="field">
             <label>Runtime version</label>
             <p id="installedRuntimeVersion" class="field-hint">Checking installed version…</p>
-            <button id="chooseRuntimeVersion" class="btn btn-secondary">Choose version…</button>
+            <button id="chooseRuntimeVersion" class="btn btn-secondary" type="button">Choose version…</button>
           </div>
         </div>
 
@@ -228,55 +256,111 @@
             <p class="field-hint">Restores the CPU and memory limits to the shipped defaults and re-fits them to this
               computer. Use this if services fail to start after editing the configuration by hand. Your password,
               version and other settings are not affected.</p>
-            <button id="resetResources" class="btn btn-secondary">Reset to defaults</button>
-            <div id="resetResourcesMsg" class="settings-saved" hidden>Resource limits reset.</div>
+            <button id="resetResources" class="btn btn-secondary" type="button">Reset to defaults</button>
+            <div id="resetResourcesMsg" class="settings-saved" role="status" hidden>Resource limits reset.</div>
           </div>
         </div>
 
         <div class="settings-section">
           <h3 class="settings-section-title">Advanced</h3>
           <div class="field">
-            <label for="envEditor">Environment file (.env.production)</label>
-            <p class="field-hint">Direct access to the configuration file docker compose reads. Only edit this if
-              you know what you're changing — an invalid value can stop every service from starting. Changes take
-              effect the next time services start or restart.</p>
-            <textarea id="envEditor" class="input env-editor" spellcheck="false" rows="12"></textarea>
-            <div id="envEditorError" class="inline-error"></div>
-            <div class="actions" style="margin-top:10px">
-              <button id="envEditorReload" class="btn btn-ghost" type="button">Reload</button>
-              <button id="envEditorSave" class="btn btn-secondary" type="button">Save env file</button>
-            </div>
-            <div id="envEditorSaved" class="settings-saved" hidden>Saved. Restart services to apply.</div>
+            <label>Environment file (.env.production)</label>
+            <p class="field-hint">Direct access to the configuration file docker compose reads. Only needed for
+              options this screen does not offer.</p>
+            <button id="openAdvanced" class="btn btn-secondary" type="button">Edit environment file…</button>
           </div>
         </div>
 
         <div class="settings-section">
-          <h3 class="settings-section-title">Uninstall</h3>
+          <h3 class="settings-section-title danger-title">Danger zone</h3>
           <div class="field">
             <label>Remove Ligand-X from this computer</label>
             <p class="field-hint">Stops and deletes every Ligand-X container, network, downloaded image and stored
               result, then removes the runtime files and the launcher itself — leaving this computer as it was before
               you installed. Shared images such as PostgreSQL and Redis are left alone in case other software uses
               them. This cannot be undone.</p>
-            <button id="openUninstall" class="btn btn-danger">Uninstall Ligand-X…</button>
+            <button id="openUninstall" class="btn btn-danger" type="button">Uninstall Ligand-X…</button>
           </div>
         </div>
 
-        <div id="settingsError" class="inline-error"></div>
+      </section>
+
+      <!-- ADVANCED: raw environment file -->
+      <section class="screen" data-screen="advanced">
+        <button id="advancedBack" class="back-btn" type="button">&#8592; Settings</button>
+        <h1 class="screen-title">Environment file</h1>
+        <p class="screen-sub">Only edit this if you know what you're changing — an invalid value can stop every
+          service from starting. Changes take effect the next time services start or restart.</p>
+        <label for="envEditor" class="sr-only">Contents of .env.production</label>
+        <textarea id="envEditor" class="input env-editor selectable" spellcheck="false" rows="16"></textarea>
+        <div id="envEditorError" class="inline-error" role="alert"></div>
         <div class="actions">
-          <button id="settingsSave" class="btn btn-primary btn-block">Save changes</button>
+          <button id="envEditorReload" class="btn btn-ghost" type="button">Discard changes</button>
+          <button id="envEditorSave" class="btn btn-primary" type="button" style="flex:2">Save env file</button>
         </div>
-        <div id="settingsSaved" class="settings-saved" hidden>Saved.</div>
+        <div id="envEditorSaved" class="settings-saved" role="status" hidden>Saved.</div>
+      </section>
+
+      <!-- HELP -->
+      <section class="screen" data-screen="help">
+        <h1 class="screen-title">Help</h1>
+        <p class="screen-sub">Guides, support, and the details of this install.</p>
+        <div class="help-links">
+          <button id="helpDocs" class="btn btn-secondary btn-block" type="button">Getting started guide</button>
+          <button id="helpSupport" class="btn btn-secondary btn-block" type="button">Report a problem</button>
+          <button id="helpDiscuss" class="btn btn-ghost btn-block" type="button">Ask a question</button>
+        </div>
+        <div class="settings-section">
+          <h3 class="settings-section-title">This install</h3>
+          <dl id="aboutRows" class="license-card selectable"></dl>
+          <div class="actions">
+            <button id="openFolder" class="btn btn-ghost" type="button">Open install folder</button>
+            <button id="copyDiagnostics" class="btn btn-ghost" type="button">Copy diagnostics</button>
+          </div>
+          <div id="diagnosticsCopied" class="settings-saved" role="status" hidden>Copied. Paste it into your support request.</div>
+          <p class="field-hint" style="margin-top:10px">Diagnostics list versions, service status and recent launcher messages. They never include your password, license or environment file.</p>
+        </div>
+        <div class="settings-section">
+          <h3 class="settings-section-title">Account and license</h3>
+          <div class="actions">
+            <button id="helpAccount" class="btn btn-ghost" type="button">Account…</button>
+            <button id="helpLicense" class="btn btn-ghost" type="button">License…</button>
+          </div>
+        </div>
       </section>
 
     </main>
+
+    <!-- Tabs: every place in the launcher, one click from anywhere (after first run) -->
+    <nav id="tabBar" class="tab-bar" role="tablist" aria-label="Launcher sections" hidden>
+      <button class="tab" type="button" role="tab" data-tab="home" aria-selected="false">Home</button>
+      <button class="tab" type="button" role="tab" data-tab="services" aria-selected="false">Services</button>
+      <button class="tab" type="button" role="tab" data-tab="settings" aria-selected="false">Settings</button>
+      <button class="tab" type="button" role="tab" data-tab="help" aria-selected="false">Help</button>
+    </nav>
   </div>
 
-  <!-- USER MODAL -->
+  <!-- SERVICE LOG MODAL -->
+  <dialog id="logModal" class="license-modal log-modal" tabindex="-1">
+    <div class="license-modal-header">
+      <span id="logModalTitle" class="license-modal-title">Logs</span>
+      <button id="logModalClose" class="modal-close" type="button" aria-label="Close" title="Close">✕</button>
+    </div>
+    <div class="license-modal-body">
+      <div id="logModalBox" class="log-box log-box-tall selectable" aria-live="off"></div>
+      <div id="logModalError" class="inline-error" role="alert"></div>
+    </div>
+    <div class="license-modal-footer actions" style="margin-top:0">
+      <button id="logModalCopy" class="btn btn-ghost" type="button">Copy</button>
+      <button id="logModalRestart" class="btn btn-secondary" type="button">Restart this service</button>
+    </div>
+  </dialog>
+
+  <!-- RELEASE MODAL -->
   <dialog id="releaseModal" class="license-modal release-modal" tabindex="-1">
     <div class="license-modal-header">
       <span class="license-modal-title">Choose Ligand-X version</span>
-      <button id="releaseModalClose" class="modal-close" aria-label="Close">✕</button>
+      <button id="releaseModalClose" class="modal-close" aria-label="Close" title="Close">✕</button>
     </div>
     <div class="license-modal-body">
       <p class="field-hint">Every release shown is signed and verified. Images are not downloaded until you confirm.</p>
@@ -287,7 +371,7 @@
       <p class="field-hint release-channel-hint">Release candidates are pre-release builds for testing. They are signed, but not recommended for day-to-day work.</p>
       <div id="releaseWarning" class="inline-warning" hidden></div>
       <div id="releaseList" class="release-list"></div>
-      <div id="releaseError" class="inline-error"></div>
+      <div id="releaseError" class="inline-error" role="alert"></div>
     </div>
     <div class="license-modal-footer">
       <button id="releaseInstall" class="btn btn-primary btn-block" disabled>Use selected version</button>
@@ -298,19 +382,20 @@
   <dialog id="userModal" class="license-modal" tabindex="-1">
     <div class="license-modal-header">
       <span class="license-modal-title">Account</span>
-      <button id="userModalClose" class="modal-close" aria-label="Close">✕</button>
+      <button id="userModalClose" class="modal-close" aria-label="Close" title="Close">✕</button>
     </div>
     <div id="userModalBody" class="license-modal-body"></div>
     <div class="license-modal-footer">
-      <button id="changePasswordToggle" class="btn btn-ghost btn-block">Change password</button>
+      <button id="accountManageLicense" class="btn btn-ghost btn-block" type="button">Manage license…</button>
+      <button id="changePasswordToggle" class="btn btn-ghost btn-block" type="button" style="margin-top:8px">Change password</button>
       <div id="changePasswordForm" class="change-password-form" hidden>
         <div class="field" style="margin-bottom:10px">
           <label for="newPassword">New password</label>
           <input id="newPassword" class="input" type="password" placeholder="At least 8 characters" autocomplete="new-password">
         </div>
-        <div id="changePasswordError" class="inline-error" style="margin-top:0;margin-bottom:8px"></div>
+        <div id="changePasswordError" class="inline-error" role="alert" style="margin-top:0;margin-bottom:8px"></div>
         <button id="changePasswordSave" class="btn btn-primary btn-block">Save new password</button>
-        <div id="changePasswordSaved" class="settings-saved" hidden>Password updated.</div>
+        <div id="changePasswordSaved" class="settings-saved" role="status" hidden>Password saved. It applies the next time services start.</div>
       </div>
     </div>
   </dialog>
@@ -319,10 +404,10 @@
   <dialog id="licenseModal" class="license-modal" tabindex="-1">
     <div class="license-modal-header">
       <span class="license-modal-title">License</span>
-      <button id="licenseModalClose" class="modal-close" aria-label="Close">✕</button>
+      <button id="licenseModalClose" class="modal-close" aria-label="Close" title="Close">✕</button>
     </div>
     <div id="licenseModalBody" class="license-modal-body"></div>
-    <div id="licenseModalError" class="inline-error" style="margin-top:0;margin-bottom:8px"></div>
+    <div id="licenseModalError" class="inline-error" role="alert" style="margin-top:0;margin-bottom:8px"></div>
     <div class="license-modal-footer">
       <button id="licenseModalImport" class="btn btn-ghost btn-block">Import license file…</button>
     </div>
@@ -332,7 +417,7 @@
   <dialog id="orcaModal" class="license-modal orca-modal" tabindex="-1">
     <div class="license-modal-header">
       <span class="license-modal-title">ORCA installation</span>
-      <button id="orcaModalClose" class="modal-close" aria-label="Close">✕</button>
+      <button id="orcaModalClose" class="modal-close" aria-label="Close" title="Close">✕</button>
     </div>
     <div class="license-modal-body">
       <p class="field-hint" style="margin-bottom:14px">Quantum Chemistry needs your separately licensed Linux x86-64 ORCA install. Choose the extracted folder containing a file named <code>orca</code> (not <code>orca.exe</code>). Ligand-X mounts it read-only and runs a short isolated check in the pinned QC worker before services start.</p>
@@ -343,7 +428,7 @@
           <button id="orcaModalBrowse" class="btn btn-ghost" type="button">Browse…</button>
         </div>
       </div>
-      <div id="orcaModalError" class="inline-error"></div>
+      <div id="orcaModalError" class="inline-error" role="alert"></div>
     </div>
     <div class="license-modal-footer">
       <button id="orcaModalConfirm" class="btn btn-primary btn-block">Use this folder</button>
@@ -354,7 +439,7 @@
   <dialog id="uninstallModal" class="license-modal" tabindex="-1">
     <div class="license-modal-header">
       <span class="license-modal-title">Uninstall Ligand-X</span>
-      <button id="uninstallModalClose" class="modal-close" aria-label="Close">✕</button>
+      <button id="uninstallModalClose" class="modal-close" aria-label="Close" title="Close">✕</button>
     </div>
     <div class="license-modal-body">
       <div id="uninstallPrompt">
@@ -367,7 +452,7 @@
           <label for="uninstallConfirm">Type <strong>UNINSTALL</strong> to confirm</label>
           <input id="uninstallConfirm" class="input" autocomplete="off" spellcheck="false" placeholder="UNINSTALL">
         </div>
-        <div id="uninstallError" class="inline-error"></div>
+        <div id="uninstallError" class="inline-error" role="alert"></div>
       </div>
       <div id="uninstallResult" hidden>
         <div id="uninstallSteps" class="uninstall-steps"></div>
@@ -381,6 +466,7 @@
   </dialog>
 
   <script src="wailsjs/runtime/runtime.js"></script>
+  <script src="state.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

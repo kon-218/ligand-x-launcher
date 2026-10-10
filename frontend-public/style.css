@@ -67,6 +67,7 @@ html, body {
   padding: 4px 9px; border-radius: 999px;
   background: var(--surface-2); color: var(--text-muted);
   border: 1px solid var(--border);
+  font-family: inherit;
 }
 .edition-badge[data-edition="academic"],
 .edition-badge[data-edition="pro"] {
@@ -317,6 +318,7 @@ select.input option {
 .license-modal-body { padding: 14px 16px; }
 .license-modal-footer { padding: 0 16px 14px; }
 .release-modal { width: 460px; }
+.log-modal { width: 460px; }
 .orca-modal { width: 420px; }
 .release-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; max-height: 330px; overflow-y: auto; }
 .release-option {
@@ -407,3 +409,85 @@ select.input option {
   margin-top: 12px; padding-top: 12px;
   border-top: 1px solid var(--border);
 }
+
+/* ---------- Keyboard focus ---------- */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.input:focus-visible { outline: none; }
+
+/* Text a user may need to copy: errors, addresses, logs, install details. */
+.selectable, .inline-error { user-select: text; cursor: text; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+.btn-secondary { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+.btn-secondary:not(:disabled):hover { border-color: var(--border-strong); }
+
+.check-line {
+  display: flex; align-items: center; gap: 7px; margin-top: 8px;
+  font-size: 12px; color: var(--text-muted); cursor: pointer;
+}
+.check-line input { accent-color: var(--accent); }
+
+/* ---------- Tab bar ---------- */
+.tab-bar {
+  display: flex; flex-shrink: 0;
+  border-top: 1px solid var(--border); background: var(--surface);
+}
+.tab {
+  flex: 1; padding: 12px 4px; font: inherit; font-size: 13px; font-weight: 600;
+  background: none; border: none; border-top: 2px solid transparent;
+  color: var(--text-muted); cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-top-color: var(--accent); }
+.tab:focus-visible { outline-offset: -3px; }
+
+/* ---------- Banners (Home, Services) ---------- */
+.banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 12px; margin-bottom: 12px; font-size: 12.5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(45,212,191,0.35); background: rgba(45,212,191,0.08);
+}
+.banner-warn { border-color: rgba(251,191,36,0.35); background: rgba(251,191,36,0.08); }
+.banner-actions { display: flex; gap: 12px; flex-shrink: 0; }
+.muted-link { color: var(--text-muted); }
+
+/* ---------- Home ---------- */
+.actions-row { display: flex; gap: 10px; }
+.actions-row .btn { flex: 1; }
+.list-title {
+  font-size: 12px; font-weight: 650; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.5px; margin: 20px 0 8px;
+}
+.list-title-hint { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-faint); margin-left: 6px; }
+button.svc-status {
+  width: 100%; font: inherit; font-size: 13px; color: var(--text);
+  text-align: left; cursor: pointer; transition: border-color 0.15s;
+}
+button.svc-status:hover { border-color: var(--border-strong); }
+#runAddress { display: flex; gap: 10px; align-items: baseline; justify-content: center; }
+
+/* ---------- Service picker additions ---------- */
+.svc-item:focus-visible { outline-offset: 1px; }
+.svc-item.unavailable { opacity: 0.6; cursor: not-allowed; }
+.svc-tag.gpu { background: rgba(251,191,36,0.14); color: var(--warn); }
+.svc-warn { font-size: 11.5px; color: var(--warn); margin-top: 4px; }
+.svc-remove { font-size: 11.5px; margin-top: 6px; }
+.svc-summary { font-size: 12.5px; color: var(--text-muted); margin: 14px 0 0; min-height: 18px; }
+.svc-summary[data-level="warn"] { color: var(--warn); }
+.svc-summary[data-level="error"] { color: var(--danger); }
+
+/* ---------- Help ---------- */
+.help-links { display: flex; flex-direction: column; gap: 8px; }
+.about-row { gap: 16px; }
+.about-row dd { text-align: right; word-break: break-all; }
+dl.license-card { margin: 0; }
+.danger-title { color: var(--danger); }
+
+.log-box-tall { height: 300px; margin-top: 0; }
+.svc-item.locked { cursor: pointer; }
