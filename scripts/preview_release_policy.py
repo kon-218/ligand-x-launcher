@@ -5,9 +5,11 @@ import re
 
 def validate_selection(channel, version, bundle, promote_latest, reuse_from):
     if channel == 'stable':
-        if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', version) or bundle != 'none':
-            raise ValueError('stable packaging requires vX.Y.Z and no preview bundle')
-        return ''
+        if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', version) or bundle not in {'none', 'proto-mutation'}:
+            raise ValueError('stable packaging requires vX.Y.Z and a supported optional bundle')
+        if bundle != 'none' and reuse_from:
+            raise ValueError('an optional preview bundle requires a newly built launcher')
+        return '' if bundle == 'none' else bundle
     if channel != 'preview' or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+-preview\.[1-9][0-9]*', version):
         raise ValueError('tester packaging requires vX.Y.Z-preview.N')
     if bundle != 'proto-mutation' or promote_latest or reuse_from:

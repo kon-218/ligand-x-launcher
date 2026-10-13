@@ -16,7 +16,7 @@ import (
 //go:embed preview_bundles.json
 var previewBundlesJSON []byte
 
-// enabledPreviewBundles is empty in stable builds. A public build can set
+// enabledPreviewBundles selects optional, off-by-default groups. A public build can set
 // -X main.enabledPreviewBundles=proto-mutation. Unknown labels add no group.
 var enabledPreviewBundles string
 

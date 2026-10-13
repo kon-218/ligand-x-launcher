@@ -19,8 +19,12 @@ class PreviewReleasePolicyTest(unittest.TestCase):
         ]:
             with self.assertRaises(ValueError):
                 validate_selection('preview', version, bundle, latest, reuse)
-        with self.assertRaises(ValueError):
-            validate_selection('stable', 'v0.1.4', 'proto-mutation', False, '')
+
+    def test_stable_can_include_optional_proto_with_fresh_launcher(self):
+        self.assertEqual(validate_selection('stable', 'v0.1.4', 'proto-mutation', True, ''), 'proto-mutation')
+        for bundle, reuse in [('proto-mutation', 'v0.1.3'), ('bioemu', '')]:
+            with self.assertRaises(ValueError):
+                validate_selection('stable', 'v0.1.4', bundle, True, reuse)
 
 
 if __name__ == '__main__':
