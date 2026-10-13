@@ -544,8 +544,8 @@ func (a *App) ListRuntimeReleaseOptions() (ReleaseOptions, error) {
 // includePrereleases reports whether this install has opted into release
 // candidates. Unreadable config means stable, the safe default.
 func (a *App) includePrereleases() bool {
-	// A compiled preview cannot install a stable bundle: select its channel on first run.
-	if strings.TrimSpace(enabledPreviewBundles) != "" {
+	// The release version selects the channel; optional preview components do not.
+	if strings.Contains(launcherVersion, "-preview.") {
 		return true
 	}
 	config, err := a.GetLauncherConfig()

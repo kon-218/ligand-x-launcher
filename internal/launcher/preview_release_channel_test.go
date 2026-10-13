@@ -10,14 +10,20 @@ import (
 
 func TestCompiledPreviewSelectsPrereleasesOnFreshInstall(t *testing.T) {
 	previous := enabledPreviewBundles
-	t.Cleanup(func() { SetPreviewBundles(previous) })
+	previousVersion := launcherVersion
+	t.Cleanup(func() { SetPreviewBundles(previous); launcherVersion = previousVersion })
 	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", t.TempDir())
 	app := NewApp()
+	launcherVersion = "v0.1.4"
 	SetPreviewBundles("")
 	if app.GetShowPrereleases() {
 		t.Fatal("fresh stable install must stay on stable")
 	}
 	SetPreviewBundles("proto-mutation")
+	if app.GetShowPrereleases() {
+		t.Fatal("optional Proto must not move a stable installation to prereleases")
+	}
+	launcherVersion = "v0.1.4-preview.1"
 	if !app.GetShowPrereleases() {
 		t.Fatal("fresh compiled preview would download an incompatible stable runtime")
 	}
@@ -25,7 +31,8 @@ func TestCompiledPreviewSelectsPrereleasesOnFreshInstall(t *testing.T) {
 
 func TestSelectingProtoPreservesPreparedManifestRoots(t *testing.T) {
 	previous := enabledPreviewBundles
-	t.Cleanup(func() { SetPreviewBundles(previous) })
+	previousVersion := launcherVersion
+	t.Cleanup(func() { SetPreviewBundles(previous); launcherVersion = previousVersion })
 	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", t.TempDir())
 	SetPreviewBundles("proto-mutation")
 	app := NewApp()
