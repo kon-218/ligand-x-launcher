@@ -16,6 +16,22 @@ runtime are required or strongly recommended for accelerated MD, Boltz-2,
 free-energy, and other GPU worker paths. macOS cannot provide NVIDIA container
 acceleration.
 
+## The launcher says my GPU is present but Docker cannot use it
+
+A working `nvidia-smi` is not enough: Docker also has to be able to attach the
+GPU to containers. Before each start the launcher checks this by starting a tiny
+test container with the GPU. If that fails, Molecular Dynamics and the other
+services that have a CPU path start without the GPU (slower), and services that
+cannot run without one (free-energy, Boltz-2 and the optional Proto preview) are
+not started, with the reason shown in the log.
+
+On Linux the usual cause is an out-of-date or missing NVIDIA container toolkit
+configuration, often right after an NVIDIA driver update. Install
+`nvidia-container-toolkit`, then run
+`sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` and start again. On
+Windows, update Docker Desktop and the NVIDIA driver and make sure GPU support is
+enabled in Docker Desktop.
+
 ## Where are runtime files stored?
 
 The launcher uses the platform user-config directory unless
