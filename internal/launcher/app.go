@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"ligandx-launcher/internal/envfile"
+	"ligandx-launcher/internal/gpuprobe"
 	"ligandx-launcher/internal/hostmetrics"
 	"ligandx-launcher/internal/license"
 	"ligandx-launcher/internal/runtimebundle"
@@ -270,6 +271,17 @@ type App struct {
 	// configured Linux ORCA install is executable by the QC worker runtime.
 	// Nil in production; tests inject it to inspect arguments without Docker.
 	orcaProbeFn func(context.Context, []string) ([]byte, error)
+
+	// gpuProbeFn overrides the Docker GPU probe (see gpu.go). Nil in
+	// production; tests inject it so no GPU or Docker daemon is needed.
+	gpuProbeFn func() gpuprobe.Result
+	gpuMu      sync.Mutex
+	gpuRes     gpuprobe.Result
+	gpuAt      time.Time
+	gpuNotice  string
+	// composeOnceFn overrides runDockerComposeOnce so the GPU fallback can be
+	// tested without Docker. Nil in production.
+	composeOnceFn func(args []string, message string) error
 }
 
 func NewApp() *App {
@@ -1202,8 +1214,8 @@ func (a *App) devEnvArgs() []string {
 // Callers must already pass `-f docker-compose.yml` explicitly — a lone `-f`
 // disables compose's auto-discovery of the base file.
 func (a *App) gpuComposeArgs() []string {
-	if a.projectFileExists("docker-compose.gpu.yml") && a.CheckGPU() {
-		return []string{"-f", "docker-compose.gpu.yml"}
+	if a.projectFileExists(gpuprobe.OverlayFile) && a.gpuStatus().Usable {
+		return []string{"-f", gpuprobe.OverlayFile}
 	}
 	return nil
 }
@@ -1255,6 +1267,9 @@ func (a *App) prodEnvArgs() []string {
 }
 
 func (a *App) StartServices(mode string) error {
+	// A fresh start re-checks the GPU: the driver or CDI spec may have changed
+	// since the last one (see gpuStatus).
+	a.invalidateGPUProbe()
 	dockerOk, msg := a.CheckDocker()
 	if !dockerOk {
 		return fmt.Errorf("%s", msg)
@@ -1344,6 +1359,9 @@ func (a *App) StartServices(mode string) error {
 }
 
 func (a *App) StartServiceGroups(env string, groupIDs []string) error {
+	// A fresh start re-checks the GPU: the driver or CDI spec may have changed
+	// since the last one (see gpuStatus).
+	a.invalidateGPUProbe()
 	dockerOk, msg := a.CheckDocker()
 	if !dockerOk {
 		return fmt.Errorf("%s", msg)
@@ -1424,6 +1442,9 @@ func (a *App) StartServiceGroups(env string, groupIDs []string) error {
 }
 
 func (a *App) StartServicesCustom(env string, services []string) error {
+	// A fresh start re-checks the GPU: the driver or CDI spec may have changed
+	// since the last one (see gpuStatus).
+	a.invalidateGPUProbe()
 	dockerOk, msg := a.CheckDocker()
 	if !dockerOk {
 		return fmt.Errorf("%s", msg)
@@ -1539,6 +1560,9 @@ func (a *App) RestartServices() error {
 }
 
 func (a *App) RestartServiceGroups(groupIDs []string) error {
+	// A fresh start re-checks the GPU: the driver or CDI spec may have changed
+	// since the last one (see gpuStatus).
+	a.invalidateGPUProbe()
 	allGroups := a.GetServiceGroups()
 	groupMap := make(map[string]ServiceGroup)
 	for _, g := range allGroups {
@@ -1577,6 +1601,9 @@ func (a *App) RestartServiceGroups(groupIDs []string) error {
 }
 
 func (a *App) RestartServicesCustom(services []string) error {
+	// A fresh start re-checks the GPU: the driver or CDI spec may have changed
+	// since the last one (see gpuStatus).
+	a.invalidateGPUProbe()
 	if err := a.validateUnlockedServices(services); err != nil {
 		return err
 	}
@@ -1618,11 +1645,9 @@ func (a *App) runDockerCompose(args []string, message string) error {
 	return a.runDockerComposeDirect(args, message)
 }
 
-// runDockerComposeDirect executes one Compose command without the lease
-// activation wrapper. The wrapper uses this for the explicit gateway-stop,
-// worker-health, and gateway-enable phases without recursively restarting the
-// sequence.
-func (a *App) runDockerComposeDirect(args []string, message string) error {
+// runDockerComposeOnce executes one Compose command exactly once, without the
+// lease activation wrapper or the GPU fallback (see runDockerComposeDirect).
+func (a *App) runDockerComposeOnce(args []string, message string) error {
 	// Validate project path has docker-compose.yml
 	composePath := filepath.Join(a.projectPath, "docker-compose.yml")
 	if _, err := os.Stat(composePath); os.IsNotExist(err) {
@@ -4244,23 +4269,20 @@ func (a *App) checkGPUForServices(services []string) error {
 			gpuSvcs = append(gpuSvcs, svc)
 		}
 	}
-	if len(gpuSvcs) > 0 && !a.CheckGPU() {
-		message := fmt.Sprintf(
-			"NVIDIA GPU not available (driver not loaded). Cannot start GPU-only "+
-				"services: %s. Deselect the Binding Free Energy, Boltz-2, and "+
-				"Kinetics service groups in the Services tab. Molecular Dynamics "+
-				"runs on CPU without a GPU (slower).",
-			strings.Join(gpuSvcs, ", "),
-		)
-		for _, svc := range gpuSvcs {
-			if svc == "worker-proto" {
-				message += " Protein mutation pilot stays unavailable without a GPU and prepared model assets; a healthy worker is not model readiness."
-				break
-			}
-		}
-		return fmt.Errorf("%s", message)
+	if len(gpuSvcs) == 0 {
+		return nil
 	}
-	return nil
+	res := a.gpuStatus()
+	if res.Usable {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s Cannot start GPU-only services: %s. Deselect the Binding Free Energy, "+
+			"Boltz-2, and Kinetics service groups in the Services tab. Molecular Dynamics "+
+			"runs on CPU without a GPU (slower).",
+		gpuprobe.Message(goruntime.GOOS, res),
+		strings.Join(gpuSvcs, ", "),
+	)
 }
 
 func (a *App) CheckGPU() bool {
