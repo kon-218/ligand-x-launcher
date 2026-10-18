@@ -163,8 +163,31 @@ func previewEnvUpdates(raw string, selectedGroupIDs []string) (map[string]string
 	return updates, nil
 }
 
-// verifySelectedRuntimePreview is called on verified, extracted bundle bytes
-// before activation and again before starting the opt-in service group.
+// verifyInstallableRuntimePreview is called on verified, extracted bundle
+// bytes before activation. A preview launcher may install a runtime without
+// any preview (an older release, or a rollback to one); its opt-in group then
+// stays unavailable because verifySelectedRuntimePreview refuses to start it.
+// A runtime carrying a different preview set, or any preview runtime under a
+// stable launcher, is still refused (B-234).
+func verifyInstallableRuntimePreview(root, selection string) error {
+	labels, err := splitPreviewLabels(selection)
+	if err != nil {
+		return err
+	}
+	if len(labels) > 0 {
+		data, err := os.ReadFile(filepath.Join(root, "docker-compose.yml"))
+		if err != nil {
+			return err
+		}
+		if !strings.HasPrefix(string(data), "# Preview bundles:") {
+			return nil
+		}
+	}
+	return verifySelectedRuntimePreview(root, selection)
+}
+
+// verifySelectedRuntimePreview is called before starting the opt-in service
+// group: the installed runtime must carry exactly this launcher's preview.
 func verifySelectedRuntimePreview(root, selection string) error {
 	labels, err := splitPreviewLabels(selection)
 	if err != nil {

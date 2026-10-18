@@ -115,3 +115,34 @@ func TestPreparedProteinRuntimeChecksCanonicalInventoryAndBytes(t *testing.T) {
 		t.Fatalf("unapproved manifest accepted: %v", err)
 	}
 }
+
+// B-234 L2: a Proto-enabled launcher refused to install any runtime without
+// the preview, so v0.1.3 (and rollback to it) failed with "protein mutation
+// preview runtime is not installed". Installing is allowed; starting the
+// Proto group on such a runtime is still refused.
+func TestPreviewLauncherInstallsRuntimeWithoutThePreview(t *testing.T) {
+	dir := t.TempDir()
+	write := func(compose string) {
+		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(compose), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("services:\n  gateway:\n    image: pinned\n")
+	if err := verifyInstallableRuntimePreview(dir, "proto-mutation"); err != nil {
+		t.Fatalf("preview launcher refused a runtime without the preview: %v", err)
+	}
+	if err := verifySelectedRuntimePreview(dir, "proto-mutation"); err == nil {
+		t.Fatal("starting the Proto group on a runtime without the preview was accepted")
+	}
+	write("# Preview bundles: proto-mutation\nservices:\n  gateway:\n    image: pinned\n  worker-proto:\n    image: pinned\n")
+	if err := verifyInstallableRuntimePreview(dir, "proto-mutation"); err != nil {
+		t.Fatalf("matching preview runtime refused: %v", err)
+	}
+	if err := verifyInstallableRuntimePreview(dir, ""); err == nil {
+		t.Fatal("stable launcher accepted a preview runtime")
+	}
+	write("# Preview bundles: something-else\nservices:\n  gateway:\n    image: pinned\n")
+	if err := verifyInstallableRuntimePreview(dir, "proto-mutation"); err == nil {
+		t.Fatal("runtime with a different preview set accepted")
+	}
+}
