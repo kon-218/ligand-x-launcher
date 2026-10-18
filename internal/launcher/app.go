@@ -888,7 +888,7 @@ func (a *App) installRuntimeBundleSelected(selectedURL, selectedVersion string, 
 	if err := runtimebundle.Extract(zipPath, extractedDir); err != nil {
 		return a.GetDistributionStatus(), fmt.Errorf("failed to extract runtime bundle: %w", err)
 	}
-	if err := verifySelectedRuntimePreview(extractedDir, enabledPreviewBundles); err != nil {
+	if err := verifyInstallableRuntimePreview(extractedDir, enabledPreviewBundles); err != nil {
 		return a.GetDistributionStatus(), err
 	}
 	previousProjectPath := a.projectPath

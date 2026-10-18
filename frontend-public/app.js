@@ -403,15 +403,9 @@ async function enterServices(fromChange) {
     state.groups = [];
   }
 
-  // Initialise selection.
-  state.selected = new Set();
+  // Initialise selection (service_selection.js).
   const saved = (state.config && state.config.selectedGroups) || [];
-  state.groups.forEach((g) => {
-    const wasSaved = fromChange && saved.includes(g.id);
-    if (g.required || g.defaultOn || wasSaved) {
-      if (!g.locked || g.required) state.selected.add(g.id);
-    }
-  });
+  state.selected = initialServiceSelection(state.groups, saved, fromChange);
   renderServices();
 }
 

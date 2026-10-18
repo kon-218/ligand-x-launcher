@@ -110,8 +110,13 @@ shows the installed version and supported stable history.
 The version list is signed. Arbitrary tags, unsigned releases, Preview builds,
 and versions incompatible with the installed launcher are not selectable. A
 chosen runtime is verified before the local image version advances; the service
-selection screen then lets you confirm which images will be pulled. Network
+selection screen then lets you confirm which images will be pulled, starting
+from the groups you chose before (a group you turned off stays off). Network
 failure or rate limiting does not prevent use of the installed runtime.
+
+A launcher that includes the optional Protein mutation pilot can also install a
+runtime without it, such as an earlier release; the pilot group then stays
+unavailable until a runtime that includes it is installed.
 
 Downgrade is allowed only when the signed release index explicitly declares it
 safe for the installed version. Unknown rollback paths remain disabled to
