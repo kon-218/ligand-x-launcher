@@ -313,6 +313,54 @@ func TestIndependentComputeGroupsStartTheirSharedWorker(t *testing.T) {
 	}
 }
 
+func TestRabbitMQCredentialsWaitForRunningApplication(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	counter := filepath.Join(dir, "ready")
+	t.Setenv("BUILD03_BROKER_CALLS", log)
+	t.Setenv("BUILD03_BROKER_READY", counter)
+	script := `#!/bin/sh
+printf '%s:%s\n' "$3" "$4" >> "$BUILD03_BROKER_CALLS"
+if [ "$3" = rabbitmq-diagnostics ] && [ ! -f "$BUILD03_BROKER_READY" ]; then
+  touch "$BUILD03_BROKER_READY"
+  exit 69
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := reconcileRabbitMQUser("qualification-broker", "fixture-user", "fixture-password"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "rabbitmq-diagnostics:-q\nrabbitmq-diagnostics:-q\nrabbitmqctl:change_password\nrabbitmqctl:set_permissions\nrabbitmqctl:set_user_tags\n"
+	if string(calls) != expected {
+		t.Fatalf("credential mutation ran before application readiness: %s", calls)
+	}
+}
+
+func TestRabbitMQApplicationReadinessHasBoundedWait(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nexit 69\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := waitRabbitMQApplication(ctx, "qualification-broker"); err == nil {
+		t.Fatal("unavailable RabbitMQ accepted")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("broker wait ignored deadline")
+	}
+}
+
 func TestComposeUpAlwaysRemovesOnlyProjectOrphans(t *testing.T) {
 	input := []string{"compose", "--env-file", ".env.production", "up", "-d", "--pull=never", "gateway"}
 	want := []string{"compose", "--env-file", ".env.production", "up", "--remove-orphans", "-d", "--pull=never", "gateway"}

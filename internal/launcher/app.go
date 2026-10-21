@@ -2499,7 +2499,31 @@ func (a *App) reconcileProductionCredentials() error {
 	return nil
 }
 
+// The Compose ping health check can pass while only the Erlang node is up.
+// Credential RPCs require the Rabbit application to finish starting as well.
+func waitRabbitMQApplication(ctx context.Context, containerName string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("RabbitMQ application did not become ready in %s: %w", containerName, err)
+		}
+		cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "rabbitmq-diagnostics", "-q", "check_running")
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("RabbitMQ application did not become ready in %s: %w", containerName, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
 func reconcileRabbitMQUser(containerName, username, password string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := waitRabbitMQApplication(ctx, containerName); err != nil {
+		return err
+	}
 	changeCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "change_password", username, password)
 	if out, err := changeCmd.CombinedOutput(); err == nil {
 		return ensureRabbitMQUserAccess(containerName, username)
