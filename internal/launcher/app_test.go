@@ -195,6 +195,7 @@ func TestCorePullListIncludesEveryFixedComposeImage(t *testing.T) {
 }
 
 func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
+	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", t.TempDir())
 	const version = "v-test"
 	const proPrefix = "ghcr.io/kon-218/ligand-x-pro"
 	runtimeDir := t.TempDir()
@@ -232,9 +233,17 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 	resolve := func(raw string) string {
 		// A whole-reference override with a default, e.g.
 		// ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}.
-		// The baseline modelled here is a free selection, where the override is
-		// unset and the public default applies. The Pro branch is asserted
-		// separately by TestGPUShortImageOverride.
+		// Resolve the actual persisted selection before falling back to the
+		// public worker. Pro groups can start this shared worker without MD.
+		if strings.HasPrefix(raw, "${LIGANDX_GPU_SHORT_IMAGE:-") {
+			content, readErr := app.GetEnvContent("prod")
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if override := strings.TrimSpace(envfile.Parse(content)["LIGANDX_GPU_SHORT_IMAGE"]); override != "" {
+				return override
+			}
+		}
 		//
 		// Only unwrap when the whole string is one expression: the Pro images are
 		// ${PREFIX:-...}/name:${TAG:-...}, whose first closing brace lands
@@ -252,6 +261,12 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 	}
 
 	for _, group := range app.GetServiceGroups() {
+		if err := app.SaveLauncherConfig(LauncherConfig{ConfigVersion: 1, SelectedGroups: []string{group.ID}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.syncGPUShortImage(); err != nil {
+			t.Fatal(err)
+		}
 		listed := make(map[string]bool)
 		for _, image := range group.Images {
 			listed[image] = true
@@ -267,6 +282,34 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 				t.Errorf("group %q starts service %q as %q but does not pull that image: %v", group.ID, service, expected, group.Images)
 			}
 		}
+	}
+}
+
+func TestIndependentComputeGroupsStartTheirSharedWorker(t *testing.T) {
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	if err := os.WriteFile(filepath.Join(app.projectPath, ".env.production"), []byte("VERSION=v1.2.3\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range app.GetServiceGroups() {
+		if group.ID != "admet" && group.ID != "boltz2" && group.ID != "free-energy" {
+			continue
+		}
+		found := false
+		for _, service := range group.Services {
+			if service == "worker-gpu-short" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s cannot start its short-queue consumer without selecting MD", group.ID)
+		}
+	}
+	if err := app.validateUnlockedServices([]string{"md", "worker-gpu-short"}); err != nil {
+		t.Fatal("Free MD worker incorrectly locked:", err)
+	}
+	if err := app.validateUnlockedServices([]string{"admet"}); err == nil {
+		t.Fatal("Pro-only ADMET service allowed without entitlement")
 	}
 }
 

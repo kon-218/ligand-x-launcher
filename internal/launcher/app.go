@@ -1646,8 +1646,8 @@ func (a *App) RestartServicesCustom(services []string) error {
 	return a.runDockerCompose(args, label)
 }
 
-// validateUnlockedServices rejects calls that touch any service belonging to
-// a Pro group the current license does not entitle. Without this guard the
+// validateUnlockedServices rejects services with no unlocked owning group.
+// Shared workers can belong to both Free and Pro groups. Without this guard the
 // per-service launcher methods bypass GetServiceGroups()'s Locked flag.
 func (a *App) validateUnlockedServices(services []string) error {
 	if len(services) == 0 {
@@ -1655,13 +1655,15 @@ func (a *App) validateUnlockedServices(services []string) error {
 	}
 	groups := a.GetServiceGroups()
 	owner := make(map[string]ServiceGroup, 32)
+	unlocked := make(map[string]bool, 32)
 	for _, g := range groups {
 		for _, svc := range g.Services {
 			owner[svc] = g
+			unlocked[svc] = unlocked[svc] || !g.Locked
 		}
 	}
 	for _, svc := range services {
-		if g, ok := owner[svc]; ok && g.Locked {
+		if g, ok := owner[svc]; ok && !unlocked[svc] {
 			return fmt.Errorf("%s requires a Pro or Academic license", g.Name)
 		}
 	}
@@ -3819,7 +3821,7 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			ID:          "admet",
 			Name:        "ADMET Prediction",
 			Description: "Pro package: predict molecular properties, pharmacokinetics, and toxicity",
-			Services:    []string{"admet"},
+			Services:    []string{"admet", "worker-gpu-short"},
 			// admet_predict runs on the shared gpu-short worker, so this group
 			// owns the Pro image for it: the md group ships the public worker,
 			// which has no admet module.
@@ -3838,7 +3840,7 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			ID:          "free-energy",
 			Name:        "Binding Free Energy",
 			Description: "Pro package: ABFE/RBFE binding free energy calculations",
-			Services:    []string{"abfe", "rbfe", "worker-gpu-long"},
+			Services:    []string{"abfe", "rbfe", "worker-gpu-long", "worker-gpu-short"},
 			// rbfe_mapping_preview is routed to gpu-short, not gpu-long, so this
 			// group needs the Pro shared worker too -- previously it depended on
 			// the md group happening to pull it.
@@ -3874,7 +3876,7 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 			ID:          "boltz2",
 			Name:        "Boltz-2",
 			Description: "Pro package: Boltz-2 binding affinity predictions",
-			Services:    []string{"boltz2"},
+			Services:    []string{"boltz2", "worker-gpu-short"},
 			// boltz_predict and boltz_batch run on the shared gpu-short worker.
 			Images: []string{
 				imageRef(proPrefix+"/boltz2", version),
