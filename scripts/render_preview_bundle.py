@@ -23,6 +23,7 @@ import yaml
 ALLOWLIST_PATH = Path(__file__).resolve().parents[1] / "internal" / "launcher" / "preview_bundles.json"
 LEAKED_PREVIEW_SERVICES = frozenset({
     "kinetics", "worker-kinetics", "qmmm", "worker-qmmm", "licensing", "licensing-broker",
+    "bioemu", "worker-bioemu", "bioemu-outputs-init",
 })
 
 
