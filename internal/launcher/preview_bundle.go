@@ -34,6 +34,7 @@ type previewBundle struct {
 	Edition         string            `json:"edition"`
 	RequiresGPU     bool              `json:"requires_gpu"`
 	CatalogID       string            `json:"catalog_id"`
+	ModuleID        string            `json:"module_id"`
 	Env             map[string]string `json:"env"`
 }
 
@@ -85,8 +86,11 @@ func validatePreviewBundle(label string, bundle previewBundle) error {
 	if len(bundle.Services) != 1 || bundle.Services[0] != "worker-proto" {
 		return fmt.Errorf("proto-mutation must select only worker-proto")
 	}
-	if bundle.Env["LIGANDX_ENABLE_PREVIEW_MODULES"] != "1" || bundle.Env["LIGANDX_PROTO_PILOT_ENABLED"] != "1" {
-		return fmt.Errorf("proto-mutation must enable both operator flags")
+	if bundle.ModuleID != "protein_tools" {
+		return fmt.Errorf("proto-mutation must turn on the protein_tools preview module")
+	}
+	if _, ok := bundle.Env[previewModulesEnv]; ok {
+		return fmt.Errorf("proto-mutation must not set %s itself; the launcher derives it", previewModulesEnv)
 	}
 	return nil
 }
@@ -117,11 +121,14 @@ func previewServiceGroups(raw, version string) ([]ServiceGroup, error) {
 			Images: []string{
 				imageRef(bundle.ImageRepository+"/"+bundle.ImageName, version),
 			},
-			Required:  false,
-			DefaultOn: false,
-			Edition:   bundle.Edition,
-			Licensed:  true,
-			Locked:    false,
+			Required:    false,
+			DefaultOn:   false,
+			Edition:     bundle.Edition,
+			Licensed:    true,
+			Locked:      false,
+			Maturity:    "preview",
+			ModuleID:    bundle.ModuleID,
+			RequiresGPU: bundle.RequiresGPU,
 		})
 	}
 	return groups, nil
@@ -143,10 +150,7 @@ func previewEnvUpdates(raw string, selectedGroupIDs []string) (map[string]string
 	if err != nil {
 		return nil, err
 	}
-	updates := map[string]string{
-		"LIGANDX_ENABLE_PREVIEW_MODULES": "0",
-		"LIGANDX_PROTO_PILOT_ENABLED":    "0",
-	}
+	updates := map[string]string{}
 	for _, group := range groups {
 		if !selected[group.ID] {
 			continue

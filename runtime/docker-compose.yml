@@ -113,8 +113,7 @@ services:
     - QMMM_ENABLED=${QMMM_ENABLED:-false}
     - LIGANDX_JOB_LIST_MAX_VALUE_BYTES=${LIGANDX_JOB_LIST_MAX_VALUE_BYTES:-262144}
     - LIGANDX_PROTO_READINESS_TIMEOUT_SECONDS=${LIGANDX_PROTO_READINESS_TIMEOUT_SECONDS:-30}
-    - LIGANDX_PROTO_PILOT_ENABLED=${LIGANDX_PROTO_PILOT_ENABLED:-0}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
+    - LIGANDX_ENABLE_INTERNAL_MODULES=${LIGANDX_ENABLE_INTERNAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - LIGANDX_CORE_VERSION=${VERSION:-latest}
     - LIGANDX_PRO_VERSION=${PRO_VERSION:-${VERSION:-latest}}
@@ -207,8 +206,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - PYTHONUNBUFFERED=1
@@ -259,8 +256,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -313,8 +308,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -353,6 +346,66 @@ services:
       options:
         max-size: 10m
         max-file: '3'
+  bioemu-outputs-init:
+    profiles:
+    - preview-bioemu
+    image: alpine:3.21
+    user: 0:0
+    restart: 'no'
+    command:
+    - sh
+    - -ec
+    - chmod 1777 /app/data/bioemu_outputs
+    volumes:
+    - bioemu_outputs:/app/data/bioemu_outputs
+  bioemu:
+    profiles:
+    - preview-bioemu
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/bioemu:${PRO_VERSION:-${VERSION:-latest}}
+    command:
+    - bioemu
+    - '8016'
+    depends_on:
+      bioemu-outputs-init:
+        condition: service_completed_successfully
+    networks:
+    - backend
+    volumes:
+    - bioemu_outputs:/app/data/bioemu_outputs:ro
+    expose:
+    - '8016'
+    environment:
+    - APP_ENV=${APP_ENV:-production}
+    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
+    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
+    - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
+    - PYTHONUNBUFFERED=1
+    - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    - BIOEMU_OUTPUT_ROOT=/app/data/bioemu_outputs
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:8016/health
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: ${BIOEMU_CPU_LIMIT:-2}
+          memory: ${BIOEMU_MEM_LIMIT:-4G}
+        reservations:
+          cpus: ${BIOEMU_CPU_RES:-0.5}
+          memory: ${BIOEMU_MEM_RES:-1G}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   alignment:
     image: ghcr.io/kon-218/ligand-x/alignment:${VERSION:-latest}
     init: true
@@ -373,8 +426,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -417,8 +468,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -464,8 +513,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - PYTHONUNBUFFERED=1
@@ -511,8 +558,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -562,8 +607,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - PYTHONIOENCODING=utf-8
@@ -616,8 +659,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -677,8 +718,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -736,8 +775,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -793,8 +830,6 @@ services:
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -843,8 +878,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
@@ -898,8 +931,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
@@ -970,8 +1001,6 @@ services:
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - PYTHONIOENCODING=utf-8
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
@@ -1040,8 +1069,6 @@ services:
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - PYTHONIOENCODING=utf-8
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
@@ -1111,8 +1138,6 @@ services:
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - PYTHONIOENCODING=utf-8
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -1249,8 +1274,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
@@ -1299,6 +1322,79 @@ services:
       options:
         max-size: 10m
         max-file: '3'
+  worker-bioemu:
+    profiles:
+    - preview-bioemu
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-bioemu:${PRO_VERSION:-${VERSION:-latest}}
+    command:
+    - worker-bioemu
+    stop_grace_period: 120s
+    networks:
+    - backend
+    environment:
+    - APP_ENV=${APP_ENV:-production}
+    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
+    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
+    - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
+    - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-bioemu:${PRO_VERSION:-${VERSION:-latest}}
+    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
+      set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+    - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
+      must be set}@redis:6379/0}
+    - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0}
+    - CELERY_CONCURRENCY=${BIOEMU_WORKER_CONCURRENCY:-1}
+    - BIOEMU_OUTPUT_ROOT=/app/data/bioemu_outputs
+    - BIOEMU_CACHE=/data/bioemu_cache
+    - HF_HOME=/data/bioemu_cache/hf
+    - COLABFOLD_CACHE=/data/colabfold_cache
+    - BIOEMU_MSA_HOST_URL=${BIOEMU_MSA_HOST_URL:-}
+    - GATEWAY_URL=http://gateway:8000
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    depends_on:
+      scientific-artifact-init:
+        condition: service_completed_successfully
+      bioemu-outputs-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+    - bioemu_outputs:/app/data/bioemu_outputs
+    - bioemu_cache:/data/bioemu_cache
+    - colabfold_cache:/data/colabfold_cache
+    - scientific_artifacts:/app/data/scientific_artifacts
+    shm_size: 8gb
+    healthcheck:
+      test:
+      - CMD
+      - celery
+      - -A
+      - lib.tasks.bioemu_tasks
+      - inspect
+      - ping
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: ${WORKER_BIOEMU_CPU_LIMIT:-8}
+          memory: ${WORKER_BIOEMU_MEM_LIMIT:-32G}
+        reservations:
+          cpus: ${WORKER_BIOEMU_CPU_RES:-2}
+          memory: ${WORKER_BIOEMU_MEM_RES:-8G}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   celery-beat:
     image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
     command:
@@ -1321,8 +1417,6 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
-    - LIGANDX_ENABLE_EXPERIMENTAL_MODULES=${LIGANDX_ENABLE_EXPERIMENTAL_MODULES:-false}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
@@ -1606,6 +1700,8 @@ volumes:
   reinvent_campaigns: null
   kinetics_jobs: null
   bioemu_outputs: null
+  bioemu_cache: null
+  colabfold_cache: null
   redis_data: null
   postgres_data: null
   rabbitmq_data: null

@@ -38,14 +38,14 @@ func TestSelectingProtoPreservesPreparedManifestRoots(t *testing.T) {
 	app := NewApp()
 	app.projectPath = t.TempDir()
 	path := filepath.Join(app.projectPath, ".env.production")
-	original := "PROTO_HOME=/home/tester/proto\nPROTO_MODEL_CACHE=/home/tester/proto-models\nLIGANDX_PROTO_PILOT_ENABLED=0\nLIGANDX_ENABLE_PREVIEW_MODULES=0\n"
+	original := "PROTO_HOME=/home/tester/proto\nPROTO_MODEL_CACHE=/home/tester/proto-models\nLIGANDX_PREVIEW_MODULES=\n"
 	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.SaveLauncherConfig(LauncherConfig{ConfigVersion: 1, SelectedGroups: []string{"protein-mutation"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.syncProteinPilotEnv(); err != nil {
+	if err := app.syncPreviewEnv(); err != nil {
 		t.Fatal(err)
 	}
 	content, err := os.ReadFile(path)
@@ -56,13 +56,13 @@ func TestSelectingProtoPreservesPreparedManifestRoots(t *testing.T) {
 	if values["PROTO_HOME"] != "/home/tester/proto" || values["PROTO_MODEL_CACHE"] != "/home/tester/proto-models" {
 		t.Fatalf("selecting Proto changed manifest paths: %v", values)
 	}
-	if values["LIGANDX_PROTO_PILOT_ENABLED"] != "1" || values["LIGANDX_ENABLE_PREVIEW_MODULES"] != "1" {
-		t.Fatalf("selecting Proto did not enable operator flags: %v", values)
+	if values["LIGANDX_PREVIEW_MODULES"] != "protein_tools" {
+		t.Fatalf("selecting Proto did not turn its preview on: %v", values)
 	}
 	if err := app.SaveLauncherConfig(LauncherConfig{ConfigVersion: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.syncProteinPilotEnv(); err != nil {
+	if err := app.syncPreviewEnv(); err != nil {
 		t.Fatal(err)
 	}
 	content, err = os.ReadFile(path)
@@ -70,7 +70,7 @@ func TestSelectingProtoPreservesPreparedManifestRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	values = envfile.Parse(string(content))
-	if values["LIGANDX_PROTO_PILOT_ENABLED"] != "0" || values["LIGANDX_ENABLE_PREVIEW_MODULES"] != "0" || values["PROTO_HOME"] != "/home/tester/proto" {
-		t.Fatalf("deselecting Proto must disable flags and preserve assets: %v", values)
+	if values["LIGANDX_PREVIEW_MODULES"] != "" || values["PROTO_HOME"] != "/home/tester/proto" {
+		t.Fatalf("deselecting Proto must turn its preview off and preserve assets: %v", values)
 	}
 }

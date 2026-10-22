@@ -35,7 +35,7 @@ Windows and Linux are the qualified targets. macOS builds are available in previ
 
 **Free** (no license needed): structure preparation, pocket finding, molecular docking (AutoDock Vina), molecular dynamics (OpenMM), structure and pose alignment, molecule editor and library, multiple sequence alignment.
 
-**Pro**: ADMET prediction, Boltz-2 binding affinity, binding free energy (ABFE/RBFE via OpenFE), quantum chemistry (DFT, pKa, BDE, IR, conformers, NEA UV-Vis via ORCA), de novo design (REINVENT4), QM/MM *(preview)*, and unbinding kinetics *(preview)*.
+**Pro**: ADMET prediction, Boltz-2 binding affinity, binding free energy (ABFE/RBFE via OpenFE), quantum chemistry (DFT, pKa, BDE, IR, conformers, NEA UV-Vis via ORCA), and de novo design (REINVENT4). Preview modules such as BioEmu ensembles ship switched off; turn one on in the Services tab once your licence covers it.
 
 All modules run in isolated Docker containers with independently versioned conda environments.
 

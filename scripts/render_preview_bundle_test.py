@@ -29,6 +29,15 @@ services:
   worker-kinetics:
     profiles: ["preview"]
     image: ghcr.io/kon-218/ligand-x-pro/worker-kinetics:${VERSION}
+  bioemu-outputs-init:
+    profiles: ["preview", "preview-bioemu"]
+    image: alpine:3.21
+  bioemu:
+    profiles: ["preview", "preview-bioemu"]
+    image: ghcr.io/kon-218/ligand-x-pro/bioemu:${VERSION}
+  worker-bioemu:
+    profiles: ["preview", "preview-bioemu"]
+    image: ghcr.io/kon-218/ligand-x-pro/worker-bioemu:${VERSION}
 volumes: {}
 """
 
@@ -79,8 +88,11 @@ class PreviewBundleRenderTest(unittest.TestCase):
         text = self.output.read_text(encoding="utf-8")
         self.assertNotIn("worker-proto:", text)
         self.assertNotIn("worker-kinetics:", text)
+        # FEAT-27: the dormant BioEmu preview stays, under its own profile only.
+        services = yaml.safe_load(text)["services"]
+        self.assertEqual(services["worker-bioemu"]["profiles"], ["preview-bioemu"])
         self.assertEqual(self.env_out.read_text(encoding="utf-8"), TEMPLATE)
-        self.assertNotIn("LIGANDX_PROTO_PILOT_ENABLED", self.env_out.read_text(encoding="utf-8"))
+        self.assertNotIn("PROTO_HOME=", self.env_out.read_text(encoding="utf-8"))
 
     def test_proto_mutation_includes_exact_worker_and_flags(self):
         result = self.render("proto-mutation")
@@ -100,8 +112,9 @@ class PreviewBundleRenderTest(unittest.TestCase):
         env = self.env_out.read_text(encoding="utf-8")
         self.assertIn("VERSION=v1.2.3", env)
         self.assertIn("WORKER_CPU_CPU_LIMIT=2", env)
-        self.assertIn("LIGANDX_ENABLE_PREVIEW_MODULES=1", env)
-        self.assertIn("LIGANDX_PROTO_PILOT_ENABLED=1", env)
+        # The launcher turns protein_tools on in LIGANDX_PREVIEW_MODULES when the
+        # group is selected; the bundle only carries its asset paths.
+        self.assertNotIn("LIGANDX_PREVIEW_MODULES=protein_tools", env)
         self.assertIn("PROTO_HOME=/opt/proto", env)
         self.assertIn("PROTO_MODEL_CACHE=/models/proto", env)
         self.assertIn("UNRELATED_CANONICAL_SHOULD_NOT_APPEAR=no", env)

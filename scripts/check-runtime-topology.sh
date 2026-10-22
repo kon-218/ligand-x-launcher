@@ -26,6 +26,14 @@ if ! cmp -s "$CANDIDATE" "$SNAPSHOT"; then
   exit 1
 fi
 
+# The renderer writes the module manifest beside the Compose file; the launcher
+# reads its preview modules from it (FEAT-27).
+if ! cmp -s "$TMP_DIR/modules.json" "$RUNTIME_DIR/modules.json"; then
+  echo "ERROR: launcher modules.json has drifted from the canonical module manifest." >&2
+  echo "       Run: make sync-runtime-topology" >&2
+  exit 1
+fi
+
 python3 "$PUBLIC_REPO/scripts/render_runtime_overlay.py" "$PUBLIC_REPO/docker-compose.gpu.yml" "$CANDIDATE" "$TMP_DIR/docker-compose.gpu.yml"
 if ! cmp -s "$TMP_DIR/docker-compose.gpu.yml" "$RUNTIME_DIR/docker-compose.gpu.yml"; then
   echo "ERROR: launcher GPU overlay has drifted from the selected stable service set." >&2
