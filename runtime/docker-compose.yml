@@ -1206,6 +1206,7 @@ services:
     - boltz_outputs:/data/boltz_outputs
     - qc_results:/data/qc_results
     - kinetics_jobs:/data/kinetics_jobs
+    - bioemu_outputs:/data/bioemu_outputs
     - reinvent_campaigns:/data/reinvent_campaigns
     - scientific_artifacts:/app/data/scientific_artifacts
     healthcheck:
@@ -1603,6 +1604,7 @@ volumes:
   scientific_artifacts: null
   reinvent_campaigns: null
   kinetics_jobs: null
+  bioemu_outputs: null
   redis_data: null
   postgres_data: null
   rabbitmq_data: null

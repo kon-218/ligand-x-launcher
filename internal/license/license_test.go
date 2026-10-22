@@ -255,7 +255,16 @@ func TestProEntitlementsMatchCoreRegistry(t *testing.T) {
 	if root == "" {
 		t.Skip("LIGANDX_PUBLIC_ROOT is not set; the launcher's entitlement list was not compared with Core")
 	}
-	source, err := os.ReadFile(filepath.Join(root, "lib", "licensing", "module_registry.py"))
+	// Core moved the registry from lib/licensing/ to lib/entitlements/; read
+	// whichever this checkout has so an older Core still compares.
+	var source []byte
+	var err error
+	for _, dir := range []string{"entitlements", "licensing"} {
+		source, err = os.ReadFile(filepath.Join(root, "lib", dir, "module_registry.py"))
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		t.Fatalf("could not read Core's module registry: %v", err)
 	}

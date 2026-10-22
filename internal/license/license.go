@@ -75,6 +75,7 @@ var proEntitlements = map[string]bool{
 	"free-energy": true,
 	"reinvent":    true,
 	"kinetics":    true,
+	"bioemu":      true,
 	"licensing":   true,
 }
 

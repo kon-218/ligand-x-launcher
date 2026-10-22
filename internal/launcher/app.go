@@ -1074,7 +1074,7 @@ func (a *App) GetResourceMetrics() ResourceMetrics {
 		if metric.MemoryText == "" {
 			metric.MemoryText = "-"
 		}
-		if strings.Contains(metric.Service, "gpu") || metric.Service == "md" || metric.Service == "boltz2" || metric.Service == "kinetics" {
+		if strings.Contains(metric.Service, "gpu") || metric.Service == "md" || metric.Service == "boltz2" || metric.Service == "kinetics" || metric.Service == "worker-bioemu" {
 			metric.GPUPercent = metrics.GPUPercent
 		}
 		metrics.Containers = append(metrics.Containers, metric)
