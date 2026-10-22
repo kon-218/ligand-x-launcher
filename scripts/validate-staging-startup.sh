@@ -90,6 +90,39 @@ if [ -z "$VERSION_VALUE" ] || [ "$VERSION_VALUE" = "latest" ] || [[ "$VERSION_VA
   exit 1
 fi
 
+# Compose's ${VAR:?} guards only reject empty/unset values, so a base env file
+# still carrying template placeholders would pass them and start the stack on
+# publicly-known secrets. Refuse that here, mirroring the launcher's
+# envfile.IsPlaceholder semantics (empty, any CHANGE_ME marker, unresolved
+# ${...}) plus the known dev literal "change-me-in-production" from Core's
+# .env.example. Effective values follow Compose's --env-file precedence: the
+# override file wins over the base env per key. Values are never printed.
+declare -A STAGING_ENV=()
+while IFS= read -r env_line || [ -n "$env_line" ]; do
+  case "${env_line#"${env_line%%[![:space:]]*}"}" in ''|\#*) continue ;; esac
+  env_key="${env_line%%=*}"
+  if [ "$env_key" = "$env_line" ]; then continue; fi
+  env_value="${env_line#*=}"
+  env_key="${env_key#"${env_key%%[![:space:]]*}"}"; env_key="${env_key%"${env_key##*[![:space:]]}"}"
+  env_value="${env_value#"${env_value%%[![:space:]]*}"}"; env_value="${env_value%"${env_value##*[![:space:]]}"}"
+  STAGING_ENV["$env_key"]="$env_value"
+done < <(cat "$ENV_FILE" ${OVERRIDE_ENV_FILE:+"$OVERRIDE_ENV_FILE"})
+
+placeholder_keys=()
+for env_key in POSTGRES_PASSWORD RABBITMQ_PASSWORD REDIS_PASSWORD QC_SECRET_KEY \
+               LIGANDX_PASSWORD FLOWER_PASSWORD INTERNAL_WORKER_SECRET; do
+  env_value="${STAGING_ENV[$env_key]:-}"
+  if [ -z "$env_value" ] || [[ "$env_value" == *CHANGE_ME* ]] || [[ "$env_value" == *'${'* ]] \
+      || [ "$env_value" = "change-me-in-production" ]; then
+    placeholder_keys+=("$env_key")
+  fi
+done
+if [ "${#placeholder_keys[@]}" -gt 0 ]; then
+  echo "Staging env still contains placeholder secrets: ${placeholder_keys[*]}" >&2
+  echo "Generate real values for these keys before staging validation." >&2
+  exit 1
+fi
+
 mapfile -t expected_services < <("${compose[@]}" config --services | sort -u)
 if [ "${#expected_services[@]}" -eq 0 ]; then
   echo "Compose configuration contains no services." >&2
