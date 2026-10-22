@@ -195,6 +195,7 @@ func TestCorePullListIncludesEveryFixedComposeImage(t *testing.T) {
 }
 
 func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
+	t.Setenv("LIGANDX_LAUNCHER_CONFIG_DIR", t.TempDir())
 	const version = "v-test"
 	const proPrefix = "ghcr.io/kon-218/ligand-x-pro"
 	runtimeDir := t.TempDir()
@@ -232,9 +233,17 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 	resolve := func(raw string) string {
 		// A whole-reference override with a default, e.g.
 		// ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}.
-		// The baseline modelled here is a free selection, where the override is
-		// unset and the public default applies. The Pro branch is asserted
-		// separately by TestGPUShortImageOverride.
+		// Resolve the actual persisted selection before falling back to the
+		// public worker. Pro groups can start this shared worker without MD.
+		if strings.HasPrefix(raw, "${LIGANDX_GPU_SHORT_IMAGE:-") {
+			content, readErr := app.GetEnvContent("prod")
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if override := strings.TrimSpace(envfile.Parse(content)["LIGANDX_GPU_SHORT_IMAGE"]); override != "" {
+				return override
+			}
+		}
 		//
 		// Only unwrap when the whole string is one expression: the Pro images are
 		// ${PREFIX:-...}/name:${TAG:-...}, whose first closing brace lands
@@ -252,6 +261,12 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 	}
 
 	for _, group := range app.GetServiceGroups() {
+		if err := app.SaveLauncherConfig(LauncherConfig{ConfigVersion: 1, SelectedGroups: []string{group.ID}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.syncGPUShortImage(); err != nil {
+			t.Fatal(err)
+		}
 		listed := make(map[string]bool)
 		for _, image := range group.Images {
 			listed[image] = true
@@ -267,6 +282,82 @@ func TestEverySelectedServicePullsItsResolvedComposeImage(t *testing.T) {
 				t.Errorf("group %q starts service %q as %q but does not pull that image: %v", group.ID, service, expected, group.Images)
 			}
 		}
+	}
+}
+
+func TestIndependentComputeGroupsStartTheirSharedWorker(t *testing.T) {
+	app := NewApp()
+	app.projectPath = t.TempDir()
+	if err := os.WriteFile(filepath.Join(app.projectPath, ".env.production"), []byte("VERSION=v1.2.3\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range app.GetServiceGroups() {
+		if group.ID != "admet" && group.ID != "boltz2" && group.ID != "free-energy" {
+			continue
+		}
+		found := false
+		for _, service := range group.Services {
+			if service == "worker-gpu-short" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s cannot start its short-queue consumer without selecting MD", group.ID)
+		}
+	}
+	if err := app.validateUnlockedServices([]string{"md", "worker-gpu-short"}); err != nil {
+		t.Fatal("Free MD worker incorrectly locked:", err)
+	}
+	if err := app.validateUnlockedServices([]string{"admet"}); err == nil {
+		t.Fatal("Pro-only ADMET service allowed without entitlement")
+	}
+}
+
+func TestRabbitMQCredentialsWaitForRunningApplication(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	counter := filepath.Join(dir, "ready")
+	t.Setenv("BUILD03_BROKER_CALLS", log)
+	t.Setenv("BUILD03_BROKER_READY", counter)
+	script := `#!/bin/sh
+printf '%s:%s\n' "$3" "$4" >> "$BUILD03_BROKER_CALLS"
+if [ "$3" = rabbitmq-diagnostics ] && [ ! -f "$BUILD03_BROKER_READY" ]; then
+  touch "$BUILD03_BROKER_READY"
+  exit 69
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := reconcileRabbitMQUser("qualification-broker", "fixture-user", "fixture-password"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "rabbitmq-diagnostics:-q\nrabbitmq-diagnostics:-q\nrabbitmqctl:change_password\nrabbitmqctl:set_permissions\nrabbitmqctl:set_user_tags\n"
+	if string(calls) != expected {
+		t.Fatalf("credential mutation ran before application readiness: %s", calls)
+	}
+}
+
+func TestRabbitMQApplicationReadinessHasBoundedWait(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nexit 69\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := waitRabbitMQApplication(ctx, "qualification-broker"); err == nil {
+		t.Fatal("unavailable RabbitMQ accepted")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("broker wait ignored deadline")
 	}
 }
 
