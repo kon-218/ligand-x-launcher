@@ -21,7 +21,10 @@ jobs:
           token: ${{ secrets.LIGANDX_SOURCE_READ_PAT }}
           ref: main
           path: .core-contracts
-          sparse-checkout: lib/licensing/module_registry.py
+          # The registry moved to lib/entitlements/; keep the old path for older refs.
+          sparse-checkout: |
+            lib/entitlements/module_registry.py
+            lib/licensing/module_registry.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
