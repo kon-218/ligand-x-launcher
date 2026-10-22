@@ -29,3 +29,7 @@ frontend-public/wailsjs/
 .claude/
 AGENTS.md
 CLAUDE.md
+
+# Python bytecode
+__pycache__/
+*.pyc

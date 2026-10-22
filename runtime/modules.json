@@ -1,0 +1,270 @@
+{
+  "modules": [
+    {
+      "api_prefixes": [
+        "/api/structure",
+        "/api/molecules",
+        "/api/library",
+        "/api/alignment",
+        "/api/ketcher",
+        "/api/msa",
+        "/api/projects",
+        "/api/users"
+      ],
+      "edition": "free",
+      "entitlement_id": "core",
+      "id": "core",
+      "job_types": [
+        "bulk_compound_import",
+        "msa",
+        "structure_prep"
+      ],
+      "maturity": "stable",
+      "name": "Core Platform",
+      "services": [
+        "postgres",
+        "redis",
+        "rabbitmq",
+        "gateway",
+        "frontend",
+        "structure",
+        "alignment",
+        "ketcher",
+        "msa",
+        "worker-cpu",
+        "flower"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/docking"
+      ],
+      "edition": "free",
+      "entitlement_id": "docking",
+      "id": "docking",
+      "job_types": [
+        "docking",
+        "docking_batch"
+      ],
+      "maturity": "stable",
+      "name": "Molecular Docking",
+      "services": [
+        "docking"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/md"
+      ],
+      "edition": "free",
+      "entitlement_id": "md",
+      "id": "md",
+      "job_types": [
+        "md"
+      ],
+      "maturity": "stable",
+      "name": "Molecular Dynamics",
+      "services": [
+        "md",
+        "worker-gpu-short"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/workflows"
+      ],
+      "edition": "free",
+      "entitlement_id": "workflow",
+      "id": "workflow",
+      "job_types": [],
+      "maturity": "stable",
+      "name": "Visual Workflow Canvas",
+      "services": [
+        "workflow"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/pocket-finder"
+      ],
+      "edition": "free",
+      "entitlement_id": "pocket_finder",
+      "id": "pocket_finder",
+      "job_types": [
+        "pocket_finder"
+      ],
+      "maturity": "stable",
+      "name": "Pocket Finder",
+      "services": [
+        "pocket-finder"
+      ]
+    },
+    {
+      "api_prefixes": [],
+      "edition": "free",
+      "entitlement_id": "protein_tools",
+      "id": "protein_tools",
+      "job_types": [
+        "protein_variants",
+        "protein_sequence_score",
+        "protein_variant_compare",
+        "protein_structure_score"
+      ],
+      "maturity": "preview",
+      "name": "Protein mutation pilot",
+      "preview": {
+        "compose_profile": "preview-protein-tools",
+        "feedback": {
+          "module": null,
+          "template": "02-core.yml"
+        },
+        "images": [
+          "ligand-x/worker-proto"
+        ],
+        "known_limits": [
+          "Single substitutions only; no indels or multi-mutants",
+          "Scores are not stability, affinity or immune-escape labels"
+        ],
+        "requires_gpu": true,
+        "services": [
+          "worker-proto"
+        ],
+        "ships_dormant": false,
+        "status": "Scores supplied single substitutions with ESM2 and FAMPNN; screening only."
+      },
+      "services": [
+        "worker-proto"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/admet"
+      ],
+      "edition": "pro",
+      "entitlement_id": "admet",
+      "id": "admet",
+      "job_types": [
+        "admet"
+      ],
+      "maturity": "stable",
+      "name": "ADMET Prediction",
+      "services": [
+        "admet"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/qc"
+      ],
+      "edition": "pro",
+      "entitlement_id": "qc",
+      "id": "qc",
+      "job_types": [
+        "qc"
+      ],
+      "maturity": "stable",
+      "name": "Quantum Chemistry",
+      "services": [
+        "qc",
+        "worker-qc"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/boltz2"
+      ],
+      "edition": "pro",
+      "entitlement_id": "boltz2",
+      "id": "boltz2",
+      "job_types": [
+        "boltz2",
+        "boltz2_batch"
+      ],
+      "maturity": "stable",
+      "name": "Boltz-2",
+      "services": [
+        "boltz2"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/abfe",
+        "/api/rbfe"
+      ],
+      "edition": "pro",
+      "entitlement_id": "free-energy",
+      "id": "free-energy",
+      "job_types": [
+        "abfe",
+        "abfe_atm",
+        "rbfe",
+        "rbfe_mapping_preview"
+      ],
+      "maturity": "stable",
+      "name": "Binding Free Energy",
+      "services": [
+        "abfe",
+        "rbfe",
+        "worker-gpu-long"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/reinvent"
+      ],
+      "edition": "pro",
+      "entitlement_id": "reinvent",
+      "id": "reinvent",
+      "job_types": [
+        "reinvent_campaign"
+      ],
+      "maturity": "stable",
+      "name": "De Novo Design",
+      "services": [
+        "reinvent",
+        "worker-reinvent"
+      ]
+    },
+    {
+      "api_prefixes": [
+        "/api/bioemu"
+      ],
+      "edition": "pro",
+      "entitlement_id": "bioemu",
+      "id": "bioemu",
+      "job_types": [
+        "bioemu"
+      ],
+      "maturity": "preview",
+      "name": "BioEmu Ensembles",
+      "preview": {
+        "compose_profile": "preview-bioemu",
+        "feedback": {
+          "module": "BioEmu",
+          "template": "03-pro.yml"
+        },
+        "images": [
+          "ligand-x-pro/bioemu",
+          "ligand-x-pro/worker-bioemu"
+        ],
+        "known_limits": [
+          "Monomers only",
+          "Populations are model estimates, not measured free energies"
+        ],
+        "requires_gpu": true,
+        "services": [
+          "bioemu-outputs-init",
+          "bioemu",
+          "worker-bioemu"
+        ],
+        "ships_dormant": true,
+        "status": "Samples protein-monomer ensembles; screening only."
+      },
+      "services": [
+        "bioemu",
+        "worker-bioemu"
+      ]
+    }
+  ],
+  "schema": "ligandx-module-manifest/1"
+}

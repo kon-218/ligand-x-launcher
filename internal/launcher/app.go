@@ -115,6 +115,12 @@ type ServiceGroup struct {
 	Entitlement        string   `json:"entitlement"`
 	Licensed           bool     `json:"licensed"`
 	Locked             bool     `json:"locked"`
+	// Preview modules (FEAT-27): read from the installed runtime's modules.json.
+	Maturity     string   `json:"maturity,omitempty"`
+	ModuleID     string   `json:"moduleId,omitempty"`
+	KnownLimits  []string `json:"knownLimits,omitempty"`
+	RequiresGPU  bool     `json:"requiresGpu,omitempty"`
+	LockedReason string   `json:"lockedReason,omitempty"`
 }
 
 type LauncherConfig struct {
@@ -182,6 +188,7 @@ var gpuRequiredRuntime = map[string]bool{
 	"boltz2":          true,
 	"worker-gpu-long": true,
 	"worker-proto":    true,
+	"worker-bioemu":   true,
 }
 
 // ligandxServiceSet is every docker-compose service name that belongs to the
@@ -195,6 +202,7 @@ var ligandxServiceSet = map[string]bool{
 	"pocket-finder": true, "postgres": true, "redis": true, "rabbitmq": true,
 	"worker-qc": true, "worker-gpu-short": true, "worker-gpu-long": true,
 	"worker-cpu": true, "worker-reinvent": true, "worker-proto": true, "flower": true,
+	"bioemu": true, "worker-bioemu": true, "bioemu-outputs-init": true,
 }
 
 // isLigandxProject reports whether a compose project name looks like a Ligand-X
@@ -2998,7 +3006,7 @@ func (a *App) ensureProductionEnv() error {
 	if err := a.syncGPUShortImage(); err != nil {
 		return err
 	}
-	if err := a.syncProteinPilotEnv(); err != nil {
+	if err := a.syncPreviewEnv(); err != nil {
 		return err
 	}
 
@@ -3035,14 +3043,11 @@ func (a *App) syncGPUShortImage() error {
 	return a.setProductionEnvValue("LIGANDX_GPU_SHORT_IMAGE", want)
 }
 
-// syncProteinPilotEnv writes the allowlisted operator flags for a compiled-in
-// preview bundle. A stable build leaves the env file untouched. Selecting the
-// pilot group turns both flags on; leaving it unselected turns them off so a
-// stale opt-in cannot keep the pilot exposed.
-func (a *App) syncProteinPilotEnv() error {
-	if strings.TrimSpace(enabledPreviewBundles) == "" {
-		return nil
-	}
+// syncPreviewEnv writes LIGANDX_PREVIEW_MODULES, the gateway's one preview
+// switch, from the selected preview groups, plus a compiled-in bundle's
+// allowlisted paths. Deselecting a preview removes it, so a stale opt-in cannot
+// keep it exposed.
+func (a *App) syncPreviewEnv() error {
 	config, err := a.GetLauncherConfig()
 	if err != nil {
 		config = LauncherConfig{}
@@ -3051,6 +3056,7 @@ func (a *App) syncProteinPilotEnv() error {
 	if err != nil {
 		return err
 	}
+	updates[previewModulesEnv] = selectedPreviewModules(a.GetServiceGroups(), config.SelectedGroups)
 	content, err := a.GetEnvContent("prod")
 	if err != nil {
 		return err
@@ -3848,7 +3854,21 @@ func (a *App) GetServiceGroups() []ServiceGroup {
 		extra = nil
 	}
 	groups = append(groups, extra...)
-	return groups
+	return append(groups, a.runtimePreviewGroups(version, proVersion, proPrefix, licenseStatus)...)
+}
+
+// runtimePreviewGroups offers the previews the installed runtime ships dormant.
+// An unreadable manifest offers none rather than failing the Services tab.
+func (a *App) runtimePreviewGroups(version, proVersion, proPrefix string, licenseStatus license.Summary) []ServiceGroup {
+	manifest, err := loadRuntimeModuleManifest(a.projectPath)
+	if err != nil {
+		return nil
+	}
+	if len(manifest.dormantPreviews()) == 0 {
+		return nil
+	}
+	return runtimePreviewGroups(manifest, version, proVersion, proPrefix,
+		licenseStatus.HasEntitlement, a.gpuStatus().Usable)
 }
 
 func (a *App) GetLauncherConfig() (LauncherConfig, error) {
@@ -4278,7 +4298,7 @@ func (a *App) checkGPUForServices(services []string) error {
 	}
 	return fmt.Errorf(
 		"%s Cannot start GPU-only services: %s. Deselect the Binding Free Energy, "+
-			"Boltz-2, and Kinetics service groups in the Services tab. Molecular Dynamics "+
+			"Boltz-2, and GPU preview service groups in the Services tab. Molecular Dynamics "+
 			"runs on CPU without a GPU (slower).",
 		gpuprobe.Message(goruntime.GOOS, res),
 		strings.Join(gpuSvcs, ", "),

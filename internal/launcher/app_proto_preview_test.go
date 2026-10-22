@@ -23,7 +23,7 @@ func TestSelectedPreviewRuntimeSurvivesBundleExtraction(t *testing.T) {
 	archive := zip.NewWriter(file)
 	for name, body := range map[string]string{
 		"docker-compose.yml":       "# Preview bundles: proto-mutation\nservices:\n  gateway:\n    image: pinned\n  worker-proto:\n    image: pinned\n",
-		".env.production.template": "VERSION=v2026.10.01-test\nLIGANDX_PROTO_PILOT_ENABLED=1\n",
+		".env.production.template": "VERSION=v2026.10.01-test\nLIGANDX_PREVIEW_MODULES=protein_tools\n",
 		"docker-compose.gpu.yml":   "services:\n  worker-proto:\n    devices: [nvidia.com/gpu=all]\n",
 	} {
 		entry, err := archive.Create(name)

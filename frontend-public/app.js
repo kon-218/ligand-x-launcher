@@ -418,11 +418,19 @@ function svcCard(g) {
   let tag = "";
   if (g.required) tag = `<span class="svc-tag required">Required</span>`;
   else if (g.edition && g.edition !== "free") tag = `<span class="svc-tag pro">${esc(g.edition)}</span>`;
+  // FEAT-27: previews are labelled wherever they appear.
+  if (g.maturity === "preview") tag += `<span class="svc-tag preview">Preview</span>`;
 
   const sizeTxt = g.sizeMb ? `${(g.sizeMb / 1024).toFixed(g.sizeMb >= 1024 ? 1 : 2)} GB download` : "";
-  const unlock = g.locked ? `<div class="svc-unlock">Add a license to unlock</div>` : "";
+  const lockedText = g.lockedReason === "no_gpu"
+    ? "Needs an NVIDIA GPU, which this computer does not have"
+    : "Add a license to unlock";
+  const unlock = g.locked ? `<div class="svc-unlock">${esc(lockedText)}</div>` : "";
+  const limits = (g.knownLimits || []).length
+    ? `<ul class="svc-limits">${g.knownLimits.map((limit) => `<li>${esc(limit)}</li>`).join("")}</ul>`
+    : "";
   const pilotNote = g.id === "protein-mutation"
-    ? `<div class="svc-size">Protein mutation pilot opt-in. Sets LIGANDX_ENABLE_PREVIEW_MODULES and LIGANDX_PROTO_PILOT_ENABLED. A healthy worker is not model readiness.</div>`
+    ? `<div class="svc-size">Protein mutation pilot opt-in. A healthy worker is not model readiness.</div>`
     : "";
 
   item.innerHTML = `
@@ -430,6 +438,7 @@ function svcCard(g) {
     <div class="svc-body">
       <div class="svc-name">${esc(g.name)}${tag}</div>
       <div class="svc-desc">${esc(g.description || "")}</div>
+      ${limits}
       ${sizeTxt ? `<div class="svc-size">${sizeTxt}</div>` : ""}
       ${pilotNote}
       ${unlock}
@@ -446,7 +455,7 @@ function svcCard(g) {
       state.selected.add(g.id);
       renderServices();
     };
-  } else if (g.locked) {
+  } else if (g.locked && g.lockedReason !== "no_gpu") {
     item.onclick = () => { enterLicense(); };
   }
   return item;
@@ -458,8 +467,9 @@ function renderServices() {
 
   // Free or already-licensed groups stay in the main list; locked Pro modules
   // are tucked behind a collapsed disclosure so the list stays short.
-  const visible = state.groups.filter((g) => !g.locked);
-  const lockedPro = state.groups.filter((g) => g.locked);
+  // A licensed preview locked only for want of a GPU stays visible with its reason.
+  const visible = state.groups.filter((g) => !g.locked || g.lockedReason === "no_gpu");
+  const lockedPro = state.groups.filter((g) => g.locked && g.lockedReason !== "no_gpu");
 
   visible.forEach((g) => list.appendChild(svcCard(g)));
 
@@ -957,7 +967,7 @@ function setSelectValue(id, val) {
 
 function updateSettingsSections() {
   const selected = (state.config && state.config.selectedGroups) || [];
-  const hasGPU = selected.some((id) => ["md", "boltz2", "free-energy", "kinetics"].includes(id));
+  const hasGPU = selected.some((id) => ["md", "boltz2", "free-energy"].includes(id));
   el("gpuShortField").hidden = !hasGPU;
   el("gpuLongField").hidden = !selected.includes("free-energy");
   el("qcSettings").hidden = !selected.includes("qc");
