@@ -76,15 +76,16 @@ func TestPreviewEnvFollowsGroupSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if off["LIGANDX_ENABLE_PREVIEW_MODULES"] != "0" || off["LIGANDX_PROTO_PILOT_ENABLED"] != "0" {
+	// The bundle sets only its asset paths; the launcher derives LIGANDX_PREVIEW_MODULES.
+	if len(off) != 0 {
 		t.Fatalf("unselected pilot env = %v", off)
 	}
 	on, err := previewEnvUpdates("proto-mutation", []string{"protein-mutation"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if on["LIGANDX_ENABLE_PREVIEW_MODULES"] != "1" || on["LIGANDX_PROTO_PILOT_ENABLED"] != "1" {
-		t.Fatalf("selected pilot env = %v", on)
+	if _, ok := on[previewModulesEnv]; ok {
+		t.Fatalf("bundle must not set %s itself: %v", previewModulesEnv, on)
 	}
 	if on["PROTO_HOME"] != "/opt/proto" || on["PROTO_MODEL_CACHE"] != "/models/proto" {
 		t.Fatalf("model controls = %v", on)
@@ -122,9 +123,8 @@ func TestPublicFrontendContainsProteinPilotOptIn(t *testing.T) {
 	text := string(data)
 	for _, needle := range []string{
 		"Protein mutation pilot",
-		"LIGANDX_ENABLE_PREVIEW_MODULES",
-		"LIGANDX_PROTO_PILOT_ENABLED",
 		"not model readiness",
+		`g.maturity === "preview"`,
 	} {
 		if !strings.Contains(text, needle) {
 			t.Errorf("public frontend missing %q", needle)

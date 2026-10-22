@@ -15,16 +15,10 @@ import argparse
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-import yaml
 
 ALLOWLIST_PATH = Path(__file__).resolve().parents[1] / "internal" / "launcher" / "preview_bundles.json"
-LEAKED_PREVIEW_SERVICES = frozenset({
-    "kinetics", "worker-kinetics", "qmmm", "worker-qmmm", "licensing", "licensing-broker",
-    "bioemu", "worker-bioemu", "bioemu-outputs-init",
-})
 
 
 class PreviewBundleError(RuntimeError):
@@ -93,27 +87,6 @@ def apply_preview_env(template: str, labels: list[str], allow: dict | None = Non
         for key in missing:
             lines.append(f"{key}={wanted[key]}\n")
     return "".join(lines)
-
-
-def _named_volumes(service: dict) -> set[str]:
-    names: set[str] = set()
-    for mount in service.get("volumes") or []:
-        if not isinstance(mount, str):
-            continue
-        source = mount.split(":", 1)[0]
-        if source and not source.startswith((".", "/", "$")):
-            names.add(source)
-    return names
-
-
-def _render_stable(renderer: Path, canonical: Path, output: Path) -> None:
-    completed = subprocess.run(
-        [sys.executable, str(renderer), str(canonical), str(output)],
-        capture_output=True, text=True,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise PreviewBundleError(f"stable renderer failed: {detail}")
 
 
 def render_preview_bundle(
