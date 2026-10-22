@@ -296,3 +296,26 @@ func TestQualificationAppRefusesForeignRootAndOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestQualificationServicePlanNamesRequiredServicesBeforeStartup(t *testing.T) {
+	app, _ := qualificationFixture(t)
+	services, err := app.ServicePlan([]string{"core"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, service := range services {
+		found[service] = true
+	}
+	for _, service := range []string{"gateway", "frontend", "proxy", "worker-cpu", "worker-control", "celery-beat"} {
+		if !found[service] {
+			t.Fatalf("intended service missing: %s", service)
+		}
+	}
+	if found["md"] || found["admet"] || found["worker-gpu-short"] {
+		t.Fatalf("unrequested services in core plan: %v", services)
+	}
+	if _, err := app.ServicePlan([]string{"admet"}); err == nil {
+		t.Fatal("locked group accepted as an intended service plan")
+	}
+}

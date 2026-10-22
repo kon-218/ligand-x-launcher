@@ -285,8 +285,16 @@ func (q *QualificationApp) Install(bundlePath, version string, upgrade *Qualific
 // Start refuses a silent partial selection: the desktop method intentionally
 // skips locked groups, but a qualification case must exercise every requested one.
 func (q *QualificationApp) Start(groups []string) error {
+	if _, err := q.ServicePlan(groups); err != nil {
+		return err
+	}
+	return q.app.StartServiceGroups("prod", groups)
+}
+
+// ServicePlan records intent independently of which containers happen to start.
+func (q *QualificationApp) ServicePlan(groups []string) ([]string, error) {
 	if len(groups) == 0 {
-		return fmt.Errorf("qualification requires explicit service groups")
+		return nil, fmt.Errorf("qualification requires explicit service groups")
 	}
 	known := make(map[string]ServiceGroup)
 	for _, group := range q.app.GetServiceGroups() {
@@ -295,10 +303,10 @@ func (q *QualificationApp) Start(groups []string) error {
 	for _, id := range groups {
 		group, ok := known[id]
 		if !ok || group.Locked {
-			return fmt.Errorf("qualification service group %q is unknown or locked", id)
+			return nil, fmt.Errorf("qualification service group %q is unknown or locked", id)
 		}
 	}
-	return q.app.StartServiceGroups("prod", groups)
+	return launcherAllowedServices(q.app.GetServiceGroups(), groups), nil
 }
 
 func (q *QualificationApp) Configure(envPath, licensePath string, groups []string) error {

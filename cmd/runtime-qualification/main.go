@@ -79,6 +79,7 @@ func run(input io.Reader, output io.Writer) error {
 		return err
 	}
 	defer app.Close()
+	var intendedServices []string
 	switch req.Action {
 	case "install":
 		var upgrade *launcher.QualificationUpgrade
@@ -103,9 +104,15 @@ func run(input io.Reader, output io.Writer) error {
 	case "configure":
 		err = app.Configure(req.EnvPath, req.LicensePath, req.Groups)
 	case "start":
-		err = app.Start(req.Groups)
+		intendedServices, err = app.ServicePlan(req.Groups)
+		if err == nil {
+			err = app.Start(req.Groups)
+		}
 	}
 	result := map[string]interface{}{"schema": "ligandx-launcher-qualification/1", "qualification_only": true, "action": req.Action, "ok": err == nil, "status": app.Status(), "events": app.EventCounts(), "elapsed_seconds": time.Since(start).Seconds()}
+	if intendedServices != nil {
+		result["requested_services"] = intendedServices
+	}
 	// Never serialize request contents: environment and license inputs are private.
 	if err != nil {
 		result["error"] = err.Error()
