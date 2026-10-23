@@ -184,6 +184,18 @@ services:
     - runtime_license:/app/data/license:ro
     - runtime_settings:/app/data/settings
     - scientific_artifacts:/app/data/scientific_artifacts
+    - type: bind
+      source: ${PROTO_RUNTIME_MANIFEST_HOST:-./data/proto/protein_tools_assets.json}
+      target: /app/lib/application/provider_manifests/protein_tools_assets.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${PROTO_RUNTIME_MANIFEST_SHA256_HOST:-./data/proto/protein_tools_assets.json.sha256}
+      target: /app/lib/application/provider_manifests/protein_tools_assets.json.sha256
+      read_only: true
+      bind:
+        create_host_path: false
     depends_on:
       runtime-license-init:
         condition: service_completed_successfully
@@ -1394,6 +1406,91 @@ services:
         reservations:
           cpus: ${WORKER_REINVENT_CPU_RES:-2}
           memory: ${WORKER_REINVENT_MEM_RES:-4G}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+  worker-proto:
+    security_opt: *id004
+    cap_drop: *id005
+    profiles:
+    - preview-protein-tools
+    image: ${LIGANDX_PROTO_IMAGE:-ghcr.io/kon-218/ligand-x/worker-proto:${VERSION:-latest}}
+    init: true
+    command:
+    - worker-proto
+    stop_grace_period: 120s
+    networks:
+    - backend
+    environment:
+    - APP_ENV=${APP_ENV:-production}
+    - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
+    - PYTHONIOENCODING=utf-8
+    - LIGANDX_PREVIEW_MODULES=${LIGANDX_PREVIEW_MODULES:-}
+    - LIGANDX_PROTO_HASH_CACHE_TRUST_SECONDS=${LIGANDX_PROTO_HASH_CACHE_TRUST_SECONDS:-inf}
+    - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
+    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
+      set RABBITMQ_PASSWORD}@rabbitmq:5672/}
+    - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
+      must be set}@redis:6379/0}
+    - CELERY_CONCURRENCY=1
+    - LIGANDX_REQUIRE_CUDA=${LIGANDX_REQUIRE_CUDA:-1}
+    - PROTO_HOME=${PROTO_HOME:-/opt/proto}
+    - PROTO_MODEL_CACHE=${PROTO_MODEL_CACHE:-/models/proto}
+    - HF_HUB_OFFLINE=1
+    - TRANSFORMERS_OFFLINE=1
+    - GATEWAY_URL=http://gateway:8000
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_REF=${LIGANDX_PROTO_IMAGE:-ghcr.io/kon-218/ligand-x/worker-proto:${VERSION:-latest}}
+    depends_on:
+      scientific-artifact-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    volumes:
+    - type: bind
+      source: ${PROTO_RUNTIME_MANIFEST_HOST:-./data/proto/protein_tools_assets.json}
+      target: /app/lib/application/provider_manifests/protein_tools_assets.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${PROTO_RUNTIME_MANIFEST_SHA256_HOST:-./data/proto/protein_tools_assets.json.sha256}
+      target: /app/lib/application/provider_manifests/protein_tools_assets.json.sha256
+      read_only: true
+      bind:
+        create_host_path: false
+    - scientific_artifacts:/app/data/scientific_artifacts
+    - ${PROTO_HOME_HOST:-/opt/proto}:${PROTO_HOME:-/opt/proto}:ro
+    - ${PROTO_MODEL_CACHE_HOST:-/models/proto}:${PROTO_MODEL_CACHE:-/models/proto}:ro
+    healthcheck:
+      test:
+      - CMD
+      - celery
+      - -A
+      - lib.tasks.proto_tools_tasks
+      - inspect
+      - ping
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: ${WORKER_PROTO_CPU_LIMIT:-4}
+          memory: ${WORKER_PROTO_MEM_LIMIT:-32G}
+        reservations:
+          cpus: ${WORKER_PROTO_CPU_RES:-2}
+          memory: ${WORKER_PROTO_MEM_RES:-8G}
     logging:
       driver: json-file
       options:

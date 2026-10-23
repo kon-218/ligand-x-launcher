@@ -7,6 +7,8 @@ services:
     devices: *id001
   worker-gpu-short:
     devices: *id001
+  worker-proto:
+    devices: *id001
   worker-bioemu:
     devices: *id001
   abfe:

@@ -129,7 +129,7 @@
         "services": [
           "worker-proto"
         ],
-        "ships_dormant": false,
+        "ships_dormant": true,
         "status": "Scores supplied single substitutions with ESM2 and FAMPNN; screening only."
       },
       "services": [
