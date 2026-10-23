@@ -181,7 +181,7 @@ func TestCorePullListIncludesEveryFixedComposeImage(t *testing.T) {
 	// Variable image references belong to optional product groups and are
 	// checked elsewhere. Literal references are runtime/infra dependencies that
 	// `up --pull=never` cannot recover when the launcher forgets to pre-pull
-	// them. Both scientific init containers, for example, use alpine:3.21.
+	// them. Both scientific init containers, for example, use the pinned alpine image.
 	imageLine := regexp.MustCompile(`(?m)^\s+image:\s+([^\s#]+)\s*$`)
 	for _, match := range imageLine.FindAllStringSubmatch(string(compose), -1) {
 		image := match[1]
@@ -663,7 +663,15 @@ func TestStagingValidationUsesRepositoryRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	override := filepath.Join(stubDir, "override.env")
-	if err := os.WriteFile(override, []byte("VERSION=v1.2.3\nGATEWAY_PORT="+port+"\nFRONTEND_PORT="+port+"\n"), 0600); err != nil {
+	overrideBody := "VERSION=v1.2.3\nGATEWAY_PORT=" + port + "\nFRONTEND_PORT=" + port + "\n" +
+		"POSTGRES_PASSWORD=staging-fixture-secret-1\n" +
+		"RABBITMQ_PASSWORD=staging-fixture-secret-2\n" +
+		"REDIS_PASSWORD=staging-fixture-secret-3\n" +
+		"QC_SECRET_KEY=staging-fixture-secret-4\n" +
+		"LIGANDX_PASSWORD=staging-fixture-secret-5\n" +
+		"FLOWER_PASSWORD=staging-fixture-secret-6\n" +
+		"INTERNAL_WORKER_SECRET=staging-fixture-secret-7\n"
+	if err := os.WriteFile(override, []byte(overrideBody), 0600); err != nil {
 		t.Fatal(err)
 	}
 	relativeOverride, err := filepath.Rel(root, override)

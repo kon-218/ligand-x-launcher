@@ -11,9 +11,28 @@ x-runtime-internal-secret: INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set 
   (see .env.example)}
 x-runtime-image-digest: LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
 x-runtime-gateway-url: GATEWAY_URL=http://gateway:8000
+x-hardening-default:
+  security_opt: &id004
+  - no-new-privileges:true
+  cap_drop: &id005
+  - ALL
+x-hardening-init:
+  security_opt: &id001
+  - no-new-privileges:true
+  cap_drop: &id002
+  - ALL
+  cap_add: &id003
+  - CHOWN
+  - DAC_OVERRIDE
+  - FOWNER
+  - SETUID
+  - SETGID
 services:
   scientific-output-init:
-    image: alpine:3.21
+    security_opt: *id001
+    cap_drop: *id002
+    cap_add: *id003
+    image: alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
     command:
     - sh
     - -ec
@@ -30,7 +49,10 @@ services:
     - rbfe_outputs:/app/data/rbfe_outputs
     restart: 'no'
   scientific-artifact-init:
-    image: alpine:3.21
+    security_opt: *id001
+    cap_drop: *id002
+    cap_add: *id003
+    image: alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
     command:
     - sh
     - -ec
@@ -42,7 +64,10 @@ services:
     - scientific_artifacts:/app/data/scientific_artifacts
     restart: 'no'
   runtime-license-init:
-    image: alpine:3.21
+    security_opt: *id001
+    cap_drop: *id002
+    cap_add: *id003
+    image: alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
     command:
     - sh
     - -ec
@@ -61,7 +86,10 @@ services:
     - runtime_license:/runtime-license
     restart: 'no'
   celery-beat-init:
-    image: alpine:3.21
+    security_opt: *id001
+    cap_drop: *id002
+    cap_add: *id003
+    image: alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
     command:
     - sh
     - -ec
@@ -70,7 +98,10 @@ services:
     volumes:
     - celery_beat_data:/app/celery-beat
   boltz-model-cache-init:
-    image: alpine:3.21
+    security_opt: *id001
+    cap_drop: *id002
+    cap_add: *id003
+    image: alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
     command:
     - sh
     - -ec
@@ -80,7 +111,10 @@ services:
     - boltz_model_cache:/home/appuser/.boltz
     restart: 'no'
   runtime-settings-init:
-    image: alpine:3.21
+    security_opt: *id001
+    cap_drop: *id002
+    cap_add: *id003
+    image: alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
     command:
     - sh
     - -ec
@@ -94,6 +128,8 @@ services:
     - runtime_settings:/runtime-settings
     restart: 'no'
   gateway:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:-latest}
     command:
     - gateway
@@ -108,9 +144,7 @@ services:
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
-    - LIGANDX_ENABLE_PREVIEW_MODULES=${LIGANDX_ENABLE_PREVIEW_MODULES:-false}
     - LIGANDX_PREVIEW_MODULES=${LIGANDX_PREVIEW_MODULES:-}
-    - QMMM_ENABLED=${QMMM_ENABLED:-false}
     - LIGANDX_JOB_LIST_MAX_VALUE_BYTES=${LIGANDX_JOB_LIST_MAX_VALUE_BYTES:-262144}
     - LIGANDX_PROTO_READINESS_TIMEOUT_SECONDS=${LIGANDX_PROTO_READINESS_TIMEOUT_SECONDS:-30}
     - LIGANDX_ENABLE_INTERNAL_MODULES=${LIGANDX_ENABLE_INTERNAL_MODULES:-false}
@@ -186,6 +220,8 @@ services:
         max-size: 10m
         max-file: '3'
   structure:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/structure:${VERSION:-latest}
     init: true
     command:
@@ -239,6 +275,8 @@ services:
         max-size: 10m
         max-file: '3'
   pocket-finder:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/pocket-finder:${VERSION:-latest}
     init: true
     command:
@@ -291,6 +329,8 @@ services:
         max-size: 10m
         max-file: '3'
   reinvent:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/reinvent:${PRO_VERSION:-${VERSION:-latest}}
     init: true
     command:
@@ -347,9 +387,12 @@ services:
         max-size: 10m
         max-file: '3'
   bioemu-outputs-init:
+    security_opt: *id001
+    cap_drop: *id002
+    cap_add: *id003
     profiles:
     - preview-bioemu
-    image: alpine:3.21
+    image: alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
     user: 0:0
     restart: 'no'
     command:
@@ -359,6 +402,8 @@ services:
     volumes:
     - bioemu_outputs:/app/data/bioemu_outputs
   bioemu:
+    security_opt: *id004
+    cap_drop: *id005
     profiles:
     - preview-bioemu
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/bioemu:${PRO_VERSION:-${VERSION:-latest}}
@@ -382,6 +427,8 @@ services:
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
     - BIOEMU_OUTPUT_ROOT=/app/data/bioemu_outputs
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
     healthcheck:
       test:
       - CMD
@@ -407,6 +454,8 @@ services:
         max-size: 10m
         max-file: '3'
   alignment:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/alignment:${VERSION:-latest}
     init: true
     command:
@@ -454,6 +503,8 @@ services:
         max-size: 10m
         max-file: '3'
   ketcher:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/ketcher:${VERSION:-latest}
     init: true
     command:
@@ -496,6 +547,8 @@ services:
         max-size: 10m
         max-file: '3'
   msa:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/msa:${VERSION:-latest}
     init: true
     command:
@@ -542,6 +595,8 @@ services:
         max-size: 10m
         max-file: '3'
   docking:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/docking:${VERSION:-latest}
     init: true
     command:
@@ -591,6 +646,8 @@ services:
         max-size: 10m
         max-file: '3'
   md:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/md:${VERSION:-latest}
     init: true
     command:
@@ -640,6 +697,8 @@ services:
         max-size: 10m
         max-file: '3'
   abfe:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/abfe:${PRO_VERSION:-${VERSION:-latest}}
     init: true
     command:
@@ -667,6 +726,8 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
     depends_on:
       scientific-output-init:
         condition: service_completed_successfully
@@ -699,6 +760,8 @@ services:
         max-size: 10m
         max-file: '3'
   rbfe:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/rbfe:${PRO_VERSION:-${VERSION:-latest}}
     init: true
     command:
@@ -727,6 +790,8 @@ services:
       set RABBITMQ_PASSWORD}@rabbitmq:5672/}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD
       must be set}@redis:6379/0}
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
     depends_on:
       scientific-output-init:
         condition: service_completed_successfully
@@ -761,6 +826,8 @@ services:
         max-size: 10m
         max-file: '3'
   admet:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/admet:${PRO_VERSION:-${VERSION:-latest}}
     init: true
     command:
@@ -779,6 +846,8 @@ services:
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
     - DATABASE_URL=${DATABASE_URL:?DATABASE_URL must be set (e.g. postgresql://ligandx:password@postgres:5432/ligandx)}
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
     depends_on:
       postgres:
         condition: service_healthy
@@ -807,6 +876,8 @@ services:
         max-size: 10m
         max-file: '3'
   boltz2:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/boltz2:${PRO_VERSION:-${VERSION:-latest}}
     init: true
     command:
@@ -838,6 +909,8 @@ services:
     - MSA_API_KEY_VALUE=${MSA_API_KEY_VALUE:-}
     - API_KEY_HEADER=${API_KEY_HEADER:-X-API-Key}
     - BOLTZ2_MAX_CONCURRENT_PREDICTIONS=${BOLTZ2_MAX_CONCURRENT_PREDICTIONS:-1}
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
     healthcheck:
       test:
       - CMD
@@ -864,6 +937,8 @@ services:
         max-size: 10m
         max-file: '3'
   qc:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/qc:${PRO_VERSION:-${VERSION:-latest}}
     init: true
     command:
@@ -885,6 +960,8 @@ services:
       must be set}@redis:6379/0}
     - ORCA_PATH=/opt/orca/orca
     - SECRET_KEY=${QC_SECRET_KEY:?Set QC_SECRET_KEY in .env or .env.production}
+    - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
+      (see .env.example)}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -919,6 +996,8 @@ services:
         max-size: 10m
         max-file: '3'
   worker-qc:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${PRO_VERSION:-${VERSION:-latest}}
     init: true
     command:
@@ -928,8 +1007,6 @@ services:
     - backend
     environment:
     - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -988,6 +1065,8 @@ services:
         max-size: 10m
         max-file: '3'
   worker-gpu-short:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
     init: true
     command:
@@ -997,8 +1076,6 @@ services:
     - backend
     environment:
     - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - PYTHONIOENCODING=utf-8
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
@@ -1054,6 +1131,8 @@ services:
         max-size: 10m
         max-file: '3'
   worker-gpu-long:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_GPU_LONG_IMAGE:-${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${PRO_VERSION:-${VERSION:-latest}}}
     init: true
     command:
@@ -1065,8 +1144,6 @@ services:
     - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     environment:
     - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - PYTHONIOENCODING=utf-8
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
@@ -1125,6 +1202,8 @@ services:
         max-size: 10m
         max-file: '3'
   worker-cpu:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
     init: true
     command:
@@ -1134,8 +1213,6 @@ services:
     - backend
     environment:
     - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - PYTHONIOENCODING=utf-8
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
@@ -1191,6 +1268,8 @@ services:
         max-size: 10m
         max-file: '3'
   worker-control:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
     init: true
     command:
@@ -1200,8 +1279,6 @@ services:
     - backend
     environment:
     - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - PYTHONIOENCODING=utf-8
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -1262,6 +1339,8 @@ services:
         max-size: 10m
         max-file: '3'
   worker-reinvent:
+    security_opt: *id004
+    cap_drop: *id005
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${PRO_VERSION:-${VERSION:-latest}}
     init: true
     command:
@@ -1271,8 +1350,6 @@ services:
     - backend
     environment:
     - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -1323,6 +1400,8 @@ services:
         max-size: 10m
         max-file: '3'
   worker-bioemu:
+    security_opt: *id004
+    cap_drop: *id005
     profiles:
     - preview-bioemu
     image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-bioemu:${PRO_VERSION:-${VERSION:-latest}}
@@ -1333,8 +1412,6 @@ services:
     - backend
     environment:
     - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-bioemu:${PRO_VERSION:-${VERSION:-latest}}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -1396,6 +1473,8 @@ services:
         max-size: 10m
         max-file: '3'
   celery-beat:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
     command:
     - celery
@@ -1414,8 +1493,6 @@ services:
     - celery_beat_data:/app/celery-beat
     environment:
     - APP_ENV=${APP_ENV:-production}
-    - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
-    - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -1459,7 +1536,13 @@ services:
         max-size: 10m
         max-file: '3'
   rabbitmq:
-    image: rabbitmq:3.13-management-alpine
+    security_opt: *id004
+    cap_drop: *id005
+    image: rabbitmq@sha256:606d8c0d6b3c18d1da9afc53bc7cdb2a8d5486df91b5a9830e9e07626c9ae281
+    cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
     stop_grace_period: 60s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-rabbitmq
     hostname: rabbitmq
@@ -1477,6 +1560,8 @@ services:
     healthcheck:
       test:
       - CMD
+      - su-exec
+      - rabbitmq
       - rabbitmq-diagnostics
       - -q
       - ping
@@ -1499,23 +1584,31 @@ services:
         max-size: 10m
         max-file: '3'
   redis:
-    image: redis:7-alpine
+    security_opt: *id004
+    cap_drop: *id005
+    image: redis@sha256:520775a41a63e77e06c73e35d2fd9cc15921a609516818796b4ecbb813078bc7
+    cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
     stop_grace_period: 30s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-redis
     hostname: redis
-    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
-      --appendonly yes --appendfsync everysec
+    command:
+    - sh
+    - -ec
+    - exec docker-entrypoint.sh redis-server --requirepass "$$REDIS_PASSWORD" --appendonly
+      yes --appendfsync everysec
+    environment:
+    - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     networks:
     - backend
     volumes:
     - redis_data:/data
     healthcheck:
       test:
-      - CMD
-      - redis-cli
-      - -a
-      - ${REDIS_PASSWORD}
-      - ping
+      - CMD-SHELL
+      - redis-cli -a "$$REDIS_PASSWORD" ping
       interval: 5s
       timeout: 5s
       retries: 5
@@ -1534,7 +1627,13 @@ services:
         max-size: 10m
         max-file: '3'
   postgres:
-    image: postgres:16-alpine
+    security_opt: *id004
+    cap_drop: *id005
+    image: postgres@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb
+    cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
     stop_grace_period: 60s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-postgres
     networks:
@@ -1568,7 +1667,9 @@ services:
         max-size: 10m
         max-file: '3'
   flower:
-    image: mher/flower:2.0
+    security_opt: *id004
+    cap_drop: *id005
+    image: mher/flower@sha256:51c3c3db5be343e6335e3dbca5348708932bbcca992df6a39f1dad91e3b340df
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-flower
     command: celery flower --port=5555 --url_prefix=flower
     networks:
@@ -1620,7 +1721,14 @@ services:
         max-size: 10m
         max-file: '3'
   proxy:
-    image: nginx:1.27-alpine
+    security_opt: *id004
+    cap_drop: *id005
+    image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    cap_add:
+    - CHOWN
+    - NET_BIND_SERVICE
+    - SETUID
+    - SETGID
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-proxy
     ports:
     - ${LIGANDX_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:80
@@ -1644,7 +1752,17 @@ services:
       retries: 3
       start_period: 20s
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: ${PROXY_CPU_LIMIT:-1}
+          memory: ${PROXY_MEM_LIMIT:-1G}
+        reservations:
+          cpus: ${PROXY_CPU_RES:-0.25}
+          memory: ${PROXY_MEM_RES:-256M}
   frontend:
+    security_opt: *id004
+    cap_drop: *id005
     image: ghcr.io/kon-218/ligand-x/frontend:${VERSION:-latest}
     command:
     - bun
