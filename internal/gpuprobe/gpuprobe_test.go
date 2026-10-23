@@ -52,7 +52,7 @@ func TestProbeUsableWhenDockerStartsAContainerWithTheGPU(t *testing.T) {
 	if !res.Usable || !res.Verified || res.Reason != ReasonOK {
 		t.Fatalf("expected verified usable GPU, got %+v", res)
 	}
-	want := "docker run --rm --pull=never --device nvidia.com/gpu=all alpine:3.21 true"
+	want := "docker run --rm --pull=never --device nvidia.com/gpu=all " + ProbeImage + " true"
 	if calls[len(calls)-1] != want {
 		t.Fatalf("probe must make the overlay's own device request\n got %q\nwant %q", calls[len(calls)-1], want)
 	}
@@ -119,7 +119,7 @@ func TestProbeUnresolvableDevice(t *testing.T) {
 func TestProbeMissingImageIsUnverifiedButKeepsTheOverlay(t *testing.T) {
 	res, calls := probeWith(t, script{
 		"nvidia-smi":           ok,
-		"docker image inspect": {out: "Error response from daemon: No such image: alpine:3.21\n", err: failure},
+		"docker image inspect": {out: "Error response from daemon: No such image: " + ProbeImage + "\n", err: failure},
 	})
 	if !res.Usable || res.Verified {
 		t.Fatalf("missing probe image cannot prove or disprove the GPU: %+v", res)

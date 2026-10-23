@@ -25,17 +25,17 @@ import (
 const uninstallConfirmPhrase = "UNINSTALL"
 
 // sharedBaseImages are third-party images the stack pulls but does not own.
-// They are deliberately NOT removed: `postgres:16-alpine` or `nginx` may well be
+// They are deliberately NOT removed: postgres or nginx may well be
 // backing something else on this machine, and silently deleting them would make
 // uninstalling Ligand-X break an unrelated project. They are reported instead so
 // the user can prune them by hand if they want to.
 var sharedBaseImages = []string{
-	"alpine:3.21",
-	"mher/flower:2.0",
-	"nginx:1.27-alpine",
-	"postgres:16-alpine",
-	"rabbitmq:3.13-management-alpine",
-	"redis:7-alpine",
+	alpineImage,
+	flowerImage,
+	nginxImage,
+	postgresImage,
+	rabbitmqImage,
+	redisImage,
 }
 
 // UninstallOptions selects how much of the install to remove. The zero value is

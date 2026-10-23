@@ -25,8 +25,9 @@ import (
 // ProbeImage is the throwaway container the probe starts. It is the image the
 // runtime compose file already uses for its init containers, so it is on disk
 // by the time a stack starts and needs no CUDA, no pull and no extra download.
-// A test keeps it in step with the bundled docker-compose.yml.
-const ProbeImage = "alpine:3.21"
+// Pinned by digest (alpine:3.21) exactly as that file names it; a test keeps it
+// in step with the bundled docker-compose.yml.
+const ProbeImage = "alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507"
 
 // Device is the CDI device the GPU overlay requests. A test keeps it in step
 // with docker-compose.gpu.yml.

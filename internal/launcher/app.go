@@ -3770,22 +3770,36 @@ func (a *App) requirePinnedProductionVersion() (string, error) {
 	return version, nil
 }
 
+// Third-party images, pinned by digest exactly as the runtime Compose file names
+// them (the tag each digest was resolved from is in the comment). A Compose
+// file that starts a digest the launcher pulled by tag would find nothing on
+// disk offline; TestCorePullListIncludesEveryFixedComposeImage keeps these in
+// step with the bundled file.
+const (
+	alpineImage   = "alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507"      // alpine:3.21
+	nginxImage    = "nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10"       // nginx:1.27-alpine
+	redisImage    = "redis@sha256:520775a41a63e77e06c73e35d2fd9cc15921a609516818796b4ecbb813078bc7"       // redis:7-alpine
+	postgresImage = "postgres@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb"    // postgres:16-alpine
+	rabbitmqImage = "rabbitmq@sha256:606d8c0d6b3c18d1da9afc53bc7cdb2a8d5486df91b5a9830e9e07626c9ae281"    // rabbitmq:3.13-management-alpine
+	flowerImage   = "mher/flower@sha256:51c3c3db5be343e6335e3dbca5348708932bbcca992df6a39f1dad91e3b340df" // mher/flower:2.0
+)
+
 func coreServiceImages(version string) []string {
 	images := []string{
-		"alpine:3.21",
+		alpineImage,
 		imageRef("ghcr.io/kon-218/ligand-x/gateway", version),
 		imageRef("ghcr.io/kon-218/ligand-x/frontend", version),
-		"nginx:1.27-alpine",
+		nginxImage,
 		imageRef("ghcr.io/kon-218/ligand-x/pocket-finder", version),
 		imageRef("ghcr.io/kon-218/ligand-x/structure", version),
 		imageRef("ghcr.io/kon-218/ligand-x/alignment", version),
 		imageRef("ghcr.io/kon-218/ligand-x/ketcher", version),
 		imageRef("ghcr.io/kon-218/ligand-x/msa", version),
 		imageRef("ghcr.io/kon-218/ligand-x/worker-cpu", version),
-		"redis:7-alpine",
-		"postgres:16-alpine",
-		"rabbitmq:3.13-management-alpine",
-		"mher/flower:2.0",
+		redisImage,
+		postgresImage,
+		rabbitmqImage,
+		flowerImage,
 	}
 	return images
 }

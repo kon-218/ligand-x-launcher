@@ -181,7 +181,7 @@ func TestCorePullListIncludesEveryFixedComposeImage(t *testing.T) {
 	// Variable image references belong to optional product groups and are
 	// checked elsewhere. Literal references are runtime/infra dependencies that
 	// `up --pull=never` cannot recover when the launcher forgets to pre-pull
-	// them. Both scientific init containers, for example, use alpine:3.21.
+	// them. Both scientific init containers, for example, use the pinned alpine image.
 	imageLine := regexp.MustCompile(`(?m)^\s+image:\s+([^\s#]+)\s*$`)
 	for _, match := range imageLine.FindAllStringSubmatch(string(compose), -1) {
 		image := match[1]
