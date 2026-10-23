@@ -1539,6 +1539,10 @@ services:
     security_opt: *id004
     cap_drop: *id005
     image: rabbitmq@sha256:606d8c0d6b3c18d1da9afc53bc7cdb2a8d5486df91b5a9830e9e07626c9ae281
+    cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
     stop_grace_period: 60s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-rabbitmq
     hostname: rabbitmq
@@ -1556,6 +1560,8 @@ services:
     healthcheck:
       test:
       - CMD
+      - su-exec
+      - rabbitmq
       - rabbitmq-diagnostics
       - -q
       - ping
@@ -1719,7 +1725,10 @@ services:
     cap_drop: *id005
     image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     cap_add:
+    - CHOWN
     - NET_BIND_SERVICE
+    - SETUID
+    - SETGID
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-proxy
     ports:
     - ${LIGANDX_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:80
