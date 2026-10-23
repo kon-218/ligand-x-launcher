@@ -352,6 +352,13 @@ func EntryAllowed(name string) bool {
 		"scripts/prepare_proto_runtime.py": true,
 		"tools/proto_runtime_assets.py":    true,
 		"docs/PROTO_TESTER_PREVIEW.md":     true,
+		// The module manifest lists the previews this runtime can turn on
+		// (FEAT-27); without it the Services tab offers none.
+		"modules.json": true,
+		// Proto's "not configured" placeholder: the gateway and an unprepared
+		// Proto worker bind it, so a missing copy stops the gateway starting.
+		"data/proto/protein_tools_assets.json":        true,
+		"data/proto/protein_tools_assets.json.sha256": true,
 	}
 	if allowedFiles[name] {
 		return true

@@ -349,6 +349,17 @@ func TestEntryAllowedAcceptsGPUOverlay(t *testing.T) {
 	}
 }
 
+func TestEntryAllowedAcceptsTheModuleManifestAndProtoPlaceholder(t *testing.T) {
+	for _, name := range []string{"modules.json", "data/proto/protein_tools_assets.json", "data/proto/protein_tools_assets.json.sha256"} {
+		if !EntryAllowed(name) {
+			t.Errorf("runtime file the stack needs was rejected: %s", name)
+		}
+	}
+	if EntryAllowed("data/proto/unreviewed.json") {
+		t.Error("unexpected Proto data file allowed")
+	}
+}
+
 func TestEntryAllowedAcceptsExactProtoPreparationFiles(t *testing.T) {
 	for _, name := range []string{"scripts/prepare_proto_runtime.py", "tools/proto_runtime_assets.py", "docs/PROTO_TESTER_PREVIEW.md"} {
 		if !EntryAllowed(name) {
