@@ -309,6 +309,25 @@ func (q *QualificationApp) ServicePlan(groups []string) ([]string, error) {
 	return launcherAllowedServices(q.app.GetServiceGroups(), groups), nil
 }
 
+// ImagePlan names the images PullServiceGroups would fetch for these groups, so a
+// harness can stage an installed predecessor's images without starting anything.
+func (q *QualificationApp) ImagePlan(groups []string) ([]string, error) {
+	if _, err := q.ServicePlan(groups); err != nil {
+		return nil, err
+	}
+	selected := make(map[string]bool, len(groups))
+	for _, id := range groups {
+		selected[id] = true
+	}
+	var images []string
+	for _, group := range q.app.GetServiceGroups() {
+		if selected[group.ID] {
+			images = append(images, group.Images...)
+		}
+	}
+	return sortedUnique(images), nil
+}
+
 func (q *QualificationApp) Configure(envPath, licensePath string, groups []string) error {
 	if envPath != "" {
 		content, err := qualificationRead(envPath, 1024*1024)

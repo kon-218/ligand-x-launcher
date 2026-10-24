@@ -13,7 +13,7 @@ Production release-index selection and semantic-version downgrade policy remain
 the desktop installer's authority.
 
 The adapter reads one JSON request from stdin and writes one JSON result to
-stdout. Operations are `install`, `configure`, `start`, and `status`. Run one
+stdout. Operations are `install`, `configure`, `plan`, `start`, and `status`. Run one
 adapter instance per process: the existing runtime verification policy uses
 process-wide build settings. The qualification controller owns the process
 deadline, image checks, endpoint/result assertions and cleanup.
@@ -48,7 +48,12 @@ symlinked roots, and production Compose namespaces.
 `configure` accepts `env_path`, `license_path` and `groups`; environment and
 license contents are never included in the result. `start` accepts `groups`
 and calls the real production service-start method. Unknown or locked groups
-fail before startup instead of silently becoming a smaller scenario. Test
+fail before startup instead of silently becoming a smaller scenario. `plan`
+accepts the same `groups` and changes nothing: it returns `requested_services`
+and `requested_images`, the images the launcher's group pull would fetch for the
+installed version. Starts use `--pull=never`, so a controller qualifying an
+installed predecessor must stage those images itself and verify each product
+image against the predecessor's signed digests before `start`. Test
 projects have isolated launcher settings, logs, Compose names and infrastructure
 container names. Never use the adapter to uninstall a desktop installation.
 Cleanup must check the controller's owner marker and exact Compose project.
