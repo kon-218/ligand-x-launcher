@@ -2509,12 +2509,13 @@ func (a *App) reconcileProductionCredentials() error {
 
 // The Compose ping health check can pass while only the Erlang node is up.
 // Credential RPCs require the Rabbit application to finish starting as well.
+// Run every CLI as the cookie owner: root without DAC_OVERRIDE cannot read it.
 func waitRabbitMQApplication(ctx context.Context, containerName string) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("RabbitMQ application did not become ready in %s: %w", containerName, err)
 		}
-		cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "rabbitmq-diagnostics", "-q", "check_running")
+		cmd := exec.CommandContext(ctx, "docker", "exec", "--user", "rabbitmq", containerName, "rabbitmq-diagnostics", "-q", "check_running")
 		if err := cmd.Run(); err == nil {
 			return nil
 		}
@@ -2532,14 +2533,14 @@ func reconcileRabbitMQUser(containerName, username, password string) error {
 	if err := waitRabbitMQApplication(ctx, containerName); err != nil {
 		return err
 	}
-	changeCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "change_password", username, password)
+	changeCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "change_password", username, password)
 	if out, err := changeCmd.CombinedOutput(); err == nil {
 		return ensureRabbitMQUserAccess(containerName, username)
 	} else if !strings.Contains(strings.ToLower(string(out)), "no_such_user") {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	addCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "add_user", username, password)
+	addCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "add_user", username, password)
 	if out, err := addCmd.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(out)), "user_already_exists") {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -2547,11 +2548,11 @@ func reconcileRabbitMQUser(containerName, username, password string) error {
 }
 
 func ensureRabbitMQUserAccess(containerName, username string) error {
-	permCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "set_permissions", "-p", "/", username, ".*", ".*", ".*")
+	permCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "set_permissions", "-p", "/", username, ".*", ".*", ".*")
 	if out, err := permCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
-	tagsCmd := exec.Command("docker", "exec", containerName, "rabbitmqctl", "set_user_tags", username, "administrator")
+	tagsCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "set_user_tags", username, "administrator")
 	if out, err := tagsCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}

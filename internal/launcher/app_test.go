@@ -320,6 +320,7 @@ func TestRabbitMQCredentialsWaitForRunningApplication(t *testing.T) {
 	t.Setenv("BUILD03_BROKER_CALLS", log)
 	t.Setenv("BUILD03_BROKER_READY", counter)
 	script := `#!/bin/sh
+if [ "$2" = --user ]; then shift 2; fi
 printf '%s:%s\n' "$3" "$4" >> "$BUILD03_BROKER_CALLS"
 if [ "$3" = rabbitmq-diagnostics ] && [ ! -f "$BUILD03_BROKER_READY" ]; then
   touch "$BUILD03_BROKER_READY"
@@ -341,6 +342,47 @@ exit 0
 	expected := "rabbitmq-diagnostics:-q\nrabbitmq-diagnostics:-q\nrabbitmqctl:change_password\nrabbitmqctl:set_permissions\nrabbitmqctl:set_user_tags\n"
 	if string(calls) != expected {
 		t.Fatalf("credential mutation ran before application readiness: %s", calls)
+	}
+}
+
+func TestRabbitMQAdministrationUsesCookieOwner(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	t.Setenv("RABBITMQ_ADMIN_CALLS", log)
+	// A hardened broker's cookie is mode 0600, owned by rabbitmq. Root
+	// without DAC_OVERRIDE cannot read it; every administrative call must
+	// explicitly select its owner, including readiness and user creation.
+	script := `#!/bin/sh
+if [ "$1" != exec ] || [ "$2" != --user ] || [ "$3" != rabbitmq ]; then
+  echo 'cookie: eacces' >&2
+  exit 78
+fi
+shift 4
+printf '%s:%s\n' "$1" "$2" >> "$RABBITMQ_ADMIN_CALLS"
+if [ "$1" = rabbitmqctl ] && [ "$2" = change_password ]; then
+  echo no_such_user >&2
+  exit 69
+fi
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := waitRabbitMQApplication(ctx, "qualification-broker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileRabbitMQUser("qualification-broker", "fixture-user", "fixture-password"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "rabbitmq-diagnostics:-q\nrabbitmq-diagnostics:-q\nrabbitmqctl:change_password\nrabbitmqctl:add_user\nrabbitmqctl:set_permissions\nrabbitmqctl:set_user_tags\n"
+	if string(calls) != want {
+		t.Fatalf("incomplete broker credential administration: %s", calls)
 	}
 }
 
