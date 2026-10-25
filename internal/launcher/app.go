@@ -2478,13 +2478,11 @@ func (a *App) reconcileProductionCredentials() error {
 
 	postgres := a.infrastructureContainerName("postgres")
 	if pgUser, pgPass := cur["POSTGRES_USER"], cur["POSTGRES_PASSWORD"]; pgUser != "" && pgPass != "" && isContainerRunning(postgres) {
-		sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s';", pgUser, strings.ReplaceAll(pgPass, "'", "''"))
-		cmd := exec.Command("docker", "exec", postgres, "psql", "-U", pgUser, "-d", pgUser, "-c", sql)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			failures = append(failures, fmt.Sprintf("postgres: %v: %s", err, strings.TrimSpace(string(out))))
+		if err := alterPostgresPassword(postgres, pgUser, pgPass); err != nil {
+			failures = append(failures, fmt.Sprintf("postgres: %v", err))
 			a.emit("log", LogEntry{
 				Service:   "launcher",
-				Message:   fmt.Sprintf("Credential reconciliation (postgres) failed: %v: %s", err, strings.TrimSpace(string(out))),
+				Message:   fmt.Sprintf("Credential reconciliation (postgres) failed: %v", err),
 				Timestamp: time.Now().Format("15:04:05"),
 			})
 		}
@@ -2527,6 +2525,26 @@ func waitRabbitMQApplication(ctx context.Context, containerName string) error {
 	}
 }
 
+// commandFailure reports a failed admin command without the secret it was
+// given: rabbitmqctl echoes its arguments and psql its failing statement.
+// Pass every form the secret took on the command line, longest first.
+func commandFailure(err error, out []byte, secrets ...string) error {
+	text := strings.TrimSpace(string(out))
+	for _, secret := range secrets {
+		text = strings.ReplaceAll(text, secret, "<redacted>")
+	}
+	return fmt.Errorf("%v: %s", err, text)
+}
+
+func alterPostgresPassword(containerName, username, password string) error {
+	escaped := strings.ReplaceAll(password, "'", "''")
+	sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s';", username, escaped)
+	if out, err := exec.Command("docker", "exec", containerName, "psql", "-U", username, "-d", username, "-c", sql).CombinedOutput(); err != nil {
+		return commandFailure(err, out, escaped, password)
+	}
+	return nil
+}
+
 // `--` ends rabbitmqctl option parsing: generated base64url passwords can start with `-`.
 func reconcileRabbitMQUser(containerName, username, password string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -2538,12 +2556,12 @@ func reconcileRabbitMQUser(containerName, username, password string) error {
 	if out, err := changeCmd.CombinedOutput(); err == nil {
 		return ensureRabbitMQUserAccess(containerName, username)
 	} else if !strings.Contains(strings.ToLower(string(out)), "no_such_user") {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		return commandFailure(err, out, password)
 	}
 
 	addCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "add_user", "--", username, password)
 	if out, err := addCmd.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(out)), "user_already_exists") {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		return commandFailure(err, out, password)
 	}
 	return ensureRabbitMQUserAccess(containerName, username)
 }

@@ -424,6 +424,78 @@ fi
 	}
 }
 
+// Secrets that reach a command line: generated base64url values (which can
+// start with '-' or '_') and hand-edited .env values.
+var credentialEdgeCases = []string{"-XSa-fixture", "--", "--node", "_fixture", "quo'te", "sp ace", "$HOME", "semi;colon"}
+
+// fakeDocker records each call's arguments after `docker exec [--user u] <container>`
+// one per line, so tests can assert what reached the tool verbatim.
+func fakeDocker(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\nshift\nif [ \"$1\" = --user ]; then shift 2; fi\nshift\n" +
+		"[ \"$1\" = rabbitmq-diagnostics ] && exit 0\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done >> \"" + log + "\"\n" + body
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+func TestRabbitMQCredentialEdgeCasesReachBrokerVerbatim(t *testing.T) {
+	for _, password := range credentialEdgeCases {
+		log := fakeDocker(t, "exit 0\n")
+		if err := reconcileRabbitMQUser("qualification-broker", "fixture-user", password); err != nil {
+			t.Fatalf("%q: %v", password, err)
+		}
+		calls, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "rabbitmqctl\nchange_password\n--\nfixture-user\n" + password + "\n"
+		if !strings.HasPrefix(string(calls), want) {
+			t.Fatalf("%q did not reach rabbitmqctl as one positional value after --: %q", password, calls)
+		}
+	}
+}
+
+func TestCredentialFailuresDoNotEchoThePassword(t *testing.T) {
+	// rabbitmqctl prints "Arguments given: change_password <user> <password>"
+	// and psql prints the failing statement; neither may reach the launcher log.
+	for _, password := range credentialEdgeCases {
+		fakeDocker(t, "echo \"Arguments given: $*\" >&2\nexit 64\n")
+		err := reconcileRabbitMQUser("qualification-broker", "fixture-user", password)
+		if err == nil || strings.Contains(err.Error(), password) {
+			t.Fatalf("rabbitmq error for %q leaks the password or is missing: %v", password, err)
+		}
+		err = alterPostgresPassword("qualification-db", "ligandx", password)
+		escaped := strings.ReplaceAll(password, "'", "''")
+		if err == nil || strings.Contains(err.Error(), password) || strings.Contains(err.Error(), escaped) {
+			t.Fatalf("postgres error for %q leaks the password or is missing: %v", password, err)
+		}
+	}
+}
+
+func TestPostgresPasswordReachesSQLAsOneQuotedLiteral(t *testing.T) {
+	for _, password := range credentialEdgeCases {
+		log := fakeDocker(t, "exit 0\n")
+		if err := alterPostgresPassword("qualification-db", "ligandx", password); err != nil {
+			t.Fatalf("%q: %v", password, err)
+		}
+		calls, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		literal := "'" + strings.ReplaceAll(password, "'", "''") + "'"
+		want := "psql\n-U\nligandx\n-d\nligandx\n-c\nALTER USER ligandx WITH PASSWORD " + literal + ";\n"
+		if string(calls) != want {
+			t.Fatalf("%q: unexpected psql call %q", password, calls)
+		}
+	}
+}
+
 func TestRabbitMQApplicationReadinessHasBoundedWait(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nexit 69\n"), 0700); err != nil {
