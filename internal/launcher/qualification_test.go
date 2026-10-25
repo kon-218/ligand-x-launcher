@@ -319,3 +319,23 @@ func TestQualificationServicePlanNamesRequiredServicesBeforeStartup(t *testing.T
 		t.Fatal("locked group accepted as an intended service plan")
 	}
 }
+
+func TestQualificationImagePlanMatchesTheGroupPullSet(t *testing.T) {
+	app, _ := qualificationFixture(t)
+	images, err := app.ImagePlan([]string{"core"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, group := range app.app.GetServiceGroups() {
+		if group.ID == "core" {
+			want = sortedUnique(group.Images)
+		}
+	}
+	if len(want) == 0 || strings.Join(images, ",") != strings.Join(want, ",") {
+		t.Fatalf("image plan %v differs from the core pull set %v", images, want)
+	}
+	if _, err := app.ImagePlan([]string{"admet"}); err == nil {
+		t.Fatal("locked group accepted as an image plan")
+	}
+}

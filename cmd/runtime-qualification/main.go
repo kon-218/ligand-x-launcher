@@ -70,7 +70,7 @@ func run(input io.Reader, output io.Writer) error {
 		return fmt.Errorf("trailing request data")
 	}
 	switch req.Action {
-	case "install", "start", "configure", "status":
+	case "install", "start", "configure", "status", "plan":
 	default:
 		return fmt.Errorf("unknown qualification action")
 	}
@@ -79,7 +79,7 @@ func run(input io.Reader, output io.Writer) error {
 		return err
 	}
 	defer app.Close()
-	var intendedServices []string
+	var intendedServices, intendedImages []string
 	switch req.Action {
 	case "install":
 		var upgrade *launcher.QualificationUpgrade
@@ -103,6 +103,12 @@ func run(input io.Reader, output io.Writer) error {
 		_, err = app.Install(req.BundlePath, req.Version, upgrade)
 	case "configure":
 		err = app.Configure(req.EnvPath, req.LicensePath, req.Groups)
+	case "plan":
+		// Read-only: the services and images a start of these groups needs.
+		intendedServices, err = app.ServicePlan(req.Groups)
+		if err == nil {
+			intendedImages, err = app.ImagePlan(req.Groups)
+		}
 	case "start":
 		intendedServices, err = app.ServicePlan(req.Groups)
 		if err == nil {
@@ -112,6 +118,9 @@ func run(input io.Reader, output io.Writer) error {
 	result := map[string]interface{}{"schema": "ligandx-launcher-qualification/1", "qualification_only": true, "action": req.Action, "ok": err == nil, "status": app.Status(), "events": app.EventCounts(), "elapsed_seconds": time.Since(start).Seconds()}
 	if intendedServices != nil {
 		result["requested_services"] = intendedServices
+	}
+	if intendedImages != nil {
+		result["requested_images"] = intendedImages
 	}
 	// Never serialize request contents: environment and license inputs are private.
 	if err != nil {
