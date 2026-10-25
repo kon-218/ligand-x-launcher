@@ -2527,14 +2527,20 @@ func waitRabbitMQApplication(ctx context.Context, containerName string) error {
 
 // commandFailure reports a failed admin command without the secret it was
 // given: rabbitmqctl echoes its arguments and psql its failing statement.
-func commandFailure(err error, out []byte, secret string) error {
-	return fmt.Errorf("%v: %s", err, strings.ReplaceAll(strings.TrimSpace(string(out)), secret, "<redacted>"))
+// Pass every form the secret took on the command line, longest first.
+func commandFailure(err error, out []byte, secrets ...string) error {
+	text := strings.TrimSpace(string(out))
+	for _, secret := range secrets {
+		text = strings.ReplaceAll(text, secret, "<redacted>")
+	}
+	return fmt.Errorf("%v: %s", err, text)
 }
 
 func alterPostgresPassword(containerName, username, password string) error {
-	sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s';", username, strings.ReplaceAll(password, "'", "''"))
+	escaped := strings.ReplaceAll(password, "'", "''")
+	sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s';", username, escaped)
 	if out, err := exec.Command("docker", "exec", containerName, "psql", "-U", username, "-d", username, "-c", sql).CombinedOutput(); err != nil {
-		return commandFailure(err, out, password)
+		return commandFailure(err, out, escaped, password)
 	}
 	return nil
 }

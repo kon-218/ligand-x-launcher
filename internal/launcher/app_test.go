@@ -471,7 +471,8 @@ func TestCredentialFailuresDoNotEchoThePassword(t *testing.T) {
 			t.Fatalf("rabbitmq error for %q leaks the password or is missing: %v", password, err)
 		}
 		err = alterPostgresPassword("qualification-db", "ligandx", password)
-		if err == nil || strings.Contains(err.Error(), password) {
+		escaped := strings.ReplaceAll(password, "'", "''")
+		if err == nil || strings.Contains(err.Error(), password) || strings.Contains(err.Error(), escaped) {
 			t.Fatalf("postgres error for %q leaks the password or is missing: %v", password, err)
 		}
 	}
