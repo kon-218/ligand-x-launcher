@@ -386,6 +386,44 @@ fi
 	}
 }
 
+func TestRabbitMQCredentialsAcceptLeadingDashPassword(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	t.Setenv("RABBITMQ_DASH_CALLS", log)
+	// base64url secrets can start with '-'. rabbitmqctl parses any such
+	// positional argument as option flags unless `--` ends option parsing.
+	script := `#!/bin/sh
+shift 4
+[ "$1" = rabbitmq-diagnostics ] && exit 0
+tool=$1 command=$2
+shift 2
+for arg in "$@"; do
+  [ "$arg" = -- ] && break
+  case "$arg" in -p) ;; -*) echo "Error (argument validation): Invalid options for this command: $arg" >&2; exit 64 ;; esac
+done
+printf '%s:%s\n' "$tool" "$command" >> "$RABBITMQ_DASH_CALLS"
+if [ "$command" = change_password ]; then
+  echo no_such_user >&2
+  exit 69
+fi
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := reconcileRabbitMQUser("qualification-broker", "fixture-user", "-XSa-fixture"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "rabbitmqctl:change_password\nrabbitmqctl:add_user\nrabbitmqctl:set_permissions\nrabbitmqctl:set_user_tags\n"
+	if string(calls) != want {
+		t.Fatalf("leading-dash password not passed as a positional argument: %s", calls)
+	}
+}
+
 func TestRabbitMQApplicationReadinessHasBoundedWait(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nexit 69\n"), 0700); err != nil {
