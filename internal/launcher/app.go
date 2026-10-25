@@ -2527,20 +2527,21 @@ func waitRabbitMQApplication(ctx context.Context, containerName string) error {
 	}
 }
 
+// `--` ends rabbitmqctl option parsing: generated base64url passwords can start with `-`.
 func reconcileRabbitMQUser(containerName, username, password string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := waitRabbitMQApplication(ctx, containerName); err != nil {
 		return err
 	}
-	changeCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "change_password", username, password)
+	changeCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "change_password", "--", username, password)
 	if out, err := changeCmd.CombinedOutput(); err == nil {
 		return ensureRabbitMQUserAccess(containerName, username)
 	} else if !strings.Contains(strings.ToLower(string(out)), "no_such_user") {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	addCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "add_user", username, password)
+	addCmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerName, "rabbitmqctl", "add_user", "--", username, password)
 	if out, err := addCmd.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(out)), "user_already_exists") {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}

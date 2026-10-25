@@ -1684,10 +1684,7 @@ services:
     security_opt: *id004
     cap_drop: *id005
     image: redis@sha256:520775a41a63e77e06c73e35d2fd9cc15921a609516818796b4ecbb813078bc7
-    cap_add:
-    - CHOWN
-    - SETUID
-    - SETGID
+    user: redis
     stop_grace_period: 30s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-redis
     hostname: redis
@@ -1727,10 +1724,7 @@ services:
     security_opt: *id004
     cap_drop: *id005
     image: postgres@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb
-    cap_add:
-    - CHOWN
-    - SETUID
-    - SETGID
+    user: postgres
     stop_grace_period: 60s
     container_name: ${LIGANDX_INFRA_CONTAINER_PREFIX:-ligandx}-postgres
     networks:
