@@ -9,7 +9,6 @@ x-runtime-username: LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
 x-runtime-password: LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
 x-runtime-internal-secret: INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
   (see .env.example)}
-x-runtime-image-digest: LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
 x-runtime-gateway-url: GATEWAY_URL=http://gateway:8000
 x-hardening-default:
   security_opt: &id004
@@ -179,7 +178,7 @@ services:
     - LIGANDX_LICENSE_FILE=/app/data/license/ligandx-license.json
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_GATEWAY_IMAGE_DIGEST:-}
     volumes:
     - runtime_license:/app/data/license:ro
     - runtime_settings:/app/data/settings
@@ -1031,7 +1030,7 @@ services:
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_QC_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${PRO_VERSION:-${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
@@ -1100,7 +1099,7 @@ services:
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_GPU_SHORT_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=${LIGANDX_GPU_SHORT_IMAGE:-ghcr.io/kon-218/ligand-x/worker-gpu-short:${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
@@ -1168,7 +1167,7 @@ services:
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_GPU_LONG_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=${LIGANDX_GPU_LONG_IMAGE:-${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-gpu-long:${PRO_VERSION:-${VERSION:-latest}}}
     - RBFE_OUTPUT_DIR=/app/data/rbfe_outputs
     - ABFE_OUTPUT_DIR=/app/data/abfe_outputs
@@ -1237,7 +1236,7 @@ services:
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_CPU_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
     depends_on:
       scientific-artifact-init:
@@ -1300,7 +1299,7 @@ services:
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_CONTROL_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=ghcr.io/kon-218/ligand-x/worker-cpu:${VERSION:-latest}
     depends_on:
       scientific-artifact-init:
@@ -1374,7 +1373,7 @@ services:
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_REINVENT_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-reinvent:${PRO_VERSION:-${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
@@ -1443,7 +1442,7 @@ services:
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_PROTO_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=${LIGANDX_PROTO_IMAGE:-ghcr.io/kon-218/ligand-x/worker-proto:${VERSION:-latest}}
     depends_on:
       scientific-artifact-init:
@@ -1525,7 +1524,7 @@ services:
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
-    - LIGANDX_IMAGE_DIGEST=${LIGANDX_IMAGE_DIGEST:-}
+    - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_BIOEMU_IMAGE_DIGEST:-}
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully
