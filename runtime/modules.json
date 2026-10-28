@@ -91,7 +91,8 @@
       "entitlement_id": "pocket_finder",
       "id": "pocket_finder",
       "job_types": [
-        "pocket_finder"
+        "pocket_finder",
+        "cryptic_pockets"
       ],
       "maturity": "stable",
       "name": "Pocket Finder",
