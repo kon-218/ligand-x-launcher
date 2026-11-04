@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -475,7 +476,8 @@ class SuperviseTests(unittest.TestCase):
             with mock.patch.object(probe, "terminate_group") as reaper:
                 code, timed_out = probe.supervise(["true"], {}, Path(tmp) / "child.log", 2.0,
                                                   popen=lambda *a, **k: stuck, now=clock,
-                                                  pause=clock.advance)
+                                                  pause=clock.advance, subtree=lambda pid: {pid},
+                                                  sweep=lambda pid, expected=None: [])
             reaper.assert_called_once_with(stuck)
         self.assertTrue(timed_out)
         self.assertEqual(code, -1)
@@ -490,6 +492,82 @@ class SuperviseTests(unittest.TestCase):
                                                   now=clock, pause=clock.advance)
             reaper.assert_not_called()
         self.assertEqual((code, timed_out), (3, False))
+
+    def test_a_descendant_that_survives_the_sweep_aborts_the_probe(self):
+        """The supervisor must not report over an owned process it could not reap."""
+        clock = Clock()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(probe, "terminate_group"):
+                with self.assertRaisesRegex(probe.ProbeFailure, "survived cleanup"):
+                    probe.supervise(["true"], {}, Path(tmp) / "child.log", 2.0,
+                                    popen=lambda *a, **k: FakeProcess(100), now=clock,
+                                    pause=clock.advance, subtree=lambda pid: {pid, 777},
+                                    sweep=lambda pid, expected=None: [
+                                        {"pid": 777, "pgid": 777, "survived": True}])
+
+
+class RealTimeoutCleanupTests(unittest.TestCase):
+    """Real processes only: faked process APIs cannot prove that nothing is orphaned."""
+
+    # The child records its own pid, spawns a separate-session grandchild that records itself,
+    # and both hang; the supervisor must reap both. Marker names pin which pids this test owns.
+    GRANDCHILD_SCRIPT = ("import os,sys,time;"
+                         "open(sys.argv[1],\\\"w\\\").write(str(os.getpid()));"
+                         "time.sleep(600)")
+    HANG = ("import os, subprocess, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            f"subprocess.Popen([sys.executable, '-c', \"{GRANDCHILD_SCRIPT}\", sys.argv[2]], "
+            "start_new_session=True)\n"
+            "time.sleep(600)\n")
+
+    def wait_for_file(self, path: Path, limit: float = 10.0) -> bool:
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            if path.is_file():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def recorded_pids(self, root: Path) -> list[int]:
+        return sorted(int(entry.read_text().strip()) for entry in root.glob("owned.*")
+                      if entry.read_text().strip().isdigit())
+
+    def supervise_hanging_tree(self, root: Path, hang: str) -> tuple[int, bool]:
+        cmd = [sys.executable, "-c", hang, str(root / "owned.child"),
+               str(root / "owned.grandchild")]
+        log_path = root / "child.log"
+        with open(log_path, "wb") as log_handle:
+            proc = subprocess.Popen(cmd, start_new_session=True, stdout=log_handle,
+                                    stderr=subprocess.STDOUT)
+            self.assertTrue(self.wait_for_file(root / "owned.grandchild"),
+                            "the separate-session descendant never started")
+            return probe.supervise(cmd, {}, log_path, 1.0, popen=lambda *a, **k: proc,
+                                   now=time.monotonic, pause=lambda s: time.sleep(s))
+
+    def test_a_timeout_reaps_a_separate_session_descendant(self):
+        """start_new_session escapes the outer group signal; the sweep must still get it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            code, timed_out = self.supervise_hanging_tree(Path(tmp), self.HANG)
+            self.assertTrue(timed_out)
+            self.assertEqual(code, -signal.SIGTERM)
+            # Both recorded processes must be gone (no live task with that identity).
+            survivors = [pid for pid in self.recorded_pids(Path(tmp)) if probe._alive(pid)]
+            self.assertEqual(survivors, [],
+                             "an owned separate-session descendant survived the timeout")
+
+    def test_a_descendant_that_ignores_sigterm_is_still_swept(self):
+        """The review's exact hazard: SIGTERM never runs the child's cleanup of its artifact."""
+        hang = self.HANG.replace("import os, subprocess, sys, time\n",
+                                 "import os, signal, subprocess, sys, time\n"
+                                 "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            code, timed_out = self.supervise_hanging_tree(Path(tmp), hang)
+            self.assertTrue(timed_out)
+            # The child ignores SIGTERM, so terminate_group escalates to SIGKILL.
+            self.assertEqual(code, -signal.SIGKILL)
+            survivors = [pid for pid in self.recorded_pids(Path(tmp)) if probe._alive(pid)]
+            self.assertEqual(survivors, [],
+                             "a SIGTERM-ignoring owned descendant survived the timeout")
 
 
 class ChildProbeTests(unittest.TestCase):

@@ -106,6 +106,26 @@ The probe runs in two stages:
    descendant), reads a bounded accessibility tree, then terminates the launcher's
    process group.
 
+## Process cleanup on timeout
+
+The artifact is launched with `start_new_session=True`, so it lives in its own process
+group and session: when the supervisor's deadline expires, the outer group signal never
+reaches it, and SIGTERM does not run the child's own cleanup. The supervisor therefore:
+
+1. Snapshots the child's descendants (pid + process group) **before** killing the parent,
+   while the child is still alive to own them.
+2. Reaps the outer group (`terminate_group`: SIGTERM, then SIGKILL).
+3. Sweeps every snapshotted survivor: identity is re-checked against the snapshot
+   (`/proc/<pid>/stat` pid field, non-zombie state, unchanged pgid), so a recycled PID is
+   never signalled. Only groups proven foreign to the caller are killed by group; all
+   others die by direct signal. Callers' own process groups and sessions are never
+   signalled.
+4. If any verified-owned process survives the sweep, the probe fails honestly rather than
+   reporting over an orphan it cannot reap.
+
+On the successful path the child reaps the artifact itself before exiting, so no sweep
+runs and no post-exit pid is ever touched.
+
 The probe waits for **rendered WebKit content**, not just the window shell. WebKitGTK
 exposes the application and frame nodes before the page's DOM is rendered over AT-SPI.
 A tree of only structural roles (application, frame, filler) with no meaningful
@@ -197,7 +217,10 @@ Run the unit tests (no display required):
 
 Tests use fake AT-SPI and process interfaces to prove timeout, failure, PID binding,
 shell detection, and provenance semantics without requiring Xvfb or the desktop
-binary.
+binary. Real-process regressions (no fakes) start a hanging child that spawns a
+separate-session descendant — one case where the descendant also ignores SIGTERM, the
+exact shipped-artifact hazard — and assert no owned process survives the supervisor's
+timeout cleanup.
 
 ## Limitations
 

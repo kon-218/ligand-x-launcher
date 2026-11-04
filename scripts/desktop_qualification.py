@@ -409,6 +409,77 @@ def terminate_group(proc, killpg: Callable = os.killpg, getpgid: Callable = os.g
     return proc.poll()
 
 
+def _alive(pid: int, proc_root: str = "/proc") -> bool:
+    """A pid is alive only while its /proc entry still names the same process.
+
+    The stat field (not comm, which a recycled pid can inherit) plus the zombie state pins
+    identity: a dead or reaped pid must never be signalled as if it were ours.
+    """
+    try:
+        with open(os.path.join(proc_root, str(pid), "stat")) as handle:
+            head, rest = handle.read().rsplit(") ", 1)
+        return head.split("(", 1)[1] == str(pid) and rest.split("\t", 1)[0] != "Z"
+    except (OSError, ValueError):
+        return False
+
+
+def sweep_owned_descendants(root_pid: int, kill: Callable = os.kill,
+                            getpgid: Callable = os.getpgid,
+                            subtree: Callable = pid_subtree,
+                            wait: Callable[[int], bool] = _alive,
+                            grace: float = 3.0,
+                            pause: Callable[[float], None] = time.sleep,
+                            expected: Optional[set[int]] = None) -> list[dict[str, Any]]:
+    """Kill verified descendants of root_pid that outlived it, without touching the parents.
+
+    The artifact launches with start_new_session=True, so on timeout the supervisor's group
+    signal never reaches it: SIGTERM does not run the child's cleanup. Identities (pid plus
+    process-group) are snapshotted before the parents die; afterwards each survivor is re-checked
+    against that snapshot, so a recycled pid is never signalled. Only groups proven foreign to the
+    caller are killed by group; everything else dies by direct signal. `expected` restricts the
+    sweep to pids snapshotted while the parent was still alive to own them.
+    """
+    if expected is None:
+        try:
+            candidates = sorted(subtree(root_pid) - {root_pid})
+        except OSError:
+            candidates = []
+    else:
+        candidates = sorted(expected - {root_pid})
+    victims = []
+    for pid in candidates:
+        try:
+            victims.append((pid, getpgid(pid)))
+        except OSError:
+            continue
+    reaped = []
+    for pid, pgid in victims:
+        # Once the parent is gone a new owner could adopt the process; /proc identity pins it.
+        if not wait(pid):
+            continue
+        try:
+            current_pgid = getpgid(pid)
+        except OSError:
+            continue
+        if current_pgid != pgid:
+            continue
+        record = {"pid": pid, "pgid": pgid, "killed_by": "group" if (
+            pgid > 0 and pgid != os.getpgid(0)) else "direct"}
+        try:
+            if record["killed_by"] == "group":
+                kill(pgid, signal.SIGKILL)
+            else:
+                kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        deadline = time.monotonic() + grace
+        while wait(pid) and time.monotonic() < deadline:
+            pause(0.05)
+        record["survived"] = wait(pid)
+        reaped.append(record)
+    return reaped
+
+
 def sandbox_environment(sandbox: Path, strip_bus: bool,
                         base: Optional[dict[str, str]] = None) -> dict[str, str]:
     """Isolated XDG roots for the probe; the child also drops any inherited display and bus."""
@@ -506,20 +577,43 @@ def child_command(cfg: ProbeConfig, sandbox: Path, result_path: Path, python: st
 
 def supervise(cmd: Sequence[str], env: dict[str, str], log_path: Path, timeout: float,
               popen: Callable = subprocess.Popen, now: Callable[[], float] = time.monotonic,
-              pause: Callable[[float], None] = time.sleep) -> tuple[int, bool]:
-    """Run the isolated child under one end-to-end deadline and always reap its group."""
+              pause: Callable[[float], None] = time.sleep,
+              subtree: Callable = pid_subtree,
+              sweep: Callable = sweep_owned_descendants) -> tuple[int, bool]:
+    """Run the isolated child under one end-to-end deadline and always reap its group.
+
+    The artifact runs in its own session, so the outer group signal alone cannot reach it once
+    the child is killed. Descendants are snapshotted while the child is still alive to parent
+    them, then swept after the parents die; a descendant that survives the sweep aborts the
+    probe rather than reporting success over an orphan.
+    """
     with open(log_path, "wb") as handle:
         proc = popen(list(cmd), stdout=handle, stderr=subprocess.STDOUT, env=env,
                      start_new_session=True)
-        deadline, timed_out = now() + timeout, False
+        deadline, timed_out, owned = now() + timeout, False, set()
         while proc.poll() is None:
             if now() >= deadline:
                 timed_out = True
                 break
             pause(0.25)
+        survivors = []
         if timed_out or proc.poll() is None:
+            # Snapshot while the child still parents its separate-session artifact; after the
+            # parent dies a new owner could adopt it and a recycled pid could masquerade.
+            try:
+                owned = subtree(proc.pid) - {proc.pid}
+            except OSError:
+                owned = set()
             terminate_group(proc)
-    return (proc.returncode if proc.returncode is not None else -1), timed_out
+        if owned:
+            survivors = [row["pid"] for row in sweep(proc.pid, expected=owned)
+                         if row.get("survived")]
+        code = proc.returncode if proc.returncode is not None else -1
+        if survivors:
+            raise ProbeFailure(f"after the deadline {len(survivors)} process(es) spawned by the "
+                               f"isolated child survived cleanup (pids {survivors}); the probe "
+                               f"refuses to report over orphans it cannot reap")
+    return code, timed_out
 
 
 def judge(payload: dict[str, Any], expect: Sequence[str]) -> tuple[list[str], list[dict]]:
