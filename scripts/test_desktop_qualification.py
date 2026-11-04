@@ -338,13 +338,14 @@ class ObserveTests(unittest.TestCase):
 
     def test_the_depth_budget_truncates(self):
         node = FakeAccessible("push-button", "Download runtime", pid=100)
-        for _ in range(6):
+        for _ in range(15):
             node = FakeAccessible("filler", "", children=[node], pid=100)
-        result = self.observe(FakeProcess(100),
-                              FakeAccessible("application", "ligandx", children=[node], pid=100),
-                              budget=probe.Budget(max_nodes=100, max_depth=3))
-        self.assertEqual(result["truncated"], "max_depth=3")
-        self.assertLessEqual(max(item["depth"] for item in result["nodes"]), 3)
+        app = FakeAccessible("application", "ligandx", children=[node], pid=100)
+        reader = reader_for(app)
+        nodes, truncated = probe.collect_tree(app, reader, probe.Budget(max_nodes=100, max_depth=10), 10.0,
+                                              now=Clock(start=0.0, step=0.0))
+        self.assertEqual(truncated, "max_depth=10")
+        self.assertLessEqual(max(item.depth for item in nodes), 10)
 
     def test_traversal_stops_at_the_deadline(self):
         wide = FakeAccessible("application", "ligandx", pid=100,
@@ -370,6 +371,45 @@ class ObserveTests(unittest.TestCase):
         result = probe.observe(FakeProcess(100), reader, 10.0, probe.Budget(), **self.kwargs)
         self.assertEqual(result["nodes"][-1]["role"], "unknown")
         self.assertIn("role: RuntimeError: simulated get_role failure", reader.errors[0])
+
+    def test_a_stable_shell_followed_by_rendered_controls_settles_on_content(self):
+        """WebKitGTK exposes the shell first, then fills in controls; the probe must wait."""
+        shell = FakeAccessible("application", "ligandx", pid=100,
+                               children=[FakeAccessible("frame", "Ligand-X", pid=100,
+                                                       children=[FakeAccessible("filler", "", pid=100)])])
+        rendered = first_run_tree(pid=100)
+        reads = [shell, shell, rendered, rendered]
+        read_index = [0]
+
+        def fake_applications():
+            idx = min(read_index[0], len(reads) - 1)
+            read_index[0] += 1
+            app = reads[idx]
+            return [(app.get_name(), app.get_process_id(), app)]
+
+        reader = reader_for()
+        reader.applications = fake_applications
+        result = probe.observe(FakeProcess(100), reader, 20.0, probe.Budget(), **self.kwargs)
+        self.assertTrue(result["settled"])
+        self.assertFalse(result.get("shell_only", False))
+        self.assertEqual({node["name"] for node in result["clickable"]},
+                         {"Download runtime", "Choose version"})
+
+    def test_a_permanent_shell_fails_honestly_at_the_deadline(self):
+        """A shell that never fills in must fail, not silently succeed."""
+        shell = FakeAccessible("application", "ligandx", pid=100,
+                               children=[FakeAccessible("frame", "Ligand-X", pid=100,
+                                                       children=[FakeAccessible("filler", "", pid=100)])])
+        clock = Clock(start=0.0, step=0.5)
+
+        def fake_applications():
+            return [(shell.get_name(), shell.get_process_id(), shell)]
+
+        reader = reader_for()
+        reader.applications = fake_applications
+        with self.assertRaisesRegex(probe.ProbeFailure, "only the window shell"):
+            probe.observe(FakeProcess(100), reader, 3.0, probe.Budget(),
+                         now=clock, pause=clock.advance, proc_root=str(self.proc_root))
 
 
 class TerminationTests(unittest.TestCase):

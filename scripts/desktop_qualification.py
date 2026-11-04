@@ -46,6 +46,15 @@ BUS_KEYS = ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS", "NO_AT_BRIDGE")
 XDG_KEYS = ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")
 CLICKABLE = ("push button", "toggle button", "radio button", "check box", "link", "entry",
              "text", "combo box", "slider")
+# AT-SPI role names use both hyphenated and space-separated spellings across toolkits; normalize
+# to the space-separated form the CLICKABLE tuple and tests expect.
+ROLE_CANONICAL = {"push-button": "push button", "toggle-button": "toggle button",
+                  "radio-button": "radio button", "check-box": "check box",
+                  "combo-box": "combo box"}
+
+
+def normalize_role(role: str) -> str:
+    return ROLE_CANONICAL.get(role, role)
 
 
 class ProbeFailure(Exception):
@@ -251,7 +260,7 @@ def collect_tree(root, reader: AtspiReader, budget: Budget, deadline: float,
                                       if len(nodes) >= budget.max_nodes
                                       else f"max_depth={budget.max_depth}")
             continue
-        role = reader.role(ref)
+        role = normalize_role(reader.role(ref))
         # Actions are read only for controls: asking a plain node for them makes the launcher's
         # own AT-SPI provider log a critical and can fail the call.
         nodes.append(Node(role, reader.name(ref), depth, path, reader.states(ref),
@@ -261,30 +270,60 @@ def collect_tree(root, reader: AtspiReader, budget: Budget, deadline: float,
     return nodes, truncated or ("deadline" if now() >= deadline else "")
 
 
+def is_shell_only(nodes: Sequence[Node]) -> bool:
+    """True when the tree is the window frame without any rendered WebKit content.
+
+    WebKitGTK registers the application and frame nodes before the page's DOM is exposed over
+    AT-SPI. A tree of only structural roles (application, frame, filler, window, dialog, panel)
+    with no meaningful control names is the shell, not a rendered screen. A node with a clickable
+    role or a non-structural name indicates rendered content.
+    """
+    structural = {"application", "frame", "filler", "window", "dialog", "panel", "document web",
+                  "document frame"}
+    for node in nodes:
+        if node.role in CLICKABLE:
+            return False
+        if node.role not in structural and node.role != "unknown" and node.name.strip():
+            return False
+    named_controls = [node for node in nodes
+                     if node.name.strip() and node.role not in ("application", "frame", "filler")]
+    return not named_controls
+
+
 def observe(proc, reader: AtspiReader, deadline: float, budget: Budget,
             now: Callable[[], float] = time.monotonic,
             pause: Callable[[float], None] = time.sleep,
             proc_root: str = "/proc") -> dict[str, Any]:
-    """Bind the launched PID, then re-read its tree until two consecutive reads agree.
+    """Bind the launched PID, then re-read its tree until rendered content settles.
 
     WebKitGTK builds the page's accessibility tree lazily: the first reads after AT-SPI
     registration report only the window shell, so a single read cannot tell an empty screen from a
-    screen that is not exposed yet. Two identical reads can. A tree still changing at the deadline
-    is returned as unsettled evidence rather than silently accepted.
+    screen that is not exposed yet. Two identical *content-bearing* reads can. A shell-only tree
+    is never accepted as settled, even if it repeats; the probe keeps polling until real controls
+    appear or the deadline expires.
     """
-    last, signature, empty_bound_seen = None, None, False
+    last, signature, empty_bound_seen, shell_stabilized_at = None, None, False, None
     others: list[dict] = []
     while True:
         code = proc.poll()
         if code is not None:
             raise ProbeFailure(f"desktop artifact exited before its tree was readable "
                                f"(exit code {code})")
-        if now() >= deadline:
-            if last is not None:
+        current_time = now()
+        if current_time >= deadline:
+            if last is not None and not is_shell_only(
+                    [Node(**{k: v for k, v in node.items()
+                             if k != "ref"}) if isinstance(node, dict) else node
+                     for node in (last.get("nodes") or [])]):
                 return last
             if empty_bound_seen:
                 raise ProbeFailure("the launched PID owns an AT-SPI application whose tree "
                                    "stayed empty (only the application node was reported)")
+            if shell_stabilized_at is not None:
+                raise ProbeFailure(
+                    f"the accessibility tree showed only the window shell (no rendered WebKit "
+                    f"controls) from t={shell_stabilized_at:.1f}s until the deadline at "
+                    f"t={current_time:.1f}s; the shell is not a first-run screen")
             raise ProbeFailure(f"no AT-SPI application bound to PID {proc.pid} before the "
                                f"deadline; other applications on the bus: {others}")
         bound, others = bind_application(reader.applications(),
@@ -293,17 +332,24 @@ def observe(proc, reader: AtspiReader, deadline: float, budget: Budget,
             name, pid, ref = bound
             nodes, truncated = collect_tree(ref, reader, budget, deadline, now)
             if len(nodes) > 1:
+                shell_only = is_shell_only(nodes)
                 current = tuple((node.role, node.name) for node in nodes)
+                if shell_only:
+                    if shell_stabilized_at is None:
+                        shell_stabilized_at = current_time
+                    # A shell that repeats is still a shell; do not settle on it.
+                    signature = None
                 last = {"application": {"name": name, "process_id": pid,
                                         "toolkit": reader.toolkit(ref)},
                         "nodes": [node.to_dict() for node in nodes],
                         "clickable": [node.to_dict() for node in nodes
                                       if node.role in CLICKABLE],
                         "other_applications": others, "truncated": truncated,
-                        "settled": current == signature}
-                signature = current
-                if last["settled"]:
+                        "settled": not shell_only and current == signature,
+                        "shell_only": shell_only}
+                if not shell_only and current == signature:
                     return last
+                signature = current
             else:
                 empty_bound_seen = True
         pause(0.5)
