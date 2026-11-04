@@ -477,7 +477,8 @@ class SuperviseTests(unittest.TestCase):
                 code, timed_out = probe.supervise(["true"], {}, Path(tmp) / "child.log", 2.0,
                                                   popen=lambda *a, **k: stuck, now=clock,
                                                   pause=clock.advance, subtree=lambda pid: {pid},
-                                                  sweep=lambda pid, expected=None: [])
+                                                  identify=lambda pid: ("fixture", pid),
+                                    sweep=lambda pid, expected=None: [])
             reaper.assert_called_once_with(stuck)
         self.assertTrue(timed_out)
         self.assertEqual(code, -1)
@@ -502,6 +503,7 @@ class SuperviseTests(unittest.TestCase):
                     probe.supervise(["true"], {}, Path(tmp) / "child.log", 2.0,
                                     popen=lambda *a, **k: FakeProcess(100), now=clock,
                                     pause=clock.advance, subtree=lambda pid: {pid, 777},
+                                    identify=lambda pid: ("fixture", pid),
                                     sweep=lambda pid, expected=None: [
                                         {"pid": 777, "pgid": 777, "survived": True}])
 
@@ -519,6 +521,25 @@ class RealTimeoutCleanupTests(unittest.TestCase):
             f"subprocess.Popen([sys.executable, '-c', \"{GRANDCHILD_SCRIPT}\", sys.argv[2]], "
             "start_new_session=True)\n"
             "time.sleep(600)\n")
+
+    @staticmethod
+    def running_independently(pid):
+        try:
+            state = next(line for line in Path(f"/proc/{pid}/status").read_text().splitlines()
+                         if line.startswith("State:"))
+            return "Z (zombie)" not in state and "X (dead)" not in state
+        except FileNotFoundError:
+            return False
+
+    def test_current_process_is_alive(self):
+        self.assertTrue(probe._alive(os.getpid()))
+        self.assertTrue(self.running_independently(os.getpid()))
+
+    def test_reused_pid_is_not_signalled(self):
+        with mock.patch.object(probe, "process_identity", return_value=("new", 42)), \
+             mock.patch.object(probe.os, "pidfd_open") as opened:
+            self.assertEqual(probe.sweep_owned_descendants(1, expected={42: ("old", 42)}), [])
+        opened.assert_not_called()
 
     def wait_for_file(self, path: Path, limit: float = 10.0) -> bool:
         deadline = time.monotonic() + limit
@@ -541,6 +562,8 @@ class RealTimeoutCleanupTests(unittest.TestCase):
                                     stderr=subprocess.STDOUT)
             self.assertTrue(self.wait_for_file(root / "owned.grandchild"),
                             "the separate-session descendant never started")
+            identities = {pid: probe.process_identity(pid) for pid in self.recorded_pids(root)}
+            self.addCleanup(lambda: probe.sweep_owned_descendants(proc.pid, expected=identities))
             return probe.supervise(cmd, {}, log_path, 1.0, popen=lambda *a, **k: proc,
                                    now=time.monotonic, pause=lambda s: time.sleep(s))
 
@@ -551,7 +574,7 @@ class RealTimeoutCleanupTests(unittest.TestCase):
             self.assertTrue(timed_out)
             self.assertEqual(code, -signal.SIGTERM)
             # Both recorded processes must be gone (no live task with that identity).
-            survivors = [pid for pid in self.recorded_pids(Path(tmp)) if probe._alive(pid)]
+            survivors = [pid for pid in self.recorded_pids(Path(tmp)) if self.running_independently(pid)]
             self.assertEqual(survivors, [],
                              "an owned separate-session descendant survived the timeout")
 
@@ -565,7 +588,7 @@ class RealTimeoutCleanupTests(unittest.TestCase):
             self.assertTrue(timed_out)
             # The child ignores SIGTERM, so terminate_group escalates to SIGKILL.
             self.assertEqual(code, -signal.SIGKILL)
-            survivors = [pid for pid in self.recorded_pids(Path(tmp)) if probe._alive(pid)]
+            survivors = [pid for pid in self.recorded_pids(Path(tmp)) if self.running_independently(pid)]
             self.assertEqual(survivors, [],
                              "a SIGTERM-ignoring owned descendant survived the timeout")
 
