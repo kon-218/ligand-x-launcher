@@ -568,11 +568,17 @@ services:
     networks:
     - backend
     volumes:
+    - ${MMSEQS2_HOST_PATH:-/opt/mmseqs}:/opt/mmseqs:ro
+    - ${MSA_DATABASES_HOST_PATH:-./data/msa_databases}:/data/msa_databases:ro
     - msa_cache:/app/data/msa_cache
     - runtime_settings:/app/data/settings
     expose:
     - '8009'
     environment:
+    - MSA_MMSEQS_BINARY=/opt/mmseqs/bin/mmseqs
+    - MMSEQS2_DATABASE=${MMSEQS2_DATABASE:-/data/msa_databases/uniref90}
+    - MSA_LOCAL_THREADS=${MSA_LOCAL_THREADS:-2}
+    - MSA_LOCAL_TIMEOUT_SECONDS=${MSA_LOCAL_TIMEOUT_SECONDS:-1800}
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
@@ -897,6 +903,8 @@ services:
     networks:
     - backend
     volumes:
+    - ${MMSEQS2_HOST_PATH:-/opt/mmseqs}:/opt/mmseqs:ro
+    - ${MSA_DATABASES_HOST_PATH:-./data/msa_databases}:/data/msa_databases:ro
     - msa_cache:/app/data/msa_cache
     - boltz_outputs:/app/data/boltz_results_input
     - runtime_settings:/app/data/settings
@@ -907,6 +915,10 @@ services:
     expose:
     - '8005'
     environment:
+    - MSA_MMSEQS_BINARY=/opt/mmseqs/bin/mmseqs
+    - MMSEQS2_DATABASE=${MMSEQS2_DATABASE:-/data/msa_databases/uniref90}
+    - MSA_LOCAL_THREADS=${MSA_LOCAL_THREADS:-2}
+    - MSA_LOCAL_TIMEOUT_SECONDS=${MSA_LOCAL_TIMEOUT_SECONDS:-1800}
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_USERNAME=${LIGANDX_USERNAME:-admin}
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
@@ -1223,6 +1235,10 @@ services:
     networks:
     - backend
     environment:
+    - MSA_MMSEQS_BINARY=/opt/mmseqs/bin/mmseqs
+    - MMSEQS2_DATABASE=${MMSEQS2_DATABASE:-/data/msa_databases/uniref90}
+    - MSA_LOCAL_THREADS=${MSA_LOCAL_THREADS:-2}
+    - MSA_LOCAL_TIMEOUT_SECONDS=${MSA_LOCAL_TIMEOUT_SECONDS:-1800}
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - PYTHONIOENCODING=utf-8
@@ -1248,6 +1264,8 @@ services:
       postgres:
         condition: service_healthy
     volumes:
+    - ${MMSEQS2_HOST_PATH:-/opt/mmseqs}:/opt/mmseqs:ro
+    - ${MSA_DATABASES_HOST_PATH:-./data/msa_databases}:/data/msa_databases:ro
     - docking_outputs:/app/data/docking_outputs
     - msa_cache:/app/data/msa_cache
     - runtime_settings:/app/data/settings
