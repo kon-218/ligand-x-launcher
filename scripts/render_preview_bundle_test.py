@@ -22,7 +22,7 @@ services:
   gateway:
     image: ghcr.io/kon-218/ligand-x/gateway:${VERSION}
   worker-proto:
-    profiles: ["preview"]
+    profiles: ["preview", "preview-protein-tools"]
     image: ghcr.io/kon-218/ligand-x/worker-proto:${VERSION}
     environment:
       QUEUE: proto-gpu
@@ -76,7 +76,7 @@ class PreviewBundleRenderTest(unittest.TestCase):
             capture_output=True, text=True,
         )
 
-    def test_stable_default_excludes_pilot_and_matches_renderer(self):
+    def test_stable_default_keeps_previews_dormant_and_matches_renderer(self):
         stable = Path(self.tmp.name) / "stable.yml"
         subprocess.run(
             [sys.executable, str(RENDERER), str(self.canonical), str(stable)],
@@ -86,10 +86,10 @@ class PreviewBundleRenderTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.output.read_bytes(), stable.read_bytes())
         text = self.output.read_text(encoding="utf-8")
-        self.assertNotIn("worker-proto:", text)
         self.assertNotIn("worker-kinetics:", text)
         # FEAT-27: the dormant BioEmu preview stays, under its own profile only.
         services = yaml.safe_load(text)["services"]
+        self.assertEqual(services["worker-proto"]["profiles"], ["preview-protein-tools"])
         self.assertEqual(services["worker-bioemu"]["profiles"], ["preview-bioemu"])
         self.assertEqual(self.env_out.read_text(encoding="utf-8"), TEMPLATE)
         self.assertNotIn("PROTO_HOME=", self.env_out.read_text(encoding="utf-8"))
