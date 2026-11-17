@@ -281,6 +281,10 @@ type App struct {
 	// exercised without a running daemon.
 	composeConfigFn func(args []string) ([]byte, error)
 
+	// imageRepoDigestsFn overrides `docker image inspect` for imageDigestEnv
+	// (image_digests.go). Nil in production; tests inject it.
+	imageRepoDigestsFn func(ref string) ([]string, error)
+
 	// orcaProbeFn overrides the isolated `docker run` used to prove that the
 	// configured Linux ORCA install is executable by the QC worker runtime.
 	// Nil in production; tests inject it to inspect arguments without Docker.
@@ -1735,7 +1739,7 @@ func (a *App) runDockerComposeOnce(args []string, message string) error {
 
 	cmd := exec.Command("docker", args...)
 	cmd.Dir = a.projectPath
-	cmd.Env = a.composeEnv()
+	cmd.Env = a.composeRunEnv(args)
 
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
