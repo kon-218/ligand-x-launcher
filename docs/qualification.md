@@ -56,6 +56,16 @@ installed predecessor must stage those images itself and verify each product
 image against the predecessor's signed digests before `start`. Test
 projects have isolated launcher settings, logs, Compose names and infrastructure
 container names. Never use the adapter to uninstall a desktop installation.
+
+Every production start (desktop or `start` here) records which image each job ran
+in. Before `docker compose up`, the launcher resolves the image Compose will run for
+each service whose `LIGANDX_IMAGE_DIGEST` reads a `LIGANDX_<SERVICE>_IMAGE_DIGEST`
+variable to its registry digest (`docker image inspect … RepoDigests`) and passes
+`repository@sha256:…` in Compose's environment. Nothing is written to
+`.env.production`. A service whose image has no registry digest, or more than one for
+its repository, is left unset and its job records keep the tag; the launcher logs
+which. Candidate install scenarios therefore see the same exact-image records as
+the candidate's own stack (Core `docs/BUILD.md`, B-222).
 Cleanup must check the controller's owner marker and exact Compose project.
 
 ## Stable-to-candidate upgrade authorization
