@@ -17,6 +17,7 @@ import (
 	"ligandx-launcher/internal/hostmetrics"
 	"ligandx-launcher/internal/license"
 	"ligandx-launcher/internal/runtimebundle"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -3031,18 +3032,41 @@ func (a *App) ensureProductionEnv() error {
 		return nil
 	}
 
-	// Generate any missing secrets.
+	// Generate any missing secrets. Most are only filled when missing/placeholder:
+	// rotating a live POSTGRES/RABBITMQ/REDIS password would desync the data volume
+	// that was initialised with it, so a hand-set value there is preserved.
+	// INTERNAL_WORKER_SECRET backs no volume — it is a shared callback token every
+	// container re-reads at start — so a weak hand-set value ("ligandx") is rotated
+	// too, not just a CHANGE_ME placeholder (P1-F).
 	secretKeys := []string{"POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD", "QC_SECRET_KEY", "LIGANDX_PASSWORD", "FLOWER_PASSWORD", "INTERNAL_WORKER_SECRET"}
 	for _, key := range secretKeys {
-		if envfile.IsPlaceholder(cur[key]) {
-			v, err := generateAPIKey()
-			if err != nil {
-				return err
-			}
-			if err := setIfPlaceholder(key, v); err != nil {
-				return err
-			}
+		placeholder := envfile.IsPlaceholder(cur[key])
+		weakInternal := key == "INTERNAL_WORKER_SECRET" && !placeholder && !internalSecretMeetsFloor(cur[key])
+		if !placeholder && !weakInternal {
+			continue
 		}
+		v, err := generateAPIKey()
+		if err != nil {
+			return err
+		}
+		cur[key] = v
+		if err := a.setProductionEnvValue(key, v); err != nil {
+			return err
+		}
+		if weakInternal {
+			a.emitAndLog("launcher", fmt.Sprintf(
+				"Regenerated a weak INTERNAL_WORKER_SECRET in %s: the hand-set value did not meet the minimum strength floor. Workers and the gateway will use the new value on this start.",
+				a.productionEnvPath()))
+		}
+	}
+
+	// Startup gate (P1-F): after generation/rotation the internal callback secret
+	// must meet the strength floor. Reaching here with a weak value means the write
+	// did not take effect or the generator returned something weak — refuse to
+	// start rather than run with a token that lets anyone forge worker callbacks.
+	if !internalSecretMeetsFloor(cur["INTERNAL_WORKER_SECRET"]) {
+		return fmt.Errorf("INTERNAL_WORKER_SECRET in %s does not meet the minimum strength floor (>= %d high-entropy characters); it could not be regenerated automatically",
+			a.productionEnvPath(), internalSecretMinLen)
 	}
 
 	// Fixed identities.
@@ -4059,6 +4083,49 @@ func generateAPIKey() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// Strength floor for INTERNAL_WORKER_SECRET, the shared token workers use to
+// authenticate internal job-status callbacks to the gateway. A weak value lets
+// anyone who can reach the gateway forge worker callbacks, so the launcher both
+// generates a strong one and refuses to keep a weak hand-set one (P1-F).
+//
+// generateAPIKey emits 43 chars (base64url of 32 random bytes, ~256 bits); the
+// template documents `secrets.token_urlsafe(32)`, also 43 chars. These bounds
+// reject short, low-variety and low-entropy hand-set values ("ligandx",
+// "password", repeated patterns) while never rejecting a generated key or a
+// hex/base64 token of adequate length.
+const (
+	internalSecretMinLen            = 32  // characters; generated keys are 43
+	internalSecretMinDistinct       = 10  // distinct symbols; "ligandx"=7, "password"=8
+	internalSecretMinEntropyPerChar = 3.0 // bits/char; base64url~5.2, hex=4.0, "ligandx"~2.8
+)
+
+// internalSecretMeetsFloor reports whether v is strong enough to keep as the
+// INTERNAL_WORKER_SECRET. It is a heuristic floor, not a proof of randomness:
+// length, symbol variety and Shannon entropy of the observed distribution catch
+// the obvious weak values, but ordered repetition over a wide alphabet can still
+// pass. The generator — not this check — is the source of strength; this only
+// stops a weak hand-set value from silently persisting.
+func internalSecretMeetsFloor(v string) bool {
+	runes := []rune(v)
+	if len(runes) < internalSecretMinLen {
+		return false
+	}
+	counts := make(map[rune]int, len(runes))
+	for _, r := range runes {
+		counts[r]++
+	}
+	if len(counts) < internalSecretMinDistinct {
+		return false
+	}
+	n := float64(len(runes))
+	entropy := 0.0
+	for _, c := range counts {
+		p := float64(c) / n
+		entropy -= p * math.Log2(p)
+	}
+	return entropy >= internalSecretMinEntropyPerChar
 }
 
 func validateEnvCredential(label, value string, minLength int) error {
