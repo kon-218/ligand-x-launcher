@@ -1301,6 +1301,10 @@ func (a *App) devComposeArgs() []string {
 // compose` interpolates the whole model for every subcommand (up AND down), so
 // both paths must point at .env.production — compose only auto-loads `.env`.
 // For the public build we also guarantee the file exists first (idempotent).
+// The ensureProductionEnv call here only seeds/fills placeholders: stop and
+// read paths share these args, so it deliberately does not rotate the internal
+// secret or gate on its strength (P1-F). That policy runs in runDockerCompose
+// for a production `up` only.
 func (a *App) prodEnvArgs() []string {
 	_ = a.ensureProductionEnv()
 	if _, err := os.Stat(filepath.Join(a.projectPath, ".env.production")); err == nil {
@@ -1684,8 +1688,18 @@ func (a *App) validateUnlockedServices(services []string) error {
 }
 
 func (a *App) runDockerCompose(args []string, message string) error {
-	if isProductionUpCommand(args) && a.leaseActivationPending() {
-		return a.runProductionUpWithLeaseActivation(args, message)
+	if isProductionUpCommand(args) {
+		// P1-F: the internal-secret strength policy belongs to the production
+		// start path only. Every production `up` (StartServices, group/custom
+		// starts, restarts and the lease-activation upgrade) passes through
+		// here, while stop (`down`), pull and read invocations do not match and
+		// must never rotate the secret or gate on it.
+		if err := a.hardenInternalWorkerSecretForStart(); err != nil {
+			return err
+		}
+		if a.leaseActivationPending() {
+			return a.runProductionUpWithLeaseActivation(args, message)
+		}
 	}
 	return a.runDockerComposeDirect(args, message)
 }
@@ -2073,7 +2087,11 @@ func (a *App) failUpgradeInterruptedJobs(workersStoppedAt time.Time) error {
 		a.emitAndLog("launcher", fmt.Sprintf("Could not read the production environment to recover interrupted jobs: %v", err))
 		return err
 	}
-	secret := strings.TrimSpace(envfile.Parse(content)["INTERNAL_WORKER_SECRET"])
+	// Authenticate with the value Compose actually resolved for the gateway: a
+	// process-env override wins over .env.production (P1-F). Read-only — this
+	// recovery path never rotates the secret.
+	secret, _ := effectiveInternalWorkerSecret(envfile.Parse(content)["INTERNAL_WORKER_SECRET"])
+	secret = strings.TrimSpace(secret)
 	if secret == "" {
 		err := fmt.Errorf("INTERNAL_WORKER_SECRET is not set")
 		a.emitAndLog("launcher", fmt.Sprintf("Could not recover jobs interrupted by the upgrade: %v", err))
@@ -2994,6 +3012,9 @@ func (a *App) productionEnvPath() string {
 // idempotent: it only fills a key when its current value is missing or a
 // CHANGE_ME placeholder, so repeated calls (e.g. on every start) never rotate
 // already-generated passwords and break the Postgres/RabbitMQ data volumes.
+// Start, stop, pull and read paths all share it, so it never rotates a live
+// secret and never gates on strength; the P1-F internal-secret policy for
+// production starts is hardenInternalWorkerSecretForStart.
 func (a *App) ensureProductionEnv() error {
 	content, err := a.GetEnvContent("prod") // seeds from template if missing
 	if err != nil {
@@ -3032,41 +3053,25 @@ func (a *App) ensureProductionEnv() error {
 		return nil
 	}
 
-	// Generate any missing secrets. Most are only filled when missing/placeholder:
-	// rotating a live POSTGRES/RABBITMQ/REDIS password would desync the data volume
-	// that was initialised with it, so a hand-set value there is preserved.
-	// INTERNAL_WORKER_SECRET backs no volume — it is a shared callback token every
-	// container re-reads at start — so a weak hand-set value ("ligandx") is rotated
-	// too, not just a CHANGE_ME placeholder (P1-F).
+	// Generate any missing secrets. Every key here is only filled when missing or
+	// a CHANGE_ME placeholder: rotating a live POSTGRES/RABBITMQ/REDIS password
+	// would desync the data volume that was initialised with it, so a hand-set
+	// value is preserved. This function also runs on stop, pull and read paths
+	// (via prodEnvArgs and requirePinnedProductionVersion), so it must never
+	// rotate a live value or gate on secret strength. The P1-F rotation and
+	// effective-value gate for INTERNAL_WORKER_SECRET live in
+	// hardenInternalWorkerSecretForStart, invoked only for a production `up`.
 	secretKeys := []string{"POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD", "QC_SECRET_KEY", "LIGANDX_PASSWORD", "FLOWER_PASSWORD", "INTERNAL_WORKER_SECRET"}
 	for _, key := range secretKeys {
-		placeholder := envfile.IsPlaceholder(cur[key])
-		weakInternal := key == "INTERNAL_WORKER_SECRET" && !placeholder && !internalSecretMeetsFloor(cur[key])
-		if !placeholder && !weakInternal {
-			continue
+		if envfile.IsPlaceholder(cur[key]) {
+			v, err := generateAPIKey()
+			if err != nil {
+				return err
+			}
+			if err := setIfPlaceholder(key, v); err != nil {
+				return err
+			}
 		}
-		v, err := generateAPIKey()
-		if err != nil {
-			return err
-		}
-		cur[key] = v
-		if err := a.setProductionEnvValue(key, v); err != nil {
-			return err
-		}
-		if weakInternal {
-			a.emitAndLog("launcher", fmt.Sprintf(
-				"Regenerated a weak INTERNAL_WORKER_SECRET in %s: the hand-set value did not meet the minimum strength floor. Workers and the gateway will use the new value on this start.",
-				a.productionEnvPath()))
-		}
-	}
-
-	// Startup gate (P1-F): after generation/rotation the internal callback secret
-	// must meet the strength floor. Reaching here with a weak value means the write
-	// did not take effect or the generator returned something weak — refuse to
-	// start rather than run with a token that lets anyone forge worker callbacks.
-	if !internalSecretMeetsFloor(cur["INTERNAL_WORKER_SECRET"]) {
-		return fmt.Errorf("INTERNAL_WORKER_SECRET in %s does not meet the minimum strength floor (>= %d high-entropy characters); it could not be regenerated automatically",
-			a.productionEnvPath(), internalSecretMinLen)
 	}
 
 	// Fixed identities.
@@ -4126,6 +4131,73 @@ func internalSecretMeetsFloor(v string) bool {
 		entropy -= p * math.Log2(p)
 	}
 	return entropy >= internalSecretMinEntropyPerChar
+}
+
+// effectiveInternalWorkerSecret resolves INTERNAL_WORKER_SECRET the way the
+// production Compose invocation does. composeEnv hands the launcher's own
+// process environment to `docker compose`, and Compose interpolation gives a
+// set process-env variable precedence over the --env-file (.env.production)
+// value — including a variable set to the empty string. Validating only the
+// dotenv value would therefore miss a weak inherited override that the gateway
+// and workers actually receive (P1-F review finding; precedence confirmed
+// against Compose 5.3.1). The bool reports whether the value came from the
+// process environment rather than the dotenv file.
+func effectiveInternalWorkerSecret(dotenvValue string) (string, bool) {
+	if v, ok := os.LookupEnv("INTERNAL_WORKER_SECRET"); ok {
+		return v, true
+	}
+	return dotenvValue, false
+}
+
+// hardenInternalWorkerSecretForStart is the P1-F start-path policy for the
+// internal callback secret. It runs only from runDockerCompose on a production
+// `up`, never on read/stop/pull paths:
+//
+//  1. Rotate the dotenv value when it is a placeholder or fails the strength
+//     floor. INTERNAL_WORKER_SECRET backs no data volume — every container
+//     re-reads it at start — so rotation is safe here, unlike the volume-bound
+//     passwords ensureProductionEnv deliberately preserves.
+//  2. Gate startup on the EFFECTIVE value Compose will resolve. A weak value
+//     inherited from the launcher's process environment overrides the dotenv
+//     file, and rotating the file cannot fix that, so refuse to start and tell
+//     the user to unset or strengthen the inherited variable.
+func (a *App) hardenInternalWorkerSecretForStart() error {
+	content, err := a.GetEnvContent("prod")
+	if err != nil {
+		return err
+	}
+	dotenv := envfile.Parse(content)["INTERNAL_WORKER_SECRET"]
+	if envfile.IsPlaceholder(dotenv) || !internalSecretMeetsFloor(dotenv) {
+		v, err := generateAPIKey()
+		if err != nil {
+			return err
+		}
+		if err := a.setProductionEnvValue("INTERNAL_WORKER_SECRET", v); err != nil {
+			return err
+		}
+		if !envfile.IsPlaceholder(dotenv) {
+			a.emitAndLog("launcher", fmt.Sprintf(
+				"Regenerated a weak INTERNAL_WORKER_SECRET in %s: the hand-set value did not meet the minimum strength floor. Workers and the gateway will use the new value on this start.",
+				a.productionEnvPath()))
+		}
+		dotenv = v
+	}
+
+	effective, fromProcessEnv := effectiveInternalWorkerSecret(dotenv)
+	if !internalSecretMeetsFloor(effective) {
+		if fromProcessEnv {
+			return fmt.Errorf("INTERNAL_WORKER_SECRET is inherited from the launcher's process environment, which overrides %s for docker compose; the inherited value does not meet the minimum strength floor (>= %d high-entropy characters). Unset INTERNAL_WORKER_SECRET in the environment that starts the launcher (or set a strong value) and try again — the launcher cannot rotate a value it does not own",
+				a.productionEnvPath(), internalSecretMinLen)
+		}
+		return fmt.Errorf("INTERNAL_WORKER_SECRET in %s does not meet the minimum strength floor (>= %d high-entropy characters); it could not be regenerated automatically",
+			a.productionEnvPath(), internalSecretMinLen)
+	}
+	if fromProcessEnv {
+		a.emitAndLog("launcher", fmt.Sprintf(
+			"INTERNAL_WORKER_SECRET is set in the launcher's process environment; docker compose uses it instead of the value in %s.",
+			a.productionEnvPath()))
+	}
+	return nil
 }
 
 func validateEnvCredential(label, value string, minLength int) error {
