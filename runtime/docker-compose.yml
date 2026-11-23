@@ -1070,6 +1070,24 @@ services:
       options:
         max-size: 10m
         max-file: '3'
+  aimnet2-assets-init:
+    security_opt: *id004
+    cap_drop: *id005
+    image: ${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${PRO_VERSION:-${VERSION:-latest}}
+    entrypoint:
+    - sh
+    - -c
+    - 'python -c "import os; from pathlib import Path; from services.qc.model_assets
+      import provision_all; provision_all(Path(os.environ[''AIMNET2_ASSETS_DIR'']))"
+      || echo "AIMNet2 weights not provisioned: see the error above; micro-pKa jobs
+      will report it"; exit 0'
+    environment:
+    - AIMNET2_ASSETS_DIR=/app/data/aimnet2_assets
+    networks:
+    - backend
+    volumes:
+    - aimnet2_assets:/app/data/aimnet2_assets
+    restart: 'no'
   worker-qc:
     security_opt: *id004
     cap_drop: *id005
@@ -1099,7 +1117,10 @@ services:
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_QC_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${PRO_VERSION:-${VERSION:-latest}}
     - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
+    - AIMNET2_ASSETS_DIR=/app/data/aimnet2_assets
     depends_on:
+      aimnet2-assets-init:
+        condition: service_completed_successfully
       scientific-artifact-init:
         condition: service_completed_successfully
       rabbitmq:
