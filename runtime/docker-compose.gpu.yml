@@ -1,21 +1,34 @@
 # GENERATED from the canonical overlay and selected runtime service set.
 x-gpu-reservation:
-  devices: &id001
+  devices: &id002
   - nvidia.com/gpu=all
+x-gpu-slots-volume:
+  volumes: &id001
+  - gpu_slots:/app/data/gpu_slots
 services:
   md:
-    devices: *id001
+    volumes: *id001
+    devices: *id002
   worker-gpu-short:
-    devices: *id001
+    volumes: *id001
+    devices: *id002
   worker-proto:
-    devices: *id001
+    volumes: *id001
+    devices: *id002
   worker-bioemu:
-    devices: *id001
+    volumes: *id001
+    devices: *id002
   abfe:
-    devices: *id001
+    volumes: *id001
+    devices: *id002
   rbfe:
-    devices: *id001
+    volumes: *id001
+    devices: *id002
   boltz2:
-    devices: *id001
+    volumes: *id001
+    devices: *id002
   worker-gpu-long:
-    devices: *id001
+    volumes: *id001
+    devices: *id002
+volumes:
+  gpu_slots: null

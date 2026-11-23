@@ -55,12 +55,35 @@ services:
     command:
     - sh
     - -ec
-    - mkdir -p /app/data/scientific_artifacts && chmod 1777 /app/data/scientific_artifacts
-      && find /app/data/scientific_artifacts -mindepth 1 -maxdepth 1 -type d -exec
-      chmod 1777 {} +
+    - "case \"$${SCIENTIFIC_ARTIFACT_GID}\" in\n  ''|*[!0-9]*) echo \"SCIENTIFIC_ARTIFACT_GID\
+      \ must be numeric\" >&2; exit 64 ;;\nesac\nmkdir -p /app/data/scientific_artifacts\n\
+      chgrp -R \"$${SCIENTIFIC_ARTIFACT_GID}\" /app/data/scientific_artifacts\nfind\
+      \ /app/data/scientific_artifacts -type d -exec chmod u+rwx,g+rwx,g+s,o-rwx {}\
+      \ +\n"
+    environment:
+      SCIENTIFIC_ARTIFACT_GID: ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     user: 0:0
     volumes:
     - scientific_artifacts:/app/data/scientific_artifacts
+    restart: 'no'
+  gpu-slots-init:
+    security_opt: *id001
+    cap_drop: *id002
+    cap_add: *id003
+    image: alpine@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
+    command:
+    - sh
+    - -ec
+    - "case \"$${GPU_SLOTS_GID}\" in\n  ''|*[!0-9]*) echo \"GPU_SLOTS_GID must be\
+      \ numeric\" >&2; exit 64 ;;\nesac\nmkdir -p /app/data/gpu_slots\nchgrp -R \"\
+      $${GPU_SLOTS_GID}\" /app/data/gpu_slots\nfind /app/data/gpu_slots -type d -exec\
+      \ chmod u+rwx,g+rwx,g+s,o-rwx {} +\ntouch /app/data/gpu_slots/admission.lock\n\
+      chgrp \"$${GPU_SLOTS_GID}\" /app/data/gpu_slots/admission.lock\nchmod 0664 /app/data/gpu_slots/admission.lock\n"
+    environment:
+      GPU_SLOTS_GID: ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
+    user: 0:0
+    volumes:
+    - gpu_slots:/app/data/gpu_slots
     restart: 'no'
   runtime-license-init:
     security_opt: *id001
@@ -132,6 +155,8 @@ services:
     image: ghcr.io/kon-218/ligand-x/gateway:${VERSION:-latest}
     command:
     - gateway
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     stop_grace_period: 30s
     ports:
     - ${LIGANDX_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000
@@ -238,6 +263,8 @@ services:
     command:
     - structure
     - '8001'
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     networks:
     - backend
     expose:
@@ -293,6 +320,8 @@ services:
     command:
     - pocket_finder
     - '8012'
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     networks:
     - backend
     volumes:
@@ -472,6 +501,8 @@ services:
     command:
     - alignment
     - '8007'
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     networks:
     - backend
     expose:
@@ -672,8 +703,14 @@ services:
     - '8003'
     networks:
     - backend
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     volumes:
     - md_outputs:/app/data/md_outputs
+    - gpu_slots:/app/data/gpu_slots
+    depends_on:
+      gpu-slots-init:
+        condition: service_completed_successfully
     expose:
     - '8003'
     environment:
@@ -728,6 +765,7 @@ services:
     volumes:
     - abfe_outputs:/app/data/abfe_outputs
     - scientific_artifacts:/app/data/scientific_artifacts
+    - gpu_slots:/app/data/gpu_slots
     expose:
     - '8010'
     environment:
@@ -747,6 +785,8 @@ services:
       (see .env.example)}
     depends_on:
       scientific-output-init:
+        condition: service_completed_successfully
+      gpu-slots-init:
         condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
@@ -791,6 +831,7 @@ services:
     volumes:
     - rbfe_outputs:/app/data/rbfe_outputs
     - scientific_artifacts:/app/data/scientific_artifacts
+    - gpu_slots:/app/data/gpu_slots
     expose:
     - '8011'
     environment:
@@ -811,6 +852,8 @@ services:
       (see .env.example)}
     depends_on:
       scientific-output-init:
+        condition: service_completed_successfully
+      gpu-slots-init:
         condition: service_completed_successfully
       docking:
         condition: service_started
@@ -902,6 +945,8 @@ services:
     - '8005'
     networks:
     - backend
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     volumes:
     - ${MMSEQS2_HOST_PATH:-/opt/mmseqs}:/opt/mmseqs:ro
     - ${MSA_DATABASES_HOST_PATH:-./data/msa_databases}:/data/msa_databases:ro
@@ -909,8 +954,11 @@ services:
     - boltz_outputs:/app/data/boltz_results_input
     - runtime_settings:/app/data/settings
     - boltz_model_cache:/home/appuser/.boltz
+    - gpu_slots:/app/data/gpu_slots
     depends_on:
       boltz-model-cache-init:
+        condition: service_completed_successfully
+      gpu-slots-init:
         condition: service_completed_successfully
     expose:
     - '8005'
@@ -1025,6 +1073,8 @@ services:
     init: true
     command:
     - worker-qc
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     stop_grace_period: 120s
     networks:
     - backend
@@ -1097,6 +1147,8 @@ services:
     stop_grace_period: 120s
     networks:
     - backend
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     environment:
     - MSA_MMSEQS_BINARY=/opt/mmseqs/bin/mmseqs
     - MMSEQS2_DATABASE=${MMSEQS2_DATABASE:-/data/msa_databases/uniref90}
@@ -1120,6 +1172,8 @@ services:
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully
+      gpu-slots-init:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       redis:
@@ -1131,6 +1185,7 @@ services:
     - scientific_artifacts:/app/data/scientific_artifacts
     - qc_jobs:/app/data/qc_jobs
     - boltz_outputs:/app/data/boltz_results_input
+    - gpu_slots:/app/data/gpu_slots
     healthcheck:
       test:
       - CMD
@@ -1192,6 +1247,8 @@ services:
         condition: service_completed_successfully
       scientific-artifact-init:
         condition: service_completed_successfully
+      gpu-slots-init:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       redis:
@@ -1202,6 +1259,7 @@ services:
     - abfe_outputs:/app/data/abfe_outputs
     - rbfe_outputs:/app/data/rbfe_outputs
     - scientific_artifacts:/app/data/scientific_artifacts
+    - gpu_slots:/app/data/gpu_slots
     healthcheck:
       test:
       - CMD
@@ -1235,6 +1293,8 @@ services:
     init: true
     command:
     - worker-cpu
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     stop_grace_period: 120s
     networks:
     - backend
@@ -1303,6 +1363,8 @@ services:
     init: true
     command:
     - worker-control
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     stop_grace_period: 120s
     networks:
     - backend
@@ -1374,6 +1436,8 @@ services:
     init: true
     command:
     - worker-reinvent
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     stop_grace_period: 120s
     networks:
     - backend
@@ -1440,6 +1504,8 @@ services:
     stop_grace_period: 120s
     networks:
     - backend
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     environment:
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
@@ -1465,6 +1531,8 @@ services:
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully
+      gpu-slots-init:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       redis:
@@ -1485,6 +1553,7 @@ services:
       bind:
         create_host_path: false
     - scientific_artifacts:/app/data/scientific_artifacts
+    - gpu_slots:/app/data/gpu_slots
     - ${PROTO_HOME_HOST:-/opt/proto}:${PROTO_HOME:-/opt/proto}:ro
     - ${PROTO_MODEL_CACHE_HOST:-/models/proto}:${PROTO_MODEL_CACHE:-/models/proto}:ro
     healthcheck:
@@ -1524,6 +1593,8 @@ services:
     stop_grace_period: 120s
     networks:
     - backend
+    group_add:
+    - ${LIGANDX_SCIENTIFIC_OUTPUT_GID:-2000}
     environment:
     - APP_ENV=${APP_ENV:-production}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
@@ -1548,6 +1619,8 @@ services:
         condition: service_completed_successfully
       bioemu-outputs-init:
         condition: service_completed_successfully
+      gpu-slots-init:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       redis:
@@ -1559,6 +1632,7 @@ services:
     - bioemu_cache:/data/bioemu_cache
     - colabfold_cache:/data/colabfold_cache
     - scientific_artifacts:/app/data/scientific_artifacts
+    - gpu_slots:/app/data/gpu_slots
     shm_size: 8gb
     healthcheck:
       test:
@@ -1923,6 +1997,7 @@ volumes:
   runtime_settings: null
   runtime_license: null
   scientific_artifacts: null
+  gpu_slots: null
   reinvent_campaigns: null
   kinetics_jobs: null
   bioemu_outputs: null
