@@ -654,6 +654,7 @@ services:
     - backend
     volumes:
     - docking_outputs:/app/data/docking_outputs
+    - runtime_settings:/app/data/settings
     expose:
     - '8002'
     environment:
@@ -662,6 +663,7 @@ services:
     - LIGANDX_PASSWORD=${LIGANDX_PASSWORD:-}
     - LIGANDX_DEPLOYMENT_MODE=${LIGANDX_DEPLOYMENT_MODE:-single_user}
     - LIGANDX_ENABLE_CHECKPOINT_PAUSE=${LIGANDX_ENABLE_CHECKPOINT_PAUSE:-false}
+    - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - PYTHONUNBUFFERED=1
     - LOG_LEVEL=${LOG_LEVEL:-INFO}
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://ligandx:${RABBITMQ_PASSWORD:?Must
@@ -1610,6 +1612,7 @@ services:
     - HF_HOME=/data/bioemu_cache/hf
     - COLABFOLD_CACHE=/data/colabfold_cache
     - BIOEMU_MSA_HOST_URL=${BIOEMU_MSA_HOST_URL:-}
+    - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     - GATEWAY_URL=http://gateway:8000
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
@@ -1631,6 +1634,7 @@ services:
     - bioemu_outputs:/app/data/bioemu_outputs
     - bioemu_cache:/data/bioemu_cache
     - colabfold_cache:/data/colabfold_cache
+    - runtime_settings:/app/data/settings
     - scientific_artifacts:/app/data/scientific_artifacts
     - gpu_slots:/app/data/gpu_slots
     shm_size: 8gb
