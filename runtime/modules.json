@@ -44,7 +44,8 @@
       "id": "docking",
       "job_types": [
         "docking",
-        "docking_batch"
+        "docking_batch",
+        "redocking_validation"
       ],
       "maturity": "stable",
       "name": "Molecular Docking",

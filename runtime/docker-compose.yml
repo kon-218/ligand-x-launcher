@@ -1035,6 +1035,7 @@ services:
     - SECRET_KEY=${QC_SECRET_KEY:?Set QC_SECRET_KEY in .env or .env.production}
     - INTERNAL_WORKER_SECRET=${INTERNAL_WORKER_SECRET:?Set INTERNAL_WORKER_SECRET
       (see .env.example)}
+    - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1043,6 +1044,7 @@ services:
     volumes:
     - qc_jobs:/app/data/qc_jobs
     - qc_results:/app/data/qc_results_db
+    - runtime_settings:/app/data/settings
     - ${ORCA_HOST_PATH:-/opt/orca}:/opt/orca:ro
     healthcheck:
       test:
@@ -1096,6 +1098,7 @@ services:
       (see .env.example)}
     - LIGANDX_IMAGE_DIGEST=${LIGANDX_WORKER_QC_IMAGE_DIGEST:-}
     - LIGANDX_IMAGE_REF=${LIGANDX_PRO_IMAGE_PREFIX:-ghcr.io/kon-218/ligand-x-pro}/worker-qc:${PRO_VERSION:-${VERSION:-latest}}
+    - LIGANDX_SETTINGS_FILE=/app/data/settings/settings.json
     depends_on:
       scientific-artifact-init:
         condition: service_completed_successfully
@@ -1111,6 +1114,8 @@ services:
     - qc_jobs:/app/data/qc_jobs
     - qc_results:/app/data/qc_results_db
     - scientific_artifacts:/app/data/scientific_artifacts
+    - runtime_settings:/app/data/settings
+    - aimnet2_assets:/app/data/aimnet2_assets
     - ${ORCA_HOST_PATH:-/opt/orca}:/opt/orca:ro
     healthcheck:
       test:
@@ -1996,6 +2001,7 @@ volumes:
   boltz_outputs: null
   boltz_model_cache: null
   qc_jobs: null
+  aimnet2_assets: null
   qc_results: null
   msa_cache: null
   runtime_settings: null
