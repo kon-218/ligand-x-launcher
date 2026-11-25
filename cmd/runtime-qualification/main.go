@@ -132,7 +132,14 @@ func run(input io.Reader, output io.Writer) error {
 	return err
 }
 
+// enabledPreviewBundles is injected with -X main.enabledPreviewBundles=<labels>
+// when the candidate ships an opt-in preview bundle, exactly as the Makefile does
+// for the release launcher. Without it the adapter is the stable launcher and
+// refuses a preview runtime ("requires an explicitly selected preview launcher").
+var enabledPreviewBundles string
+
 func main() {
+	launcher.SetPreviewBundles(enabledPreviewBundles)
 	if err := run(os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
